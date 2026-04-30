@@ -1,0 +1,28 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "tabWidth": 2,
+  "singleQuote": true,
+  "trailingComma": "all",
+  "semi": true,
+  "printWidth": 80,
+  "sortImports": {
+    "internalPattern": ["#src/"]
+  },
+  "sortPackageJson": true,
+  "ignorePatterns": [
+    "**/dist/**",
+    "**/node_modules/**",
+    "**/build/**",
+    "**/coverage/**",
+    "**/logs/**",
+    "**/temp/**",
+    "**/tmp/**",
+    "pnpm-lock.yaml",
+    "**/route-tree.gen.ts",
+    ".changeset/**",
+    ".pnpm-store/**",
+    ".turbo/**",
+    "**/.env*",
+    "**/LICENSE"
+  ]
+}

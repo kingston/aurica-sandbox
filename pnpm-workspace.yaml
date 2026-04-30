@@ -1,0 +1,28 @@
+packages:
+  - apps/*
+  - libs/*
+
+blockExoticSubdeps: true
+
+linkWorkspacePackages: true
+
+minimumReleaseAge: 1440
+
+trustPolicy: no-downgrade
+
+trustPolicyIgnoreAfter: 43800 # 1 month
+
+publishBranch: main
+
+strictDepBuilds: true
+
+savePrefix: ''
+
+saveWorkspaceProtocol: rolling
+
+optimisticRepeatInstall: true
+
+verifyDepsBeforeRun: install
+
+onlyBuiltDependencies:
+  - esbuild
