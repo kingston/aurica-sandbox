@@ -13,8 +13,14 @@ export interface InitShellOptions {
    */
   user: string;
   /**
-   * Hostname (resolvable inside the VM) for the local proxy. e.g.
-   * `host.orb.internal` for OrbStack, `host.lima.internal` for Lima.
+   * Address of the host proxy as seen from inside the VM. For OrbStack this
+   * must be the host's IPv4 on the machine bridge (e.g. `192.168.139.3`),
+   * **not** `host.orb.internal`: OrbStack NATs the latter to `127.0.0.1` on
+   * the host side, so every VM appears to the proxy with the same source
+   * IP and the per-sandbox allowlist (keyed on `remoteIpAddress`) collapses.
+   * Other providers (e.g. Lima with `host.lima.internal`) may pass a
+   * hostname; this script just interpolates the value, so any IP literal
+   * or DNS name that resolves inside the VM is acceptable.
    */
   proxyHost: string;
   /** TCP port the proxy listens on. */

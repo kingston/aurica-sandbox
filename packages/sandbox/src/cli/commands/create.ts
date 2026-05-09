@@ -27,8 +27,6 @@ import {
 import { createOrbExec } from '#src/vm/providers/orb/init.js';
 import { waitForIp } from '#src/vm/wait-for-ip.js';
 
-const PROXY_HOST = 'host.orb.internal';
-
 export async function defaultName(projectDir: string): Promise<string> {
   const folder = path.basename(projectDir);
   try {
@@ -261,10 +259,17 @@ export async function runCreate(
   });
   await signalProxyReload();
 
+  // Resolve the host address VMs should connect to in order to reach the
+  // proxy. The proxy listens on all interfaces, but VMs must hit it on the
+  // provider's bridge IP — `host.orb.internal` is NAT'd to `127.0.0.1` and
+  // collapses every VM into one source IP, defeating the per-sandbox
+  // allowlist.
+  const bridge = await orbProvider.discoverHostBridgeIp();
+
   const exec = createOrbExec(name, linuxUser);
   const builtinScript = createInitShell({
     user: linuxUser,
-    proxyHost: PROXY_HOST,
+    proxyHost: bridge.ip,
     proxyPort: proxy.port,
     pluginBootstrap: expanded.bootstrapScript,
   });

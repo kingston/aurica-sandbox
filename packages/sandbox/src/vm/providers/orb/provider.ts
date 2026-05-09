@@ -3,9 +3,12 @@ import { z } from 'zod';
 
 import type {
   CreateVMOptions,
+  HostBridgeIp,
   SandboxVM,
   SandboxVMProvider,
 } from '#src/vm/types.js';
+
+import { discoverOrbBridgeIp } from './bridge-ip.js';
 
 const recordSchema = z.object({
   id: z.string(),
@@ -133,5 +136,17 @@ export const orbProvider: SandboxVMProvider = {
   async listVMs(): Promise<SandboxVM[]> {
     const records = await orbctlJson(listSchema, 'list');
     return records.map((r) => recordToSandboxVM(r));
+  },
+
+  /**
+   * Resolve the host's IPv4 on OrbStack's machine bridge. See
+   * {@link discoverOrbBridgeIp} for the full strategy; this method just
+   * wires the provider's own `listVMs`/`infoVM` into it.
+   */
+  discoverHostBridgeIp(): Promise<HostBridgeIp> {
+    return discoverOrbBridgeIp({
+      listVMs: () => orbProvider.listVMs(),
+      infoVM: (name) => orbProvider.infoVM(name),
+    });
   },
 };

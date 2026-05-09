@@ -6,7 +6,7 @@ describe('createInitShell', () => {
   it('produces the expected bootstrap script with no plugin snippets', () => {
     const script = createInitShell({
       user: 'sandbox',
-      proxyHost: 'host.orb.internal',
+      proxyHost: '192.168.139.3',
       proxyPort: 9999,
       pluginBootstrap: '',
     });
@@ -16,7 +16,7 @@ describe('createInitShell', () => {
   it('produces the expected bootstrap script with a single plugin snippet', () => {
     const script = createInitShell({
       user: 'sandbox',
-      proxyHost: 'host.orb.internal',
+      proxyHost: '192.168.139.3',
       proxyPort: 9999,
       pluginBootstrap: `# fake plugin
 echo hello`,
@@ -27,7 +27,7 @@ echo hello`,
   it('produces the expected bootstrap script with multiple plugin snippets', () => {
     const script = createInitShell({
       user: 'sandbox',
-      proxyHost: 'host.orb.internal',
+      proxyHost: '192.168.139.3',
       proxyPort: 9999,
       pluginBootstrap: `# fake plugin a
 echo a

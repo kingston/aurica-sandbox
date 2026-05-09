@@ -23,12 +23,12 @@ echo hello
 #    (apt, git, mise install, pnpm) pick up the proxy without any extra
 #    plumbing on the orchestrator side.
 cat > /etc/environment <<EOF
-HTTP_PROXY=http://host.orb.internal:9999
-HTTPS_PROXY=http://host.orb.internal:9999
-http_proxy=http://host.orb.internal:9999
-https_proxy=http://host.orb.internal:9999
-NO_PROXY=localhost,127.0.0.1,host.orb.internal
-no_proxy=localhost,127.0.0.1,host.orb.internal
+HTTP_PROXY=http://192.168.139.3:9999
+HTTPS_PROXY=http://192.168.139.3:9999
+http_proxy=http://192.168.139.3:9999
+https_proxy=http://192.168.139.3:9999
+NO_PROXY=localhost,127.0.0.1,192.168.139.3
+no_proxy=localhost,127.0.0.1,192.168.139.3
 EOF
 
 # 4. iptables: default DROP on OUTPUT for both IPv4 and IPv6, allow loopback,
@@ -40,9 +40,9 @@ EOF
 #    IPv4 address, but only the IPv4 path reaches host services. Picking
 #    just one family blackholes traffic that the other family was supposed
 #    to carry.
-PROXY_IPS=$(getent ahosts host.orb.internal | awk '{ print $1 }' | sort -u)
+PROXY_IPS=$(getent ahosts 192.168.139.3 | awk '{ print $1 }' | sort -u)
 if [ -z "$PROXY_IPS" ]; then
-  echo "failed to resolve host.orb.internal" >&2
+  echo "failed to resolve 192.168.139.3" >&2
   exit 1
 fi
 
@@ -104,12 +104,12 @@ echo b
 #    (apt, git, mise install, pnpm) pick up the proxy without any extra
 #    plumbing on the orchestrator side.
 cat > /etc/environment <<EOF
-HTTP_PROXY=http://host.orb.internal:9999
-HTTPS_PROXY=http://host.orb.internal:9999
-http_proxy=http://host.orb.internal:9999
-https_proxy=http://host.orb.internal:9999
-NO_PROXY=localhost,127.0.0.1,host.orb.internal
-no_proxy=localhost,127.0.0.1,host.orb.internal
+HTTP_PROXY=http://192.168.139.3:9999
+HTTPS_PROXY=http://192.168.139.3:9999
+http_proxy=http://192.168.139.3:9999
+https_proxy=http://192.168.139.3:9999
+NO_PROXY=localhost,127.0.0.1,192.168.139.3
+no_proxy=localhost,127.0.0.1,192.168.139.3
 EOF
 
 # 4. iptables: default DROP on OUTPUT for both IPv4 and IPv6, allow loopback,
@@ -121,9 +121,9 @@ EOF
 #    IPv4 address, but only the IPv4 path reaches host services. Picking
 #    just one family blackholes traffic that the other family was supposed
 #    to carry.
-PROXY_IPS=$(getent ahosts host.orb.internal | awk '{ print $1 }' | sort -u)
+PROXY_IPS=$(getent ahosts 192.168.139.3 | awk '{ print $1 }' | sort -u)
 if [ -z "$PROXY_IPS" ]; then
-  echo "failed to resolve host.orb.internal" >&2
+  echo "failed to resolve 192.168.139.3" >&2
   exit 1
 fi
 
@@ -177,12 +177,12 @@ apt-get install -y --no-install-recommends \\
 #    (apt, git, mise install, pnpm) pick up the proxy without any extra
 #    plumbing on the orchestrator side.
 cat > /etc/environment <<EOF
-HTTP_PROXY=http://host.orb.internal:9999
-HTTPS_PROXY=http://host.orb.internal:9999
-http_proxy=http://host.orb.internal:9999
-https_proxy=http://host.orb.internal:9999
-NO_PROXY=localhost,127.0.0.1,host.orb.internal
-no_proxy=localhost,127.0.0.1,host.orb.internal
+HTTP_PROXY=http://192.168.139.3:9999
+HTTPS_PROXY=http://192.168.139.3:9999
+http_proxy=http://192.168.139.3:9999
+https_proxy=http://192.168.139.3:9999
+NO_PROXY=localhost,127.0.0.1,192.168.139.3
+no_proxy=localhost,127.0.0.1,192.168.139.3
 EOF
 
 # 4. iptables: default DROP on OUTPUT for both IPv4 and IPv6, allow loopback,
@@ -194,9 +194,9 @@ EOF
 #    IPv4 address, but only the IPv4 path reaches host services. Picking
 #    just one family blackholes traffic that the other family was supposed
 #    to carry.
-PROXY_IPS=$(getent ahosts host.orb.internal | awk '{ print $1 }' | sort -u)
+PROXY_IPS=$(getent ahosts 192.168.139.3 | awk '{ print $1 }' | sort -u)
 if [ -z "$PROXY_IPS" ]; then
-  echo "failed to resolve host.orb.internal" >&2
+  echo "failed to resolve 192.168.139.3" >&2
   exit 1
 fi
 
