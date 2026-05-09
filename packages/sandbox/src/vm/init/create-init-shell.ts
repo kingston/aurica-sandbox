@@ -43,14 +43,15 @@ export interface InitShellOptions {
  *     `orbctl run` etc.) inherit the proxy via PAM
  *  4. apply a `DROP`-by-default `OUTPUT` policy on both `iptables` (IPv4)
  *     and `ip6tables` (IPv6) that allows only `lo`, `ESTABLISHED`/`RELATED`,
- *     DNS (udp/tcp 53), and tcp/`<proxyPort>` to `<proxyHost>`. The proxy
- *     IP is pinned at boot via `getent ahosts`, and the proxy-allow rule is
- *     applied to the matching family (IPv4 or IPv6) — both stacks are
- *     locked down regardless, so the VM cannot escape the proxy via
- *     whichever family wasn't resolved. A terminal `REJECT` rule with
- *     `icmp-admin-prohibited` (and the IPv6 equivalent) is appended after
- *     the DROP policy so disallowed traffic fails fast with a clear
- *     `EACCES` instead of hanging until connect timeout.
+ *     DNS (udp/tcp 53), and tcp/`<proxyPort>` to `<proxyHost>`. Every
+ *     address `getent ahosts` returns gets its own pinned allow-rule on the
+ *     matching family — necessary because providers like OrbStack publish
+ *     the proxy hostname on both IPv4 and IPv6, but only one family
+ *     actually carries traffic to host services, and we don't want to
+ *     blackhole the working one by guessing wrong. A terminal `REJECT`
+ *     rule with `icmp-admin-prohibited` (and the IPv6 equivalent) is
+ *     appended after the DROP policy so disallowed traffic fails fast with
+ *     a clear `EACCES` instead of hanging until connect timeout.
  *  5. persist the rules via `iptables-save > /etc/iptables/rules.v4` and
  *     `ip6tables-save > /etc/iptables/rules.v6`
  *
@@ -113,12 +114,15 @@ EOF
 
 # 4. iptables: default DROP on OUTPUT for both IPv4 and IPv6, allow loopback,
 #    established, DNS, and only the host proxy. Resolve the proxy hostname
-#    now so the rule pins the IP rather than relying on DNS at packet time.
-#    'getent ahosts' returns both families; pick the first and apply the
-#    proxy-allow rule on the matching stack. The other stack is still
-#    locked down so traffic cannot escape via the unresolved family.
-PROXY_IP=$(getent ahosts ${proxyHost} | awk '{ print $1; exit }')
-if [ -z "$PROXY_IP" ]; then
+#    now so the rules pin the IPs rather than relying on DNS at packet time.
+#    'getent ahosts' returns every address (both families). We pin a rule for
+#    each address so the apps can use whichever family the network actually
+#    delivers — e.g. on OrbStack the proxy hostname has both an IPv6 and
+#    IPv4 address, but only the IPv4 path reaches host services. Picking
+#    just one family blackholes traffic that the other family was supposed
+#    to carry.
+PROXY_IPS=$(getent ahosts ${proxyHost} | awk '{ print $1 }' | sort -u)
+if [ -z "$PROXY_IPS" ]; then
   echo "failed to resolve ${proxyHost}" >&2
   exit 1
 fi
@@ -132,11 +136,13 @@ for ipt in iptables ip6tables; do
   $ipt -A OUTPUT -p tcp --dport 53 -j ACCEPT
 done
 
-# Allow the proxy on whichever family resolved. ':' in the address means IPv6.
-case "$PROXY_IP" in
-  *:*) ip6tables -A OUTPUT -p tcp -d "$PROXY_IP" --dport ${proxyPort} -j ACCEPT ;;
-  *)   iptables  -A OUTPUT -p tcp -d "$PROXY_IP" --dport ${proxyPort} -j ACCEPT ;;
-esac
+# Allow the proxy on every resolved family. ':' in the address means IPv6.
+while IFS= read -r ip; do
+  case "$ip" in
+    *:*) ip6tables -A OUTPUT -p tcp -d "$ip" --dport ${proxyPort} -j ACCEPT ;;
+    *)   iptables  -A OUTPUT -p tcp -d "$ip" --dport ${proxyPort} -j ACCEPT ;;
+  esac
+done <<< "$PROXY_IPS"
 
 iptables  -P OUTPUT DROP
 ip6tables -P OUTPUT DROP

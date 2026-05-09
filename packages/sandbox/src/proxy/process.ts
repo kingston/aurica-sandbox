@@ -5,6 +5,19 @@ import type { State } from '#src/state/index.js';
 
 import { HostProxy } from './host-proxy.js';
 
+/**
+ * Fixed port for the singleton host proxy. Pinned (rather than ephemeral) so
+ * that VMs created against an earlier proxy run still reach the proxy after a
+ * restart — their iptables rules and `/etc/environment` bake in the port at
+ * creation time and aren't rewritten when the proxy comes back up.
+ *
+ * Chosen from the IANA dynamic/private range (49152–65535) to avoid colliding
+ * with well-known services. If this port is busy, `mockttp.start()` will
+ * reject and `runProxyProcess` surfaces the error — that's the desired
+ * behavior; we don't want to silently land on a different port.
+ */
+const PROXY_PORT = 51_217;
+
 export interface ProxyProcessHandle {
   host: string;
   port: number;
@@ -48,7 +61,10 @@ export async function runProxyProcess(
   }
 
   const credentialCache = new CredentialCache({ idleTimeoutSeconds: 900 });
-  const proxy = await HostProxy.create({ resolver: credentialCache });
+  const proxy = await HostProxy.create({
+    resolver: credentialCache,
+    port: PROXY_PORT,
+  });
   const addr = await proxy.listen();
 
   await withState((state) => {

@@ -8,7 +8,7 @@
   "type": "module",
   "scripts": {
     "start": "tsx --conditions=@aurica/source packages/sandbox/src/bin/aurica-sandbox.ts",
-    "dev": "turbo dev",
+    "dev": "tsx watch --conditions=@aurica/source packages/sandbox/src/bin/aurica-sandbox.ts",
     "build": "turbo build",
     "typecheck": "turbo typecheck",
     "check": "pnpm lint:fix && pnpm format",
