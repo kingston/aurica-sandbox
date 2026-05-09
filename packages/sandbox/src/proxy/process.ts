@@ -130,9 +130,7 @@ export async function runProxyProcess(
     void (async () => {
       const fresh = await readState();
       await applyRegistrations(proxy, watcher, fresh, linuxUser, log);
-      log.info(
-        `proxy reloaded: ${proxy.allDomains().join(', ') || '(no domains)'}`,
-      );
+      log.info(formatReloadSummary(proxy.summary()));
     })();
   };
   process.on('SIGHUP', onHup);
@@ -224,6 +222,23 @@ async function loadAndRegister(
     watcher.watch(entry.name, sandboxConfigPath(entry.projectDir));
     return false;
   }
+}
+
+/**
+ * Format a one-line-per-sandbox SIGHUP reload summary. `(pending)` stands in
+ * for `sourceIp: null` (registration exists but the VM's IP hasn't been
+ * allocated yet). Empty registration set logs `(no sandboxes)`.
+ */
+function formatReloadSummary(
+  entries: { name: string; sourceIp: string | null; domains: string[] }[],
+): string {
+  if (entries.length === 0) return 'proxy reloaded: (no sandboxes)';
+  const lines = entries.map((e) => {
+    const ip = e.sourceIp ?? 'pending';
+    const domains = e.domains.join(', ') || '(no domains)';
+    return `  ${e.name} (${ip}): ${domains}`;
+  });
+  return `proxy reloaded:\n${lines.join('\n')}`;
 }
 
 /**

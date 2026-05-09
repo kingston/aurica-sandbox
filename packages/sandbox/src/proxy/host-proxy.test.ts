@@ -153,12 +153,12 @@ describe('HostProxy (mockttp-backed)', () => {
       actions: [],
     });
     await proxy.refresh();
-    expect(new Set(proxy.allDomains())).toEqual(
-      new Set(['127.0.0.1', '*.example.com']),
-    );
+    const after = proxy.summary().flatMap((e) => e.domains);
+    expect(new Set(after)).toEqual(new Set(['127.0.0.1', '*.example.com']));
     proxy.unregister('other');
     await proxy.refresh();
-    expect(new Set(proxy.allDomains())).toEqual(new Set(['127.0.0.1']));
+    const afterUnregister = proxy.summary().flatMap((e) => e.domains);
+    expect(new Set(afterUnregister)).toEqual(new Set(['127.0.0.1']));
   });
 
   it('rejects allowlisted hosts when the registration sourceIp is null', async () => {

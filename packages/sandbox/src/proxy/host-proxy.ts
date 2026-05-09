@@ -100,13 +100,18 @@ export class HostProxy {
     return this.listenAddress;
   }
 
-  /** All allowlisted domain patterns from registered sandboxes, deduped. */
-  allDomains(): string[] {
-    const set = new Set<string>();
-    for (const reg of this.registrations.values()) {
-      for (const d of reg.domains) set.add(d);
-    }
-    return [...set];
+  /**
+   * Per-sandbox snapshot of the current registration set, intended for logging.
+   * Returns one entry per registered name with its `sourceIp` (nullable while
+   * the VM's IP is still being allocated) and the domain patterns currently
+   * allowlisted for that sandbox.
+   */
+  summary(): { name: string; sourceIp: string | null; domains: string[] }[] {
+    return [...this.registrations.entries()].map(([name, reg]) => ({
+      name,
+      sourceIp: reg.sourceIp,
+      domains: [...reg.domains],
+    }));
   }
 
   /**
@@ -117,23 +122,25 @@ export class HostProxy {
     return this.server;
   }
 
+  /**
+   * Registrations whose `sourceIp` matches the given remote IP. Skips
+   * registrations with `sourceIp: null` (sandbox known but IP not yet
+   * allocated — those are inert until SIGHUP re-registers them).
+   */
+  private registrationsForIp(remoteIp: string): SandboxRegistration[] {
+    return [...this.registrations.values()].filter(
+      (reg) => reg.sourceIp === remoteIp,
+    );
+  }
+
   private actionsFor(remoteIp: string): ProxyAction[] {
-    const out: ProxyAction[] = [];
-    for (const reg of this.registrations.values()) {
-      if (reg.sourceIp === null || reg.sourceIp !== remoteIp) continue;
-      for (const a of reg.actions) out.push(a);
-    }
-    return out;
+    return this.registrationsForIp(remoteIp).flatMap((reg) => [...reg.actions]);
   }
 
   private isAllowedFor(host: string, remoteIp: string): boolean {
-    for (const reg of this.registrations.values()) {
-      if (reg.sourceIp === null || reg.sourceIp !== remoteIp) continue;
-      for (const pattern of reg.domains) {
-        if (matchDomain(pattern, host)) return true;
-      }
-    }
-    return false;
+    return this.registrationsForIp(remoteIp).some((reg) =>
+      reg.domains.some((pattern) => matchDomain(pattern, host)),
+    );
   }
 
   private async rebuildRules(): Promise<void> {
