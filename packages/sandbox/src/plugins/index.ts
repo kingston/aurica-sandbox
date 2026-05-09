@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
 
 import type { ProxyAction } from '#src/config/proxy-action.js';
 
@@ -42,13 +42,26 @@ export function pluginDomainsForGitCoverage(plugin: Plugin): string[] {
 }
 
 /**
- * Mint a placeholder string unique to one plugin. The proxy uses
+ * Derive a placeholder string from a plugin's config. The proxy uses
  * `(host, header, placeholder)` to dispatch substitutions, so colliding
  * placeholders across plugins would cause one resolver to clobber another.
- * 8 random bytes (16 hex chars) is plenty.
+ *
+ * The placeholder MUST be deterministic: the value is baked into the VM at
+ * create-time (e.g. `git config http.<url>.extraHeader`), and the proxy
+ * re-derives rules from `.aurica/sandbox.json` on every reload. A random
+ * placeholder would diverge between the two and break credential
+ * substitution after the first reload.
+ *
+ * 16 hex chars (64 bits of SHA-256) is enough collision resistance for the
+ * tiny set of plugins in any one sandbox.
  */
-function mintPlaceholder(): string {
-  return `__AURICA_TOKEN_${randomBytes(8).toString('hex').toUpperCase()}__`;
+function placeholderFor(plugin: Plugin): string {
+  const digest = createHash('sha256')
+    .update(JSON.stringify(plugin))
+    .digest('hex')
+    .slice(0, 16)
+    .toUpperCase();
+  return `__AURICA_TOKEN_${digest}__`;
 }
 
 /**
@@ -85,7 +98,7 @@ export function expandPlugins(
   const bootstrapSnippets: string[] = [];
 
   for (const plugin of plugins) {
-    const placeholder = mintPlaceholder();
+    const placeholder = placeholderFor(plugin);
     const expanded = expandPlugin(plugin, placeholder, ctx);
     for (const d of expanded.domains) domains.add(d);
     actions.push(...expanded.actions);

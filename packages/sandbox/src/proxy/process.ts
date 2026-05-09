@@ -1,8 +1,11 @@
+import { loadSandboxConfig, sandboxConfigPath } from '#src/config/index.js';
 import { CredentialCache } from '#src/credentials/index.js';
 import { logger } from '#src/logger.js';
 import { readState, withState } from '#src/state/index.js';
-import type { State } from '#src/state/index.js';
+import type { SandboxEntry, State } from '#src/state/index.js';
 
+import { SandboxConfigWatcher } from './config-watcher.js';
+import { deriveRulesFromConfig } from './derive-rules.js';
 import { HostProxy } from './host-proxy.js';
 
 /**
@@ -36,10 +39,17 @@ interface ProxyProcessOptions {
 /**
  * Boot the long-running proxy process. Claims `state.proxy` (rejecting if
  * another live proxy already holds it), seeds registrations from
- * `state.sandboxes`, and installs SIGHUP / SIGINT / SIGTERM handlers.
+ * `state.sandboxes` (loading rules directly from each sandbox's
+ * `.aurica/sandbox.json`), and installs SIGHUP / SIGINT / SIGTERM handlers.
  *
- * Returns a handle whose `stop()` clears `state.proxy` and tears the proxy
- * down. The signal handlers also call `stop()` and `process.exit(0)`.
+ * Also starts a chokidar watcher per registered sandbox.json — edits to the
+ * file are picked up automatically without needing a SIGHUP. SIGHUP itself
+ * is still used for register/unregister events (a new sandbox appears or an
+ * existing one is destroyed).
+ *
+ * Returns a handle whose `stop()` closes the watchers, clears `state.proxy`,
+ * and tears the proxy down. The signal handlers also call `stop()` and
+ * `process.exit(0)`.
  */
 export async function runProxyProcess(
   options: ProxyProcessOptions = {},
@@ -76,7 +86,29 @@ export async function runProxyProcess(
     };
   });
 
-  await applyRegistrations(proxy, await readState());
+  const watcher = new SandboxConfigWatcher();
+  const linuxUser = process.env.USER ?? 'sandbox';
+
+  watcher.setListener((event, name, path) => {
+    if (event === 'unlink') {
+      log.error(
+        `sandbox.json removed for ${name} (${path}); keeping last-good rules in effect`,
+      );
+      return;
+    }
+    void (async () => {
+      const state = await readState();
+      const entry = state.sandboxes[name];
+      if (!entry) return;
+      const ok = await loadAndRegister(proxy, watcher, entry, linuxUser, log);
+      if (ok) {
+        await proxy.refresh();
+        log.info(`proxy reloaded for ${name} from ${path}`);
+      }
+    })();
+  });
+
+  await applyRegistrations(proxy, watcher, await readState(), linuxUser, log);
 
   // Visibility: mockttp emits structured events for every request lifecycle.
   const events = proxy.events();
@@ -97,7 +129,7 @@ export async function runProxyProcess(
   const onHup = (): void => {
     void (async () => {
       const fresh = await readState();
-      await applyRegistrations(proxy, fresh);
+      await applyRegistrations(proxy, watcher, fresh, linuxUser, log);
       log.info(
         `proxy reloaded: ${proxy.allDomains().join(', ') || '(no domains)'}`,
       );
@@ -110,6 +142,7 @@ export async function runProxyProcess(
     if (stopping) return;
     stopping = true;
     process.off('SIGHUP', onHup);
+    await watcher.closeAll();
     await proxy.close();
     await withState((state) => {
       if (state.proxy?.pid === process.pid) state.proxy = null;
@@ -129,22 +162,68 @@ export async function runProxyProcess(
   return { host: addr.host, port: addr.port, stop };
 }
 
+/**
+ * Reconcile the proxy's registration set + watcher set against the current
+ * `state.sandboxes`. For each newly-present sandbox: load rules from disk
+ * and start watching its sandbox.json. For each removed sandbox: unregister
+ * + stop watching. Always ends with `proxy.refresh()`.
+ */
 async function applyRegistrations(
   proxy: HostProxy,
+  watcher: SandboxConfigWatcher,
   state: State,
+  linuxUser: string,
+  log: ProxyLog,
 ): Promise<void> {
   const wanted = new Set(Object.keys(state.sandboxes));
   for (const name of proxy.registeredNames()) {
-    if (!wanted.has(name)) proxy.unregister(name);
+    if (!wanted.has(name)) {
+      proxy.unregister(name);
+      watcher.unwatch(name);
+    }
   }
-  for (const [name, entry] of Object.entries(state.sandboxes)) {
-    proxy.register(name, {
-      sourceIp: entry.ip,
-      domains: entry.domains,
-      actions: entry.actions,
-    });
+  for (const entry of Object.values(state.sandboxes)) {
+    await loadAndRegister(proxy, watcher, entry, linuxUser, log);
   }
   await proxy.refresh();
+}
+
+/**
+ * Load `<projectDir>/.aurica/sandbox.json` for one sandbox, derive the
+ * proxy rules, register them with the proxy, and ensure the file is being
+ * watched.
+ *
+ * Returns `true` on success. On failure (file missing, parse error, schema
+ * failure, cross-field invariant failure) logs an error and returns `false`
+ * — any prior registration is left intact so transient bad saves don't
+ * disrupt live traffic.
+ */
+async function loadAndRegister(
+  proxy: HostProxy,
+  watcher: SandboxConfigWatcher,
+  entry: SandboxEntry,
+  linuxUser: string,
+  log: ProxyLog,
+): Promise<boolean> {
+  try {
+    const config = await loadSandboxConfig(entry.projectDir);
+    const { domains, actions } = deriveRulesFromConfig(config, {
+      user: linuxUser,
+    });
+    proxy.register(entry.name, {
+      sourceIp: entry.ip,
+      domains,
+      actions,
+    });
+    watcher.watch(entry.name, sandboxConfigPath(entry.projectDir));
+    return true;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log.error(`failed to load rules for ${entry.name}: ${msg}`);
+    // Still watch the file so a corrected save triggers a retry.
+    watcher.watch(entry.name, sandboxConfigPath(entry.projectDir));
+    return false;
+  }
 }
 
 /**

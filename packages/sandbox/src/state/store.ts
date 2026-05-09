@@ -4,7 +4,7 @@ import path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { z } from 'zod';
 
-import { proxyActionSchema, stateFilePath } from '#src/config/index.js';
+import { stateFilePath } from '#src/config/index.js';
 
 const sandboxEntrySchema = z.object({
   name: z.string(),
@@ -17,8 +17,6 @@ const sandboxEntrySchema = z.object({
     'stopped',
     'failed-init',
   ]),
-  domains: z.array(z.string()),
-  actions: z.array(proxyActionSchema),
   ip: z.string().nullable(),
   createdAt: z.string(),
 });

@@ -6,13 +6,9 @@ import { execa } from 'execa';
 import ora from 'ora';
 
 import { loadSandboxConfig } from '#src/config/index.js';
-import type { GitConfig, ProxyAction } from '#src/config/index.js';
 import { logger } from '#src/logger.js';
-import {
-  expandPlugins,
-  type GithubPlugin,
-  type Plugin,
-} from '#src/plugins/index.js';
+import { deriveFromConfig } from '#src/proxy/derive-rules.js';
+import { gitNeedsHostLevelPlaceholder } from '#src/proxy/git-actions.js';
 import { ensureCA } from '#src/proxy/index.js';
 import {
   requireRunningProxy,
@@ -43,68 +39,6 @@ export async function defaultName(projectDir: string): Promise<string> {
     /* not a git repo; fall through */
   }
   return folder;
-}
-
-/**
- * Parse a github URL like `https://github.com/foo/bar` or
- * `https://github.com/foo/bar.git` into `{ owner, repo }`. Returns null for
- * any URL whose host isn't `github.com` or whose path doesn't have at least
- * two segments.
- */
-function parseGithubRepoFromUrl(
-  url: string,
-): { owner: string; repo: string } | null {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return null;
-  }
-  if (parsed.hostname.toLowerCase() !== 'github.com') return null;
-  const segments = parsed.pathname.replace(/^\//, '').split('/');
-  if (segments.length < 2) return null;
-  const [owner, repoRaw] = segments;
-  if (!owner || !repoRaw) return null;
-  const repo = repoRaw.replace(/\.git$/, '');
-  if (!repo) return null;
-  return { owner, repo };
-}
-
-/**
- * Synthesize a github plugin from `config.git` when both URL and token
- * are set and the URL points at github.com. Returns null otherwise so the
- * caller falls back to host-only auth.
- */
-export function githubPluginFromGitConfig(
-  git: GitConfig | undefined,
-): GithubPlugin | null {
-  if (!git?.tokenSource) return null;
-  const repo = parseGithubRepoFromUrl(git.url);
-  if (!repo) return null;
-  return {
-    type: 'github',
-    repositories: [{ name: `${repo.owner}/${repo.repo}` }],
-    token: git.tokenSource,
-  };
-}
-
-/**
- * Fallback host-level proxy action for non-github git URLs (gitlab,
- * bitbucket, self-hosted). Preserves pre-integrations behavior for hosts
- * with no provider yet.
- */
-export function nonGithubGitAction(
-  git: GitConfig | undefined,
-): ProxyAction | null {
-  if (!git?.tokenSource) return null;
-  if (parseGithubRepoFromUrl(git.url)) return null;
-  return {
-    domain: new URL(git.url).host,
-    hook: 'replaceApiKey',
-    header: 'Authorization',
-    placeholderValue: GIT_TOKEN_PLACEHOLDER,
-    replacementValue: git.tokenSource,
-  };
 }
 
 async function statDirOrNull(p: string): Promise<string | null> {
@@ -224,35 +158,21 @@ export async function runCreate(
 
   const linuxUser = process.env.USER ?? 'sandbox';
 
-  // Desugar config.git into a synthetic github plugin when the git URL points
-  // at github.com. Non-github hosts (gitlab, bitbucket) fall back to a
-  // bespoke host-level action since there's no plugin provider for them.
-  const syntheticGithubPlugin = githubPluginFromGitConfig(config.git);
-  const fallbackGitAction = nonGithubGitAction(config.git);
-
-  const allPlugins: Plugin[] = [
-    ...config.plugins,
-    ...(syntheticGithubPlugin ? [syntheticGithubPlugin] : []),
-  ];
-  const expanded = expandPlugins(allPlugins, { user: linuxUser });
-
-  const allDomains = [...config.proxy.domains, ...expanded.domains];
-  const allActions: ProxyAction[] = [
-    ...config.proxy.actions,
-    ...expanded.actions,
-    ...(fallbackGitAction ? [fallbackGitAction] : []),
-  ];
+  // Desugars config.git into a synthetic github plugin (or a non-github
+  // fallback action) and runs plugin expansion. The full result is needed
+  // here for the in-VM bootstrap (commands + bootstrapScript); the proxy
+  // re-derives just the rules half from disk on every reload.
+  const expanded = deriveFromConfig(config, { user: linuxUser });
 
   // Register the sandbox now (status: 'creating') and reload the proxy so
-  // its allowlist + the synthesized git action are live before init runs
-  // — git clone in init goes through the proxy and needs both.
+  // it picks up the new entry and starts watching the project's
+  // sandbox.json. The proxy reads rules straight from that file, so we no
+  // longer cache `domains`/`actions` in state.
   await withState((state) => {
     state.sandboxes[name] = {
       name,
       projectDir,
       status: 'creating',
-      domains: allDomains,
-      actions: allActions,
       ip,
       createdAt: new Date().toISOString(),
     };
@@ -290,7 +210,7 @@ export async function runCreate(
   // this URL, the github plugin's `commands` already supply a path-prefixed
   // `extraHeader` for the clone — emitting the host-level header too would
   // make git send duplicate `Authorization` headers.
-  const needsHostLevelPlaceholder = fallbackGitAction !== null;
+  const needsHostLevelPlaceholder = gitNeedsHostLevelPlaceholder(config.git);
   const git = config.git
     ? {
         url: config.git.url,

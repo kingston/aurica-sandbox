@@ -11,16 +11,6 @@ const sampleEntry: SandboxEntry = {
   name: 'a',
   projectDir: '/tmp/proj',
   status: 'running',
-  domains: ['*.github.com'],
-  actions: [
-    {
-      domain: 'api.github.com',
-      hook: 'replaceApiKey',
-      header: 'Authorization',
-      placeholderValue: 'github-api-key',
-      replacementValue: 'env:GITHUB_API_KEY',
-    },
-  ],
   ip: '192.168.1.10',
   createdAt: '2026-01-01T00:00:00.000Z',
 };

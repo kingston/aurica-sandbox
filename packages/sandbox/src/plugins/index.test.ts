@@ -69,7 +69,7 @@ describe('expandPlugins', () => {
     expect(headerArgs).toContain('http.https://github.com/c/d.extraHeader');
   });
 
-  it('mints a unique placeholder per plugin', () => {
+  it('derives a unique placeholder per plugin', () => {
     const i1: Plugin = {
       type: 'github',
       repositories: [{ name: 'foo/bar' }],
@@ -86,6 +86,17 @@ describe('expandPlugins', () => {
       expanded.actions.map((a) => a.placeholderValue),
     );
     expect(placeholders.size).toBe(2);
+  });
+
+  it('derives the same placeholder across calls for identical plugin config', () => {
+    const plugin: Plugin = {
+      type: 'github',
+      repositories: [{ name: 'foo/bar' }],
+      token: 'env:GITHUB_TOKEN',
+    };
+    const a = expandPlugins([plugin], ctx);
+    const b = expandPlugins([plugin], ctx);
+    expect(a.actions[0]?.placeholderValue).toBe(b.actions[0]?.placeholderValue);
   });
 
   it('returns empty result when no plugins are provided', () => {

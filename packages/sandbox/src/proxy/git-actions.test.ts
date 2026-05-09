@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
-import { githubPluginFromGitConfig, nonGithubGitAction } from './create.js';
+import {
+  githubPluginFromGitConfig,
+  nonGithubGitAction,
+} from './git-actions.js';
 
 describe('githubPluginFromGitConfig', () => {
   it('builds a synthetic github plugin for a github URL with tokenSource', () => {
