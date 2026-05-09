@@ -1,6 +1,5 @@
 packages:
-  - apps/*
-  - libs/*
+  - packages/*
 
 blockExoticSubdeps: true
 

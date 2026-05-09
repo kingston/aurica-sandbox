@@ -1,0 +1,218 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`createInitShell > produces the expected bootstrap script with a single plugin snippet 1`] = `
+"#!/bin/bash
+set -euo pipefail
+IFS=$'\\n\\t'
+trap 'echo "ERROR: \\"$BASH_COMMAND\\" failed at line $LINENO (exit $?)" >&2' ERR
+
+export DEBIAN_FRONTEND=noninteractive
+
+# 1. Base packages. Network must be open — iptables lockdown comes last.
+apt-get update -y
+apt-get install -y --no-install-recommends \\
+  git iptables iptables-persistent ca-certificates curl sudo gnupg
+
+# 2. Plugin bootstrap snippets. Run with the network still open;
+#    iptables lockdown comes last.
+# fake plugin
+echo hello
+
+# 3. Proxy env for post-lockdown shells. /etc/environment is read by PAM at
+#    login, which is what 'orbctl run' triggers, so subsequent commands
+#    (apt, git, mise install, pnpm) pick up the proxy without any extra
+#    plumbing on the orchestrator side.
+cat > /etc/environment <<EOF
+HTTP_PROXY=http://host.orb.internal:9999
+HTTPS_PROXY=http://host.orb.internal:9999
+http_proxy=http://host.orb.internal:9999
+https_proxy=http://host.orb.internal:9999
+NO_PROXY=localhost,127.0.0.1,host.orb.internal
+no_proxy=localhost,127.0.0.1,host.orb.internal
+EOF
+
+# 4. iptables: default DROP on OUTPUT for both IPv4 and IPv6, allow loopback,
+#    established, DNS, and only the host proxy. Resolve the proxy hostname
+#    now so the rule pins the IP rather than relying on DNS at packet time.
+#    'getent ahosts' returns both families; pick the first and apply the
+#    proxy-allow rule on the matching stack. The other stack is still
+#    locked down so traffic cannot escape via the unresolved family.
+PROXY_IP=$(getent ahosts host.orb.internal | awk '{ print $1; exit }')
+if [ -z "$PROXY_IP" ]; then
+  echo "failed to resolve host.orb.internal" >&2
+  exit 1
+fi
+
+# Apply the same skeleton (flush, lo, established, DNS) on both stacks.
+for ipt in iptables ip6tables; do
+  $ipt -F OUTPUT
+  $ipt -A OUTPUT -o lo -j ACCEPT
+  $ipt -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  $ipt -A OUTPUT -p udp --dport 53 -j ACCEPT
+  $ipt -A OUTPUT -p tcp --dport 53 -j ACCEPT
+done
+
+# Allow the proxy on whichever family resolved. ':' in the address means IPv6.
+case "$PROXY_IP" in
+  *:*) ip6tables -A OUTPUT -p tcp -d "$PROXY_IP" --dport 9999 -j ACCEPT ;;
+  *)   iptables  -A OUTPUT -p tcp -d "$PROXY_IP" --dport 9999 -j ACCEPT ;;
+esac
+
+iptables  -P OUTPUT DROP
+ip6tables -P OUTPUT DROP
+
+# Surface a clear error on disallowed traffic instead of letting connects
+# hang until timeout. Default policy is still DROP — this just makes the
+# failure mode visible to the caller.
+iptables  -A OUTPUT -j REJECT --reject-with icmp-admin-prohibited
+ip6tables -A OUTPUT -j REJECT --reject-with icmp6-adm-prohibited
+
+mkdir -p /etc/iptables
+iptables-save  > /etc/iptables/rules.v4
+ip6tables-save > /etc/iptables/rules.v6
+"
+`;
+
+exports[`createInitShell > produces the expected bootstrap script with multiple plugin snippets 1`] = `
+"#!/bin/bash
+set -euo pipefail
+IFS=$'\\n\\t'
+trap 'echo "ERROR: \\"$BASH_COMMAND\\" failed at line $LINENO (exit $?)" >&2' ERR
+
+export DEBIAN_FRONTEND=noninteractive
+
+# 1. Base packages. Network must be open — iptables lockdown comes last.
+apt-get update -y
+apt-get install -y --no-install-recommends \\
+  git iptables iptables-persistent ca-certificates curl sudo gnupg
+
+# 2. Plugin bootstrap snippets. Run with the network still open;
+#    iptables lockdown comes last.
+# fake plugin a
+echo a
+
+# fake plugin b
+echo b
+
+# 3. Proxy env for post-lockdown shells. /etc/environment is read by PAM at
+#    login, which is what 'orbctl run' triggers, so subsequent commands
+#    (apt, git, mise install, pnpm) pick up the proxy without any extra
+#    plumbing on the orchestrator side.
+cat > /etc/environment <<EOF
+HTTP_PROXY=http://host.orb.internal:9999
+HTTPS_PROXY=http://host.orb.internal:9999
+http_proxy=http://host.orb.internal:9999
+https_proxy=http://host.orb.internal:9999
+NO_PROXY=localhost,127.0.0.1,host.orb.internal
+no_proxy=localhost,127.0.0.1,host.orb.internal
+EOF
+
+# 4. iptables: default DROP on OUTPUT for both IPv4 and IPv6, allow loopback,
+#    established, DNS, and only the host proxy. Resolve the proxy hostname
+#    now so the rule pins the IP rather than relying on DNS at packet time.
+#    'getent ahosts' returns both families; pick the first and apply the
+#    proxy-allow rule on the matching stack. The other stack is still
+#    locked down so traffic cannot escape via the unresolved family.
+PROXY_IP=$(getent ahosts host.orb.internal | awk '{ print $1; exit }')
+if [ -z "$PROXY_IP" ]; then
+  echo "failed to resolve host.orb.internal" >&2
+  exit 1
+fi
+
+# Apply the same skeleton (flush, lo, established, DNS) on both stacks.
+for ipt in iptables ip6tables; do
+  $ipt -F OUTPUT
+  $ipt -A OUTPUT -o lo -j ACCEPT
+  $ipt -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  $ipt -A OUTPUT -p udp --dport 53 -j ACCEPT
+  $ipt -A OUTPUT -p tcp --dport 53 -j ACCEPT
+done
+
+# Allow the proxy on whichever family resolved. ':' in the address means IPv6.
+case "$PROXY_IP" in
+  *:*) ip6tables -A OUTPUT -p tcp -d "$PROXY_IP" --dport 9999 -j ACCEPT ;;
+  *)   iptables  -A OUTPUT -p tcp -d "$PROXY_IP" --dport 9999 -j ACCEPT ;;
+esac
+
+iptables  -P OUTPUT DROP
+ip6tables -P OUTPUT DROP
+
+# Surface a clear error on disallowed traffic instead of letting connects
+# hang until timeout. Default policy is still DROP — this just makes the
+# failure mode visible to the caller.
+iptables  -A OUTPUT -j REJECT --reject-with icmp-admin-prohibited
+ip6tables -A OUTPUT -j REJECT --reject-with icmp6-adm-prohibited
+
+mkdir -p /etc/iptables
+iptables-save  > /etc/iptables/rules.v4
+ip6tables-save > /etc/iptables/rules.v6
+"
+`;
+
+exports[`createInitShell > produces the expected bootstrap script with no plugin snippets 1`] = `
+"#!/bin/bash
+set -euo pipefail
+IFS=$'\\n\\t'
+trap 'echo "ERROR: \\"$BASH_COMMAND\\" failed at line $LINENO (exit $?)" >&2' ERR
+
+export DEBIAN_FRONTEND=noninteractive
+
+# 1. Base packages. Network must be open — iptables lockdown comes last.
+apt-get update -y
+apt-get install -y --no-install-recommends \\
+  git iptables iptables-persistent ca-certificates curl sudo gnupg
+
+# 3. Proxy env for post-lockdown shells. /etc/environment is read by PAM at
+#    login, which is what 'orbctl run' triggers, so subsequent commands
+#    (apt, git, mise install, pnpm) pick up the proxy without any extra
+#    plumbing on the orchestrator side.
+cat > /etc/environment <<EOF
+HTTP_PROXY=http://host.orb.internal:9999
+HTTPS_PROXY=http://host.orb.internal:9999
+http_proxy=http://host.orb.internal:9999
+https_proxy=http://host.orb.internal:9999
+NO_PROXY=localhost,127.0.0.1,host.orb.internal
+no_proxy=localhost,127.0.0.1,host.orb.internal
+EOF
+
+# 4. iptables: default DROP on OUTPUT for both IPv4 and IPv6, allow loopback,
+#    established, DNS, and only the host proxy. Resolve the proxy hostname
+#    now so the rule pins the IP rather than relying on DNS at packet time.
+#    'getent ahosts' returns both families; pick the first and apply the
+#    proxy-allow rule on the matching stack. The other stack is still
+#    locked down so traffic cannot escape via the unresolved family.
+PROXY_IP=$(getent ahosts host.orb.internal | awk '{ print $1; exit }')
+if [ -z "$PROXY_IP" ]; then
+  echo "failed to resolve host.orb.internal" >&2
+  exit 1
+fi
+
+# Apply the same skeleton (flush, lo, established, DNS) on both stacks.
+for ipt in iptables ip6tables; do
+  $ipt -F OUTPUT
+  $ipt -A OUTPUT -o lo -j ACCEPT
+  $ipt -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  $ipt -A OUTPUT -p udp --dport 53 -j ACCEPT
+  $ipt -A OUTPUT -p tcp --dport 53 -j ACCEPT
+done
+
+# Allow the proxy on whichever family resolved. ':' in the address means IPv6.
+case "$PROXY_IP" in
+  *:*) ip6tables -A OUTPUT -p tcp -d "$PROXY_IP" --dport 9999 -j ACCEPT ;;
+  *)   iptables  -A OUTPUT -p tcp -d "$PROXY_IP" --dport 9999 -j ACCEPT ;;
+esac
+
+iptables  -P OUTPUT DROP
+ip6tables -P OUTPUT DROP
+
+# Surface a clear error on disallowed traffic instead of letting connects
+# hang until timeout. Default policy is still DROP — this just makes the
+# failure mode visible to the caller.
+iptables  -A OUTPUT -j REJECT --reject-with icmp-admin-prohibited
+ip6tables -A OUTPUT -j REJECT --reject-with icmp6-adm-prohibited
+
+mkdir -p /etc/iptables
+iptables-save  > /etc/iptables/rules.v4
+ip6tables-save > /etc/iptables/rules.v6
+"
+`;

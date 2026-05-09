@@ -7,6 +7,7 @@
   "author": "Kingston Tam",
   "type": "module",
   "scripts": {
+    "start": "tsx --conditions=@aurica/source packages/sandbox/src/bin/aurica-sandbox.ts",
     "dev": "turbo dev",
     "build": "turbo build",
     "typecheck": "turbo typecheck",
@@ -23,6 +24,7 @@
     "oxlint": "1.62.0",
     "oxlint-config-presets": "0.1.8",
     "oxlint-tsgolint": "0.22.1",
+    "tsx": "4.21.0",
     "turbo": "2.9.6",
     "typescript": "^6.0.3"
   },

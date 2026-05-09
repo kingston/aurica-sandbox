@@ -164,3 +164,6 @@ workspace/
 
 # SQLite
 *.db-shm
+
+# Aurica
+.aurica/

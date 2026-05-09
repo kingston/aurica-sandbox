@@ -202,7 +202,7 @@ export default defineConfig({
     // Disallow console.log but allow console.warn, console.error, console.debug, and console.info
     'eslint/no-console': [
       'error',
-      { allow: ['warn', 'error', 'debug', 'info'] },
+      { allow: ['warn', 'error', 'debug', 'info', 'table'] },
     ],
     // Allow unassigned imports for CSS and Vitest
     'import/no-unassigned-import': [
