@@ -64,6 +64,8 @@ describe('CredentialCache', () => {
 
   it('throws on unknown scheme', async () => {
     const cache = new CredentialCache({ idleTimeoutSeconds: 60 });
-    await expect(cache.resolve('foo:BAR')).rejects.toThrow(/Unsupported/);
+    await expect(cache.resolve('foo:BAR')).rejects.toThrow(
+      /No credential provider registered/,
+    );
   });
 });

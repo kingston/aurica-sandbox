@@ -1,4 +1,4 @@
-import { envCredentialProvider } from './env.js';
+import { defaultCredentialProviders } from './providers/index.js';
 import { parseCredentialSource } from './types.js';
 import type { CredentialProvider } from './types.js';
 
@@ -22,7 +22,7 @@ export class CredentialCache {
   constructor(options: CredentialCacheOptions) {
     this.idleMs = options.idleTimeoutSeconds * 1000;
     this.now = options.now ?? Date.now;
-    this.providers = options.providers ?? [envCredentialProvider];
+    this.providers = options.providers ?? defaultCredentialProviders;
   }
 
   /**
@@ -40,9 +40,7 @@ export class CredentialCache {
     if (existing) this.entries.delete(rawSource);
 
     const source = parseCredentialSource(rawSource);
-    const provider = this.providers.find(
-      (p) => (p.scheme as string) === source.scheme,
-    );
+    const provider = this.providers.find((p) => p.scheme === source.scheme);
     if (!provider) {
       throw new Error(
         `No credential provider registered for scheme ${JSON.stringify(source.scheme)}`,
