@@ -4,11 +4,7 @@ import path from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import {
-  GIT_TOKEN_PLACEHOLDER,
-  type VMExec,
-  runInitPipeline,
-} from './run-init.js';
+import { type VMExec, runInitPipeline } from './run-init.js';
 
 interface RecordedCall {
   kind: 'push' | 'run';
@@ -47,14 +43,13 @@ describe('runInitPipeline', () => {
     await fs.rm(workdir, { recursive: true, force: true });
   });
 
-  it('runs only the built-in step when no hooks or git are configured', async () => {
+  it('runs only the built-in step when no hooks are configured', async () => {
     const { exec, calls } = makeFakeExec();
     await runInitPipeline(exec, {
       user: 'sandbox',
       builtinScript: '#!/bin/bash\necho hi',
       userInitDir: null,
       projectInitDir: null,
-      git: null,
     });
     const runs = calls.filter((c) => c.kind === 'run');
     expect(runs.map((r) => r.arg)).toEqual([
@@ -64,56 +59,6 @@ describe('runInitPipeline', () => {
     expect(runs[0]?.user).toBe('root');
   });
 
-  it('configures git with the placeholder, never the resolved token', async () => {
-    const { exec, calls } = makeFakeExec();
-    const realToken = 'ghp_1234567890abcdef'; // must not appear in any call
-    await runInitPipeline(exec, {
-      user: 'sandbox',
-      builtinScript: '#!/bin/bash\n:',
-      userInitDir: null,
-      projectInitDir: null,
-      git: {
-        url: 'https://github.com/foo/bar.git',
-        placeholder: GIT_TOKEN_PLACEHOLDER,
-      },
-    });
-    const runArgs = calls.filter((c) => c.kind === 'run').map((c) => c.arg);
-
-    // Defense in depth: catches a regression where someone wires the resolved
-    // token through this layer.
-    for (const arg of runArgs) {
-      expect(arg).not.toContain(realToken);
-    }
-
-    expect(runArgs).toContain(
-      `git config --global http.https://github.com/.extraHeader Authorization: Bearer ${GIT_TOKEN_PLACEHOLDER}`,
-    );
-    expect(runArgs).toContain(
-      'git clone https://github.com/foo/bar.git /home/sandbox/project',
-    );
-  });
-
-  it('passes --branch when ref is set', async () => {
-    const { exec, calls } = makeFakeExec();
-    await runInitPipeline(exec, {
-      user: 'sandbox',
-      builtinScript: '#!/bin/bash\n:',
-      userInitDir: null,
-      projectInitDir: null,
-      git: {
-        url: 'https://github.com/foo/bar.git',
-        ref: 'main',
-        placeholder: GIT_TOKEN_PLACEHOLDER,
-      },
-    });
-    const cloneCmd = calls.find(
-      (c) => c.kind === 'run' && c.arg.startsWith('git clone'),
-    );
-    expect(cloneCmd?.arg).toBe(
-      'git clone --branch main https://github.com/foo/bar.git /home/sandbox/project',
-    );
-  });
-
   it('skips a hook layer entirely when its dir is null', async () => {
     const { exec, calls } = makeFakeExec();
     await runInitPipeline(exec, {
@@ -121,7 +66,6 @@ describe('runInitPipeline', () => {
       builtinScript: '#!/bin/bash\n:',
       userInitDir: null,
       projectInitDir: null,
-      git: null,
     });
     const userOrProjectPushes = calls.filter(
       (c) => c.kind === 'push' && /staging\/(user|project)$/.test(c.arg),
@@ -140,7 +84,6 @@ describe('runInitPipeline', () => {
       builtinScript: '#!/bin/bash\n:',
       userInitDir: dir,
       projectInitDir: null,
-      git: null,
     });
     const userPushes = calls.filter(
       (c) =>
@@ -160,7 +103,6 @@ describe('runInitPipeline', () => {
       builtinScript: '#!/bin/bash\n:',
       userInitDir: dir,
       projectInitDir: null,
-      git: null,
     });
     const layerRuns = calls.filter(
       (c) => c.kind === 'run' && c.arg.includes('staging/user'),
@@ -172,7 +114,7 @@ describe('runInitPipeline', () => {
     );
   });
 
-  it('runs both layers in built-in -> git -> user -> project order', async () => {
+  it('runs both layers in built-in -> user -> project order', async () => {
     const userDir = path.join(workdir, 'user-init');
     const projectDir = path.join(workdir, 'project-init');
     await fs.mkdir(userDir);
@@ -189,75 +131,27 @@ describe('runInitPipeline', () => {
       builtinScript: '#!/bin/bash\n:',
       userInitDir: userDir,
       projectInitDir: projectDir,
-      git: {
-        url: 'https://github.com/foo/bar.git',
-        placeholder: GIT_TOKEN_PLACEHOLDER,
-      },
     });
 
     const order = calls
       .filter((c) => c.kind === 'run')
       .map((c) => c.arg)
-      .filter(
-        (arg) =>
-          arg.startsWith('bash ') ||
-          arg.startsWith('git clone') ||
-          arg.startsWith('git config'),
-      );
+      .filter((arg) => arg.startsWith('bash '));
 
     expect(order).toEqual([
       'bash /home/sandbox/.aurica-init-staging/builtin/builtin.sh',
-      'git config --global http.https://github.com/.extraHeader Authorization: Bearer __AURICA_GIT_TOKEN__',
-      'git clone https://github.com/foo/bar.git /home/sandbox/project',
       'bash /home/sandbox/.aurica-init-staging/user/setup-user.sh',
       'bash /home/sandbox/.aurica-init-staging/project/setup-root.sh',
     ]);
   });
 
-  it('skips the host-level extraHeader when git.placeholder is undefined', async () => {
-    // The github plugin is expected to provide a more-specific per-repo
-    // extraHeader via pluginCommands; emitting the host-level one too
-    // would produce duplicate Authorization headers on the wire.
+  it('applies pluginCommands after built-in with the requested user', async () => {
     const { exec, calls } = makeFakeExec();
     await runInitPipeline(exec, {
       user: 'sandbox',
       builtinScript: '#!/bin/bash\n:',
       userInitDir: null,
       projectInitDir: null,
-      git: { url: 'https://github.com/foo/bar.git' },
-      pluginCommands: [
-        {
-          user: 'default',
-          argv: [
-            'git',
-            'config',
-            '--global',
-            'http.https://github.com/foo/bar.extraHeader',
-            'Authorization: Bearer __AURICA_TOKEN_TEST__',
-          ],
-        },
-      ],
-    });
-    const runArgs = calls.filter((c) => c.kind === 'run').map((c) => c.arg);
-    expect(runArgs).not.toContain(
-      `git config --global http.https://github.com/.extraHeader Authorization: Bearer ${GIT_TOKEN_PLACEHOLDER}`,
-    );
-    expect(runArgs).toContain(
-      'git config --global http.https://github.com/foo/bar.extraHeader Authorization: Bearer __AURICA_TOKEN_TEST__',
-    );
-    expect(runArgs).toContain(
-      'git clone https://github.com/foo/bar.git /home/sandbox/project',
-    );
-  });
-
-  it('applies pluginCommands before the clone step with the requested user', async () => {
-    const { exec, calls } = makeFakeExec();
-    await runInitPipeline(exec, {
-      user: 'sandbox',
-      builtinScript: '#!/bin/bash\n:',
-      userInitDir: null,
-      projectInitDir: null,
-      git: null,
       pluginCommands: [
         {
           user: 'default',
@@ -306,7 +200,6 @@ describe('runInitPipeline', () => {
         builtinScript: '#!/bin/bash\n:',
         userInitDir: null,
         projectInitDir: null,
-        git: null,
       }),
     ).rejects.toThrow('boom');
 

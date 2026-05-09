@@ -1,14 +1,5 @@
 import type { ProxyAction, SandboxConfig } from '#src/config/index.js';
-import {
-  expandPlugins,
-  type ExpandedPlugins,
-  type Plugin,
-} from '#src/plugins/index.js';
-
-import {
-  githubPluginFromGitConfig,
-  nonGithubGitAction,
-} from './git-actions.js';
+import { expandPlugins, type ExpandedPlugins } from '#src/plugins/index.js';
 
 /**
  * The proxy-relevant subset of a sandbox's rules: the host allowlist and the
@@ -28,13 +19,11 @@ export interface DerivationContext {
 
 /**
  * Combined output of a full derivation: the proxy-relevant rules plus the
- * full plugin expansion. `runCreate` needs both halves; the proxy reload path
- * only needs `rules`.
+ * full plugin expansion. `runCreate` needs both halves; the proxy reload
+ * path only needs `rules`.
  */
 export interface FullDerivation extends ExpandedPlugins {
   rules: DerivedRules;
-  /** The merged plugin list including any synthesized github plugin from `config.git`. */
-  plugins: Plugin[];
 }
 
 /**
@@ -62,25 +51,13 @@ export function deriveFromConfig(
   config: SandboxConfig,
   ctx: DerivationContext,
 ): FullDerivation {
-  const syntheticGithubPlugin = githubPluginFromGitConfig(config.git);
-  const fallbackGitAction = nonGithubGitAction(config.git);
-
-  const plugins: Plugin[] = [
-    ...config.plugins,
-    ...(syntheticGithubPlugin ? [syntheticGithubPlugin] : []),
-  ];
-  const expanded = expandPlugins(plugins, { user: ctx.user });
+  const expanded = expandPlugins(config.plugins, { user: ctx.user });
 
   const domains = [...config.proxy.domains, ...expanded.domains];
-  const actions: ProxyAction[] = [
-    ...config.proxy.actions,
-    ...expanded.actions,
-    ...(fallbackGitAction ? [fallbackGitAction] : []),
-  ];
+  const actions: ProxyAction[] = [...config.proxy.actions, ...expanded.actions];
 
   return {
     ...expanded,
-    plugins,
     rules: { domains, actions },
   };
 }

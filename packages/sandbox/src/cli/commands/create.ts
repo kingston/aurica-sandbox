@@ -8,7 +8,6 @@ import ora from 'ora';
 import { loadSandboxConfig } from '#src/config/index.js';
 import { logger } from '#src/logger.js';
 import { deriveFromConfig } from '#src/proxy/derive-rules.js';
-import { gitNeedsHostLevelPlaceholder } from '#src/proxy/git-actions.js';
 import { ensureCA } from '#src/proxy/index.js';
 import {
   requireRunningProxy,
@@ -17,10 +16,7 @@ import {
 } from '#src/state/index.js';
 import { defaultProvider } from '#src/vm/index.js';
 import { createInitShell } from '#src/vm/init/create-init-shell.js';
-import {
-  GIT_TOKEN_PLACEHOLDER,
-  runInitPipeline,
-} from '#src/vm/init/run-init.js';
+import { runInitPipeline } from '#src/vm/init/run-init.js';
 import { waitForIp } from '#src/vm/wait-for-ip.js';
 
 export async function defaultName(projectDir: string): Promise<string> {
@@ -109,9 +105,9 @@ export async function destroyIfExists(name: string): Promise<void> {
  *   3. Wait for the VM to acquire an IPv4.
  *   4. Run the layered init pipeline: built-in (base packages + plugin
  *      bootstrap snippets + iptables lockdown), then plugin commands,
- *      then optional git clone, then user-level hooks from
- *      `~/.aurica/sandbox/init/`, then project-level hooks from
- *      `<projectDir>/.aurica/init/`. Output streams live to the terminal.
+ *      then user-level hooks from `~/.aurica/sandbox/init/`, then
+ *      project-level hooks from `<projectDir>/.aurica/init/`. Output
+ *      streams live to the terminal.
  *   5. Register the sandbox in state with `status: 'running'` and reload
  *      the proxy so its allowlist + actions take effect.
  *
@@ -158,10 +154,9 @@ export async function runCreate(
 
   const linuxUser = process.env.USER ?? 'sandbox';
 
-  // Desugars config.git into a synthetic github plugin (or a non-github
-  // fallback action) and runs plugin expansion. The full result is needed
-  // here for the in-VM bootstrap (commands + bootstrapScript); the proxy
-  // re-derives just the rules half from disk on every reload.
+  // Plugin expansion. The full result is needed here for the in-VM
+  // bootstrap (commands + bootstrapScript); the proxy re-derives just the
+  // rules half from disk on every reload.
   const expanded = deriveFromConfig(config, { user: linuxUser });
 
   // Register the sandbox now (status: 'creating') and reload the proxy so
@@ -205,29 +200,12 @@ export async function runCreate(
   const projectInitDir = await statDirOrNull(
     path.join(projectDir, '.aurica', 'init'),
   );
-  // Only attach the host-level placeholder when the fallback action is in
-  // play (non-github tokenSource). When the synthetic github plugin covers
-  // this URL, the github plugin's `commands` already supply a path-prefixed
-  // `extraHeader` for the clone — emitting the host-level header too would
-  // make git send duplicate `Authorization` headers.
-  const needsHostLevelPlaceholder = gitNeedsHostLevelPlaceholder(config.git);
-  const git = config.git
-    ? {
-        url: config.git.url,
-        ...(config.git.ref !== undefined ? { ref: config.git.ref } : {}),
-        ...(needsHostLevelPlaceholder
-          ? { placeholder: GIT_TOKEN_PLACEHOLDER }
-          : {}),
-      }
-    : null;
-
   try {
     await runInitPipeline(exec, {
       user: linuxUser,
       builtinScript,
       userInitDir,
       projectInitDir,
-      git,
       pluginCommands: expanded.commands,
     });
   } catch (err) {
