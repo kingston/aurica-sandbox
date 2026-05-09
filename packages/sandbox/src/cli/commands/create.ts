@@ -18,13 +18,12 @@ import {
   signalProxyReload,
   withState,
 } from '#src/state/index.js';
-import { orbProvider } from '#src/vm/index.js';
+import { defaultProvider } from '#src/vm/index.js';
 import { createInitShell } from '#src/vm/init/create-init-shell.js';
 import {
   GIT_TOKEN_PLACEHOLDER,
   runInitPipeline,
 } from '#src/vm/init/run-init.js';
-import { createOrbExec } from '#src/vm/providers/orb/init.js';
 import { waitForIp } from '#src/vm/wait-for-ip.js';
 
 export async function defaultName(projectDir: string): Promise<string> {
@@ -134,7 +133,7 @@ function isAlreadyExistsError(err: unknown): boolean {
  */
 export async function vmExists(name: string): Promise<boolean> {
   try {
-    await orbProvider.infoVM(name);
+    await defaultProvider.infoVM(name);
     return true;
   } catch {
     return false;
@@ -150,7 +149,7 @@ export async function destroyIfExists(name: string): Promise<void> {
   if (!(await vmExists(name))) return;
   const recreateSpinner = ora(`destroying existing VM ${name}`).start();
   try {
-    await orbProvider.destroyVM(name);
+    await defaultProvider.destroyVM(name);
     recreateSpinner.succeed(`destroyed existing VM ${name}`);
   } catch (err) {
     recreateSpinner.fail(`failed to destroy existing VM ${name}`);
@@ -169,7 +168,7 @@ export async function destroyIfExists(name: string): Promise<void> {
  * Create a fresh sandbox VM end-to-end:
  *
  *   1. Read `.aurica/sandbox.json` (with cross-field validation).
- *   2. Create a bare `--isolated` VM via `orbProvider.createVM`. If a VM
+ *   2. Create a bare `--isolated` VM via the active provider. If a VM
  *      with this name already exists, bail with a clear "use rebuild"
  *      message — adopting partially-initialized VMs is a footgun.
  *   3. Wait for the VM to acquire an IPv4.
@@ -197,7 +196,7 @@ export async function runCreate(
 
   const createSpinner = ora(`creating VM ${name}`).start();
   try {
-    await orbProvider.createVM({ name });
+    await defaultProvider.createVM({ name });
   } catch (err) {
     createSpinner.fail();
     if (isAlreadyExistsError(err)) {
@@ -264,9 +263,9 @@ export async function runCreate(
   // provider's bridge IP — `host.orb.internal` is NAT'd to `127.0.0.1` and
   // collapses every VM into one source IP, defeating the per-sandbox
   // allowlist.
-  const bridge = await orbProvider.discoverHostBridgeIp();
+  const bridge = await defaultProvider.discoverHostBridgeIp();
 
-  const exec = createOrbExec(name, linuxUser);
+  const exec = defaultProvider.createExec(name, linuxUser);
   const builtinScript = createInitShell({
     user: linuxUser,
     proxyHost: bridge.ip,

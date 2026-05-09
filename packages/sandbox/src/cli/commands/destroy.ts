@@ -1,7 +1,7 @@
 import ora from 'ora';
 
 import { signalProxyReload, withState } from '#src/state/index.js';
-import { orbProvider } from '#src/vm/index.js';
+import { defaultProvider } from '#src/vm/index.js';
 
 /**
  * Unregister `name` from state and destroy the underlying VM. With `force`
@@ -27,7 +27,7 @@ export async function runDestroy(name: string, force: boolean): Promise<void> {
 
   const spinner = ora(`destroying VM ${name}`).start();
   try {
-    await orbProvider.destroyVM(name);
+    await defaultProvider.destroyVM(name);
     spinner.succeed(`destroyed VM ${name}`);
   } catch (err) {
     if (force) {

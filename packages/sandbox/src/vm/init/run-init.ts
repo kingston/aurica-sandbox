@@ -2,26 +2,9 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-/**
- * Provider-agnostic exec channel into a single sandbox VM. The orchestrator
- * uses `pushDir` to stage scripts and `run` to invoke them; both must stream
- * child stdio to the host terminal so the user sees live progress.
- *
- * Implementations must reject the returned promise on a non-zero exit code.
- */
-export interface VMExec {
-  /**
-   * Push the contents of `localDir` into `<defaultUserHome>/<dest>` inside
-   * the VM. Recursive. The destination directory is created if absent.
-   */
-  pushDir(localDir: string, dest: string): Promise<void>;
+import type { VMExec } from '#src/vm/types.js';
 
-  /**
-   * Run a command inside the VM. `user: 'root'` switches to root; `'default'`
-   * uses the VM's default Linux user.
-   */
-  run(args: { user: 'root' | 'default'; argv: string[] }): Promise<void>;
-}
+export type { VMExec };
 
 /**
  * The placeholder string the orchestrator writes into the VM's git config.

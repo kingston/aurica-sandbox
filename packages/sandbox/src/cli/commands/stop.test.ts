@@ -5,7 +5,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { readState, withState } from '#src/state/index.js';
-import { orbProvider } from '#src/vm/index.js';
+import { defaultProvider } from '#src/vm/index.js';
 
 import { runStop } from './stop.js';
 
@@ -29,7 +29,9 @@ describe('runStop', () => {
     process.env.AURICA_HOME = dir;
     originalStdoutWrite = process.stdout.write.bind(process.stdout);
     process.stdout.write = (() => true) as typeof process.stdout.write;
-    vi.spyOn(orbProvider, 'stopVM').mockImplementation(() => Promise.resolve());
+    vi.spyOn(defaultProvider, 'stopVM').mockImplementation(() =>
+      Promise.resolve(),
+    );
   });
 
   afterEach(async () => {
@@ -48,7 +50,7 @@ describe('runStop', () => {
     const after = await readState();
     expect(after.sandboxes.a?.status).toBe('stopped');
     expect(after.sandboxes.a?.ip).toBeNull();
-    expect(orbProvider.stopVM).toHaveBeenCalledWith('a');
+    expect(defaultProvider.stopVM).toHaveBeenCalledWith('a');
   });
 
   it('no-ops when already stopped', async () => {
@@ -56,7 +58,7 @@ describe('runStop', () => {
       s.sandboxes.a = { ...sampleSandbox, status: 'stopped', ip: null };
     });
     await runStop('a');
-    expect(orbProvider.stopVM).not.toHaveBeenCalled();
+    expect(defaultProvider.stopVM).not.toHaveBeenCalled();
   });
 
   it('throws on unknown sandbox', async () => {

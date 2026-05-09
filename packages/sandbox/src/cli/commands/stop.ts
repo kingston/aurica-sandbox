@@ -2,7 +2,7 @@ import ora from 'ora';
 
 import { logger } from '#src/logger.js';
 import { readState, signalProxyReload, withState } from '#src/state/index.js';
-import { orbProvider } from '#src/vm/index.js';
+import { defaultProvider } from '#src/vm/index.js';
 
 /**
  * Pause a running sandbox VM. Calls `orbctl stop` so the underlying
@@ -31,7 +31,7 @@ export async function runStop(name: string): Promise<void> {
 
   const spinner = ora(`stopping VM ${name}`).start();
   try {
-    await orbProvider.stopVM(name);
+    await defaultProvider.stopVM(name);
     spinner.succeed(`stopped VM ${name}`);
   } catch (err) {
     spinner.fail(`stop failed for ${name}`);

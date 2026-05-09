@@ -1,8 +1,8 @@
-import { orbProvider } from '#src/vm/index.js';
+import { defaultProvider } from '#src/vm/index.js';
 import type { SandboxVM } from '#src/vm/types.js';
 
 /**
- * Poll `orbProvider.infoVM(name)` until the VM reports an IPv4 address or
+ * Poll `defaultProvider.infoVM(name)` until the VM reports an IPv4 address or
  * `timeoutMs` elapses. Returns the latest `SandboxVM` either way — callers
  * are expected to check `networkInfo?.ipV4` and treat its absence as
  * "no IP within the deadline".
@@ -12,10 +12,10 @@ export async function waitForIp(
   timeoutMs = 30_000,
 ): Promise<SandboxVM> {
   const deadline = Date.now() + timeoutMs;
-  let last: SandboxVM = await orbProvider.infoVM(name);
+  let last: SandboxVM = await defaultProvider.infoVM(name);
   while (!last.networkInfo?.ipV4 && Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 500));
-    last = await orbProvider.infoVM(name);
+    last = await defaultProvider.infoVM(name);
   }
   return last;
 }

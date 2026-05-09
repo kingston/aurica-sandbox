@@ -6,9 +6,11 @@ import type {
   HostBridgeIp,
   SandboxVM,
   SandboxVMProvider,
+  VMExec,
 } from '#src/vm/types.js';
 
 import { discoverOrbBridgeIp } from './bridge-ip.js';
+import { createOrbExec } from './init.js';
 
 const recordSchema = z.object({
   id: z.string(),
@@ -148,5 +150,15 @@ export const orbProvider: SandboxVMProvider = {
       listVMs: () => orbProvider.listVMs(),
       infoVM: (name) => orbProvider.infoVM(name),
     });
+  },
+
+  /**
+   * Build an {@link VMExec} backed by `orbctl run` for a single OrbStack VM.
+   * See {@link createOrbExec} for boot-readiness polling and the
+   * tar-over-stdin push protocol used to work around `orbctl push`'s
+   * incompatibility with `--isolated` machines.
+   */
+  createExec(name: string, defaultUser: string): VMExec {
+    return createOrbExec(name, defaultUser);
   },
 };

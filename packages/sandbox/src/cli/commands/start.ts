@@ -7,7 +7,7 @@ import {
   signalProxyReload,
   withState,
 } from '#src/state/index.js';
-import { orbProvider } from '#src/vm/index.js';
+import { defaultProvider } from '#src/vm/index.js';
 import { waitForIp } from '#src/vm/wait-for-ip.js';
 
 /**
@@ -53,7 +53,7 @@ export async function runStart(name: string): Promise<void> {
 
   const startSpinner = ora(`starting VM ${name}`).start();
   try {
-    await orbProvider.startVM(name);
+    await defaultProvider.startVM(name);
     startSpinner.succeed(`started VM ${name}`);
   } catch (err) {
     startSpinner.fail(`start failed for ${name}`);

@@ -6,6 +6,27 @@ export interface SandboxVM {
   };
 }
 
+/**
+ * Provider-agnostic exec channel into a single sandbox VM. The orchestrator
+ * uses `pushDir` to stage scripts and `run` to invoke them; both must stream
+ * child stdio to the host terminal so the user sees live progress.
+ *
+ * Implementations must reject the returned promise on a non-zero exit code.
+ */
+export interface VMExec {
+  /**
+   * Push the contents of `localDir` into `<defaultUserHome>/<dest>` inside
+   * the VM. Recursive. The destination directory is created if absent.
+   */
+  pushDir(localDir: string, dest: string): Promise<void>;
+
+  /**
+   * Run a command inside the VM. `user: 'root'` switches to root; `'default'`
+   * uses the VM's default Linux user.
+   */
+  run(args: { user: 'root' | 'default'; argv: string[] }): Promise<void>;
+}
+
 export interface CreateVMOptions {
   name: string;
   distro?: 'ubuntu' | 'debian' | 'nixos';
@@ -44,4 +65,11 @@ export interface SandboxVMProvider {
    * to bootstrap.
    */
   discoverHostBridgeIp: () => Promise<HostBridgeIp>;
+  /**
+   * Build a {@link VMExec} for a single VM. Used by the init pipeline to
+   * stage scripts (`pushDir`) and run commands (`run`) inside the VM. The
+   * returned exec is provider-specific (orb shells out to `orbctl run`),
+   * but the surface is provider-agnostic so command code stays generic.
+   */
+  createExec: (name: string, defaultUser: string) => VMExec;
 }
