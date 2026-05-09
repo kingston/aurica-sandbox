@@ -26,6 +26,19 @@ export interface InitShellOptions {
   /** TCP port the proxy listens on. */
   proxyPort: number;
   /**
+   * PEM-encoded certificate for the host proxy's MITM CA (the same cert
+   * `aurica-sandbox ca` prints). Installed into the VM's system trust store
+   * so HTTPS requests through the proxy validate. Required because mockttp
+   * MITMs every HTTPS request to apply the per-sandbox allowlist and
+   * credential substitution; without trusting this CA, HTTPS in the VM
+   * fails with `SSL certificate problem: self-signed certificate in
+   * certificate chain`.
+   *
+   * Embedded inside a single-quoted heredoc, so no shell escaping is
+   * needed; only a structural sanity check (PEM header) is enforced.
+   */
+  caCertPem: string;
+  /**
    * Pre-lockdown shell snippet contributed by the project's plugins. Runs
    * as root with the network open, between base apt packages and the
    * iptables lockdown. Empty string when no plugin contributed one.
@@ -44,21 +57,26 @@ export interface InitShellOptions {
  *     ca-certificates, curl, sudo, gnupg)
  *  2. run the plugin bootstrap snippet (e.g. install Docker, install mise) —
  *     skipped cleanly when empty
- *  3. write `/etc/environment` with `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`
+ *  3. install the proxy CA into `/usr/local/share/ca-certificates/` and run
+ *     `update-ca-certificates`, so HTTPS requests MITM'd by the proxy
+ *     validate against the VM's system trust store
+ *  4. write `/etc/environment` with `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`
  *     pointing at the host proxy, so post-lockdown shells (started by
- *     `orbctl run` etc.) inherit the proxy via PAM
- *  4. apply a `DROP`-by-default `OUTPUT` policy on both `iptables` (IPv4)
+ *     `orbctl run` etc.) inherit the proxy via PAM. Apps that honor these
+ *     get a slightly faster forward-proxy path; apps that ignore them
+ *     still go through the proxy via the DNAT in step 5.
+ *  5. apply a `DROP`-by-default `OUTPUT` policy on both `iptables` (IPv4)
  *     and `ip6tables` (IPv6) that allows only `lo`, `ESTABLISHED`/`RELATED`,
- *     DNS (udp/tcp 53), and tcp/`<proxyPort>` to `<proxyHost>`. Every
- *     address `getent ahosts` returns gets its own pinned allow-rule on the
- *     matching family — necessary because providers like OrbStack publish
- *     the proxy hostname on both IPv4 and IPv6, but only one family
- *     actually carries traffic to host services, and we don't want to
- *     blackhole the working one by guessing wrong. A terminal `REJECT`
- *     rule with `icmp-admin-prohibited` (and the IPv6 equivalent) is
- *     appended after the DROP policy so disallowed traffic fails fast with
+ *     DNS (udp/tcp 53), and tcp/`<proxyPort>` to `<proxyHost>`. Transparent
+ *     proxying is done with two NAT OUTPUT DNAT rules — tcp/80 and tcp/443
+ *     are rewritten to the proxy IP:port, with a `! -d <proxyIP>` exception
+ *     to prevent a NAT loop. mockttp on the host peeks the TLS ClientHello
+ *     SNI (HTTPS) and the `Host:` header (HTTP) to recover the original
+ *     destination hostname for the per-sandbox allowlist — no in-VM SNI
+ *     shim needed. A terminal `REJECT` rule with `icmp-admin-prohibited`
+ *     (and the IPv6 equivalent) makes disallowed traffic fail fast with
  *     a clear `EACCES` instead of hanging until connect timeout.
- *  5. persist the rules via `iptables-save > /etc/iptables/rules.v4` and
+ *  6. persist the rules via `iptables-save > /etc/iptables/rules.v4` and
  *     `ip6tables-save > /etc/iptables/rules.v6`
  *
  * **Order is load-bearing**: installs (base packages + plugin bootstrap)
@@ -86,8 +104,16 @@ export function createInitShell(opts: InitShellOptions): string {
       `proxyPort must be a TCP port in 1..65535, got ${opts.proxyPort}`,
     );
   }
+  // Cheap structural check — rejects empty / obviously-wrong inputs without
+  // pulling in a full PEM parser. The body is interpolated into a
+  // single-quoted heredoc so no escape-injection is possible regardless.
+  if (!opts.caCertPem.startsWith('-----BEGIN CERTIFICATE-----')) {
+    throw new Error(
+      'caCertPem must be a PEM-encoded certificate starting with "-----BEGIN CERTIFICATE-----"',
+    );
+  }
 
-  const { proxyHost, proxyPort, pluginBootstrap } = opts;
+  const { proxyHost, proxyPort, caCertPem, pluginBootstrap } = opts;
 
   const pluginSection = pluginBootstrap.trim()
     ? `\n# 2. Plugin bootstrap snippets. Run with the network still open;\n#    iptables lockdown comes last.\n${pluginBootstrap}\n`
@@ -105,10 +131,22 @@ apt-get update -y
 apt-get install -y --no-install-recommends \\
   git iptables iptables-persistent ca-certificates curl sudo gnupg
 ${pluginSection}
-# 3. Proxy env for post-lockdown shells. /etc/environment is read by PAM at
-#    login, which is what 'orbctl run' triggers, so subsequent commands
-#    (apt, git, mise install, pnpm) pick up the proxy without any extra
-#    plumbing on the orchestrator side.
+# 3. Install the proxy CA so MITM'd HTTPS validates inside the VM. mockttp
+#    intercepts every HTTPS request to apply the per-sandbox allowlist and
+#    credential substitution; without trusting this CA, every HTTPS call
+#    fails with a self-signed-cert error. Single-quoted heredoc terminator
+#    suppresses parameter expansion inside the cert body.
+cat > /usr/local/share/ca-certificates/aurica-sandbox.crt <<'EOF'
+${caCertPem}
+EOF
+update-ca-certificates >/dev/null
+
+# 4. Proxy env for post-lockdown shells. /etc/environment is read by PAM at
+#    login, so subsequent commands (apt, git, mise install, pnpm) pick up
+#    the proxy without any extra plumbing. Apps that honor these env vars
+#    use a faster forward-proxy path; apps that ignore them are still
+#    routed through the proxy by the DNAT rules in step 5 (mockttp peeks
+#    SNI / Host header to recover the hostname for the allowlist).
 cat > /etc/environment <<EOF
 HTTP_PROXY=http://${proxyHost}:${proxyPort}
 HTTPS_PROXY=http://${proxyHost}:${proxyPort}
@@ -118,15 +156,17 @@ NO_PROXY=localhost,127.0.0.1,${proxyHost}
 no_proxy=localhost,127.0.0.1,${proxyHost}
 EOF
 
-# 4. iptables: default DROP on OUTPUT for both IPv4 and IPv6, allow loopback,
-#    established, DNS, and only the host proxy. Resolve the proxy hostname
-#    now so the rules pin the IPs rather than relying on DNS at packet time.
-#    'getent ahosts' returns every address (both families). We pin a rule for
-#    each address so the apps can use whichever family the network actually
-#    delivers — e.g. on OrbStack the proxy hostname has both an IPv6 and
-#    IPv4 address, but only the IPv4 path reaches host services. Picking
-#    just one family blackholes traffic that the other family was supposed
-#    to carry.
+# 5. iptables: default DROP on OUTPUT for both IPv4 and IPv6, allow loopback,
+#    established, DNS, and the proxy IP:port. Transparent proxying is done
+#    by DNAT'ing tcp/80 and tcp/443 to the proxy: mockttp natively handles
+#    transparent traffic by peeking the TLS ClientHello SNI (HTTPS) and
+#    the Host header (HTTP) to reconstruct the original destination — no
+#    in-VM SNI shim needed. The '! -d <proxy>' exception prevents a NAT
+#    loop on the proxy's own port. Resolve the proxy hostname now so the
+#    rules pin the IP rather than relying on DNS at packet time. 'getent
+#    ahosts' returns every address (both families); IPv4-literal callers
+#    like OrbStack produce a single rule, hostname callers like Lima cover
+#    both.
 PROXY_IPS=$(getent ahosts ${proxyHost} | awk '{ print $1 }' | sort -u)
 if [ -z "$PROXY_IPS" ]; then
   echo "failed to resolve ${proxyHost}" >&2
@@ -142,11 +182,30 @@ for ipt in iptables ip6tables; do
   $ipt -A OUTPUT -p tcp --dport 53 -j ACCEPT
 done
 
-# Allow the proxy on every resolved family. ':' in the address means IPv6.
+# Allow outbound to the proxy on every resolved family. This covers both
+# the env-var forward-proxy path (clients connect to <proxyIP>:<proxyPort>
+# directly) and the DNAT'd transparent path (post-NAT, the destination is
+# also <proxyIP>:<proxyPort>). Loop family-aware so hostname-passing
+# providers (Lima) get covered too.
 while IFS= read -r ip; do
   case "$ip" in
     *:*) ip6tables -A OUTPUT -p tcp -d "$ip" --dport ${proxyPort} -j ACCEPT ;;
     *)   iptables  -A OUTPUT -p tcp -d "$ip" --dport ${proxyPort} -j ACCEPT ;;
+  esac
+done <<< "$PROXY_IPS"
+
+# Transparent NAT: rewrite tcp/80 and tcp/443 destinations to the proxy.
+# The '! -d <proxyIP>' exception keeps proxy-bound traffic from being
+# re-DNAT'd into itself. Only IPv4 here: OrbStack's bridge IP is IPv4,
+# IPv6 stays default-DROP.
+iptables -t nat -F OUTPUT
+while IFS= read -r ip; do
+  case "$ip" in
+    *:*) ;;  # IPv6 — no transparent path; v6 traffic is DROPped by policy
+    *)
+      iptables -t nat -A OUTPUT -p tcp ! -d "$ip" --dport 80  -j DNAT --to-destination "$ip:${proxyPort}"
+      iptables -t nat -A OUTPUT -p tcp ! -d "$ip" --dport 443 -j DNAT --to-destination "$ip:${proxyPort}"
+      ;;
   esac
 done <<< "$PROXY_IPS"
 

@@ -13,6 +13,7 @@ import {
   type GithubPlugin,
   type Plugin,
 } from '#src/plugins/index.js';
+import { ensureCA } from '#src/proxy/index.js';
 import {
   requireRunningProxy,
   signalProxyReload,
@@ -264,12 +265,18 @@ export async function runCreate(
   // collapses every VM into one source IP, defeating the per-sandbox
   // allowlist.
   const bridge = await defaultProvider.discoverHostBridgeIp();
+  // ensureCA is idempotent and the proxy already called it during boot —
+  // this just reads the persisted PEM so we can install it in the VM trust
+  // store. Required for HTTPS through the proxy to validate (mockttp MITMs
+  // every HTTPS request).
+  const ca = await ensureCA();
 
   const exec = defaultProvider.createExec(name, linuxUser);
   const builtinScript = createInitShell({
     user: linuxUser,
     proxyHost: bridge.ip,
     proxyPort: proxy.port,
+    caCertPem: ca.certPem,
     pluginBootstrap: expanded.bootstrapScript,
   });
   const userInitDir = await statDirOrNull(
