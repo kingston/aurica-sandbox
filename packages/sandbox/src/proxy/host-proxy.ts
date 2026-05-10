@@ -192,7 +192,6 @@ export class HostProxy {
             headers,
             this.resolver,
           );
-          console.info(req.headers, headers);
           if (result.outcome === 'block') {
             return {
               response: {
