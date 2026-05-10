@@ -1,40 +1,6 @@
 import { z } from 'zod';
 
-/**
- * Per-capability permission level. Mirrors GitHub's fine-grained PAT
- * taxonomy. Capabilities compose — a repo with `{ contents: 'read',
- * pullRequests: 'write' }` gets the union of those endpoints.
- *
- * `read` allows the safe (mostly GET) subset; `write` is `read` plus the
- * mutating methods. See `permissions.ts` for the exact path/method
- * sets each capability resolves to.
- */
-export const githubPermissionLevelSchema = z.enum(['read', 'write']);
-
-/** Permission level — see {@link githubPermissionLevelSchema}. */
-export type GithubPermissionLevel = z.infer<typeof githubPermissionLevelSchema>;
-
-/**
- * Set of GitHub capabilities granted to a repo. Omitting a key means the
- * capability isn't granted (no policy emitted for its endpoints).
- *
- * If the entire `permissions` field is omitted on a repo, the expander
- * falls back to the legacy "any path under the repo" coarse policy —
- * preserves today's behaviour for configs that haven't opted in.
- *
- * `permissions: {}` (empty object) is meaningful: it grants nothing,
- * emitting no policies. The host stays allowlisted, so requests pass
- * through unauthenticated and GitHub 401s anything that needs a token.
- */
-export const githubPermissionsSchema = z.object({
-  contents: githubPermissionLevelSchema.optional(),
-  pullRequests: githubPermissionLevelSchema.optional(),
-  issues: githubPermissionLevelSchema.optional(),
-  actions: githubPermissionLevelSchema.optional(),
-});
-
-/** Per-repo capability set — see {@link githubPermissionsSchema}. */
-export type GithubPermissions = z.infer<typeof githubPermissionsSchema>;
+import { parseCredentialSource } from '#src/credentials/index.js';
 
 /**
  * Git committer identity mirrored into the VM as `git config --global
@@ -54,29 +20,39 @@ export const githubUserSchema = z.object({
 export type GithubUser = z.infer<typeof githubUserSchema>;
 
 /**
- * GitHub auth plugin. `repositories` lists the `<owner>/<repo>` pairs the
- * token should be attached to. Path-scoping at the proxy + per-repo entries
- * in `~/.git-credentials` (with `credential.useHttpPath = true`) together
- * ensure the token is only sent to those specific repos.
+ * `tokenSource` must be a parseable credential source — any
+ * `<scheme>:<name>` string the credential cache knows how to dispatch
+ * (`env:<VAR>`, `gh-token`). Wrapping `parseCredentialSource` in a `.check`
+ * surfaces the parser's own error message at config-load time, instead of
+ * letting it throw later when the proxy tries to resolve the credential.
  *
- * Each repo can carry an optional `permissions` field that scopes the
- * token further by HTTP method and API endpoint, modelled on GitHub's
- * fine-grained PAT permission taxonomy. When omitted, the expander emits
- * today's coarse policies (token attached to anything under the repo
- * path).
- *
- * `username` is the credential username embedded in `~/.git-credentials`
- * URLs (`https://<username>:<token>@github.com/...`). For GitHub PATs and
- * app installation tokens the conventional value is `x-access-token`, but
- * any non-empty string is accepted.
- *
- * `user` (optional) sets the VM's global git committer identity. See
- * {@link githubUserSchema}.
- *
- * `token` is a credential-source string parseable by `parseCredentialSource`
- * (v1: only `env:VAR`).
+ * Exposed so the loose project-side schema in `config/sandbox.ts` can
+ * reuse the same field via `.optional()`.
  */
-export const githubPluginSchema = z.object({
+export const githubTokenSourceSchema = z
+  .string()
+  .min(1)
+  .check((ctx) => {
+    try {
+      parseCredentialSource(ctx.value);
+    } catch (err) {
+      ctx.issues.push({
+        code: 'custom',
+        input: ctx.value,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+/**
+ * Raw github plugin shape. Exposed (alongside
+ * {@link GH_TOKEN_API_INCOMPATIBLE_MESSAGE}) so the loose project-side
+ * schema in `config/sandbox.ts` can rebuild a variant with `username` /
+ * `tokenSource` optional and re-apply the same cross-field invariant —
+ * without going through `.extend()`, which Zod 4 rejects on refined
+ * schemas.
+ */
+export const githubPluginShape = {
   type: z.literal('github'),
   username: z.string().min(1),
   user: githubUserSchema.optional(),
@@ -90,11 +66,61 @@ export const githubPluginSchema = z.object({
             /^[^/\s]+\/[^/\s]+$/,
             'expected "<owner>/<repo>" with no slashes inside owner or repo',
           ),
-        permissions: githubPermissionsSchema.optional(),
+        readOnly: z.boolean().optional(),
       }),
     )
     .min(1),
-  token: z.string().min(1),
+  tokenSource: githubTokenSourceSchema,
+  api: z.boolean().optional(),
+};
+
+/**
+ * Error message for the `gh-token` + `api: true` cross-field invariant.
+ * Exposed so the loose project-side schema can emit the same message from
+ * its own `.check()`.
+ */
+export const GH_TOKEN_API_INCOMPATIBLE_MESSAGE =
+  "github plugin: `tokenSource: gh-token` cannot be combined with `api: true`. The gh CLI's token usually lacks the scopes for full API access — configure a fine-grained PAT via `tokenSource: env:<VAR>` instead.";
+
+/**
+ * GitHub auth plugin. `repositories` lists the `<owner>/<repo>` pairs the
+ * token should be attached to. Path-scoping at the proxy + per-repo entries
+ * in `~/.git-credentials` (with `credential.useHttpPath = true`) together
+ * ensure the token is only sent to those specific repos.
+ *
+ * Each repo defaults to allowing fetch + push over git smart-HTTP; setting
+ * `readOnly: true` drops `git-receive-pack` so push is denied at the proxy.
+ *
+ * `api` (plugin-level, default `false`) opens all of `api.github.com`,
+ * including `/graphql`. This is a deliberate bypass of repo scoping for the
+ * API surface — GraphQL POSTs encode repo identity in the request body
+ * rather than the URL, so the proxy can't constrain them per-repo. With
+ * `api: true`, repo scoping for API traffic is delegated entirely to the
+ * configured token. Disallowed in combination with `tokenSource: gh-token`,
+ * since the gh CLI's token typically lacks the scopes that make this useful.
+ *
+ * `username` is the credential username embedded in `~/.git-credentials`
+ * URLs (`https://<username>:<token>@github.com/...`). For GitHub PATs and
+ * app installation tokens the conventional value is `x-access-token`, but
+ * any non-empty string is accepted.
+ *
+ * `user` (optional) sets the VM's global git committer identity. See
+ * {@link githubUserSchema}.
+ *
+ * `tokenSource` is a credential-source string parseable by
+ * `parseCredentialSource`. Supported schemes: `env:<VAR>` and `gh-token`.
+ */
+export const githubPluginSchema = z.object(githubPluginShape).check((ctx) => {
+  // Skips when `tokenSource` is undefined — the loose project-side schema
+  // may defer it to the user layer, and the strict re-parse after merging
+  // catches the merged-bad case.
+  if (ctx.value.tokenSource === 'gh-token' && ctx.value.api === true) {
+    ctx.issues.push({
+      code: 'custom',
+      input: ctx.value,
+      message: GH_TOKEN_API_INCOMPATIBLE_MESSAGE,
+    });
+  }
 });
 
 export type GithubPlugin = z.infer<typeof githubPluginSchema>;

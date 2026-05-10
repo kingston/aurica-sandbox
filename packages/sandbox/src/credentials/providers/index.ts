@@ -1,9 +1,9 @@
 import type { CredentialProvider } from '../types.js';
 import { envCredentialProvider } from './env.js';
-import { shellCredentialProvider } from './shell.js';
+import { ghTokenCredentialProvider } from './gh-token.js';
 
 export { envCredentialProvider } from './env.js';
-export { shellCredentialProvider } from './shell.js';
+export { ghTokenCredentialProvider } from './gh-token.js';
 
 /**
  * Default set of credential providers wired into the {@link CredentialCache}
@@ -11,5 +11,5 @@ export { shellCredentialProvider } from './shell.js';
  */
 export const defaultCredentialProviders: readonly CredentialProvider[] = [
   envCredentialProvider,
-  shellCredentialProvider,
+  ghTokenCredentialProvider,
 ];

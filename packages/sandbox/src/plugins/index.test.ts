@@ -36,12 +36,12 @@ function blockPolicies(policies: readonly ProxyPolicy[]): ProxyPolicy[] {
 }
 
 describe('expandPlugins', () => {
-  it('emits domains, coarse policies, and commands for one github plugin without permissions', () => {
+  it('emits domains, default fetch+push policies, and commands for one github plugin', () => {
     const plugin: Plugin = {
       type: 'github',
       username: 'x-access-token',
       repositories: [{ name: 'foo/bar' }],
-      token: 'env:GITHUB_TOKEN',
+      tokenSource: 'env:GITHUB_TOKEN',
     };
     const expanded = expandPlugins([plugin], ctx);
 
@@ -54,11 +54,12 @@ describe('expandPlugins', () => {
         'cli.github.com',
       ]),
     );
-    // 3 allow (one per auth host) + 3 catch-all blocks (one per auth host).
-    expect(expanded.policies).toHaveLength(6);
+    // 2 allow (github.com + codeload.github.com) + 3 catch-all blocks. No
+    // api.github.com allow because `api` defaults to false.
+    expect(expanded.policies).toHaveLength(5);
     const allows = allowPolicies(expanded.policies);
     const blocks = blockPolicies(expanded.policies);
-    expect(allows).toHaveLength(3);
+    expect(allows).toHaveLength(2);
     expect(blocks).toHaveLength(3);
     const placeholders = new Set(allows.map(placeholderOf));
     expect(placeholders.size).toBe(1);
@@ -70,16 +71,15 @@ describe('expandPlugins', () => {
     const allowByDomain: Record<string, ProxyPolicy> = Object.fromEntries(
       allows.map((p) => [p.domain, p]),
     );
-    // Coarse policies use a single segment-boundary prefix matcher.
     expect(allowByDomain['github.com']?.matchers).toEqual([
-      { prefix: '/foo/bar' },
-    ]);
-    expect(allowByDomain['api.github.com']?.matchers).toEqual([
-      { prefix: '/repos/foo/bar' },
+      { exact: '/foo/bar/info/refs', methods: ['GET'] },
+      { exact: '/foo/bar/git-upload-pack', methods: ['POST'] },
+      { exact: '/foo/bar/git-receive-pack', methods: ['POST'] },
     ]);
     expect(allowByDomain['codeload.github.com']?.matchers).toEqual([
-      { prefix: '/foo/bar' },
+      { prefix: '/foo/bar', methods: ['GET'] },
     ]);
+    expect(allowByDomain['api.github.com']).toBeUndefined();
     for (const policy of allows) {
       expect(policy.id).toBe(`github:foo/bar:${policy.domain}`);
       if (policy.action.type !== 'allow') throw new Error('expected allow');
@@ -166,19 +166,28 @@ describe('expandPlugins', () => {
     expect(expanded.bootstrapScript).toMatch(/store\|erase\) exit 0/);
   });
 
-  it('expands multiple repos into N allow policies per host plus catch-all blocks and one credentials write', () => {
+  it('expands multiple repos into per-repo allow policies plus catch-all blocks and one credentials write', () => {
     const plugin: Plugin = {
       type: 'github',
       username: 'x-access-token',
       repositories: [{ name: 'a/b' }, { name: 'c/d' }],
-      token: 'env:GITHUB_TOKEN',
+      tokenSource: 'env:GITHUB_TOKEN',
     };
     const expanded = expandPlugins([plugin], ctx);
 
-    // 2 repos × 3 hosts = 6 allows; +3 blocks (one per host) = 9.
-    expect(expanded.policies).toHaveLength(9);
-    expect(allowPolicies(expanded.policies)).toHaveLength(6);
+    // 2 repos × 2 allow policies (github.com + codeload) = 4; +3 blocks = 7.
+    expect(expanded.policies).toHaveLength(7);
+    expect(allowPolicies(expanded.policies)).toHaveLength(4);
     expect(blockPolicies(expanded.policies)).toHaveLength(3);
+    const allowIds = allowPolicies(expanded.policies)
+      .map((p) => p.id)
+      .sort();
+    expect(allowIds).toEqual([
+      'github:a/b:codeload.github.com',
+      'github:a/b:github.com',
+      'github:c/d:codeload.github.com',
+      'github:c/d:github.com',
+    ]);
     // helper config (2) + credentials write + gh hosts.yml = 4 commands.
     expect(expanded.commands).toHaveLength(4);
     const credsWrite = expanded.commands[2];
@@ -198,13 +207,13 @@ describe('expandPlugins', () => {
       type: 'github',
       username: 'x-access-token',
       repositories: [{ name: 'foo/bar' }],
-      token: 'env:GITHUB_TOKEN_1',
+      tokenSource: 'env:GITHUB_TOKEN_1',
     };
     const i2: Plugin = {
       type: 'github',
       username: 'x-access-token',
       repositories: [{ name: 'foo/bar' }],
-      token: 'env:GITHUB_TOKEN_2',
+      tokenSource: 'env:GITHUB_TOKEN_2',
     };
     const expanded = expandPlugins([i1, i2], ctx);
 
@@ -219,7 +228,7 @@ describe('expandPlugins', () => {
       type: 'github',
       username: 'x-access-token',
       repositories: [{ name: 'foo/bar' }],
-      token: 'env:GITHUB_TOKEN',
+      tokenSource: 'env:GITHUB_TOKEN',
     };
     const a = expandPlugins([plugin], ctx);
     const b = expandPlugins([plugin], ctx);
@@ -293,7 +302,7 @@ describe('expandPlugins', () => {
       username: 'x-access-token',
       user: { name: 'Ada Lovelace', email: 'ada@example.com' },
       repositories: [{ name: 'foo/bar' }],
-      token: 'env:GITHUB_TOKEN',
+      tokenSource: 'env:GITHUB_TOKEN',
     };
     const expanded = expandPlugins([plugin], ctx);
 
@@ -317,7 +326,7 @@ describe('expandPlugins', () => {
       type: 'github',
       username: 'x-access-token',
       repositories: [{ name: 'foo/bar' }],
-      token: 'env:GITHUB_TOKEN',
+      tokenSource: 'env:GITHUB_TOKEN',
     };
     const expanded = expandPlugins([plugin], ctx);
     const argvs = expanded.commands.map((c) => c.argv);
@@ -333,7 +342,7 @@ describe('expandPlugins', () => {
       type: 'github',
       username: 'x-access-token',
       repositories: [{ name: 'foo/bar' }],
-      token: 'env:GITHUB_TOKEN',
+      tokenSource: 'env:GITHUB_TOKEN',
     };
     const expanded = expandPlugins([plugin], ctx);
     // All allow indices must precede all block indices, otherwise the
@@ -361,45 +370,13 @@ describe('expandPlugins', () => {
   });
 });
 
-describe('expandPlugins — github permissions', () => {
-  it('pullRequests:write emits one api.github.com allow policy and nothing else for the other auth hosts', () => {
+describe('expandPlugins — github readOnly', () => {
+  it('drops git-receive-pack from the github.com matchers when readOnly is true', () => {
     const plugin: Plugin = {
       type: 'github',
       username: 'x-access-token',
-      repositories: [
-        { name: 'foo/bar', permissions: { pullRequests: 'write' } },
-      ],
-      token: 'env:GITHUB_TOKEN',
-    };
-    const expanded = expandPlugins([plugin], ctx);
-
-    const allows = allowPolicies(expanded.policies);
-    expect(allows).toHaveLength(1);
-    const policy = allows[0];
-    if (!policy) throw new Error('expected allow policy');
-    expect(policy.domain).toBe('api.github.com');
-    expect(policy.id).toBe('github:foo/bar:api.github.com');
-    // Catch-all blocks still cover all three auth hosts so non-PR paths are 403'd.
-    expect(blockPolicies(expanded.policies)).toHaveLength(3);
-
-    // Matchers cover the pulls prefix for both read and write methods.
-    const matchers = policy.matchers ?? [];
-    expect(matchers).toContainEqual({
-      prefix: '/repos/foo/bar/pulls',
-      methods: ['GET'],
-    });
-    expect(matchers).toContainEqual({
-      prefix: '/repos/foo/bar/pulls',
-      methods: ['POST', 'PUT', 'PATCH', 'DELETE'],
-    });
-  });
-
-  it('contents:read allows git-upload-pack but not git-receive-pack', () => {
-    const plugin: Plugin = {
-      type: 'github',
-      username: 'x-access-token',
-      repositories: [{ name: 'foo/bar', permissions: { contents: 'read' } }],
-      token: 'env:GITHUB_TOKEN',
+      repositories: [{ name: 'foo/bar', readOnly: true }],
+      tokenSource: 'env:GITHUB_TOKEN',
     };
     const expanded = expandPlugins([plugin], ctx);
 
@@ -407,134 +384,193 @@ describe('expandPlugins — github permissions', () => {
       (p) => p.domain === 'github.com',
     );
     if (!githubCom) throw new Error('expected github.com policy');
-    const matchers = githubCom.matchers ?? [];
-    // Allowed: info/refs GET and git-upload-pack POST.
-    expect(matchers).toContainEqual({
-      exact: '/foo/bar/info/refs',
-      methods: ['GET'],
-    });
-    expect(matchers).toContainEqual({
-      exact: '/foo/bar/git-upload-pack',
-      methods: ['POST'],
-    });
-    // NOT allowed: git-receive-pack (push handshake payload).
-    const hasReceivePack = matchers.some(
-      (m) => 'exact' in m && m.exact === '/foo/bar/git-receive-pack',
+    expect(githubCom.matchers).toEqual([
+      { exact: '/foo/bar/info/refs', methods: ['GET'] },
+      { exact: '/foo/bar/git-upload-pack', methods: ['POST'] },
+    ]);
+    // Codeload policy is unchanged — it's GET-only regardless.
+    const codeload = allowPolicies(expanded.policies).find(
+      (p) => p.domain === 'codeload.github.com',
     );
-    expect(hasReceivePack).toBe(false);
+    expect(codeload?.matchers).toEqual([
+      { prefix: '/foo/bar', methods: ['GET'] },
+    ]);
   });
 
-  it('contents:write adds git-receive-pack on top of read', () => {
+  it('keeps git-receive-pack when readOnly is false (the default)', () => {
     const plugin: Plugin = {
       type: 'github',
       username: 'x-access-token',
-      repositories: [{ name: 'foo/bar', permissions: { contents: 'write' } }],
-      token: 'env:GITHUB_TOKEN',
+      repositories: [{ name: 'foo/bar', readOnly: false }],
+      tokenSource: 'env:GITHUB_TOKEN',
     };
     const expanded = expandPlugins([plugin], ctx);
-
     const githubCom = allowPolicies(expanded.policies).find(
       (p) => p.domain === 'github.com',
     );
-    if (!githubCom) throw new Error('expected github.com policy');
-    const matchers = githubCom.matchers ?? [];
-    expect(matchers).toContainEqual({
-      exact: '/foo/bar/git-upload-pack',
-      methods: ['POST'],
-    });
-    expect(matchers).toContainEqual({
+    expect(githubCom?.matchers).toContainEqual({
       exact: '/foo/bar/git-receive-pack',
       methods: ['POST'],
     });
   });
+});
 
-  it('contents:write + pullRequests:write emits policies on all three hosts and unions matchers', () => {
+describe('expandPlugins — github api', () => {
+  it('emits a broad api.github.com allow policy when api is true', () => {
     const plugin: Plugin = {
       type: 'github',
       username: 'x-access-token',
-      repositories: [
-        {
-          name: 'foo/bar',
-          permissions: { contents: 'write', pullRequests: 'write' },
-        },
-      ],
-      token: 'env:GITHUB_TOKEN',
+      repositories: [{ name: 'foo/bar' }],
+      tokenSource: 'env:GITHUB_TOKEN',
+      api: true,
     };
     const expanded = expandPlugins([plugin], ctx);
 
     const allows = allowPolicies(expanded.policies);
-    const hosts = new Set(allows.map((p) => p.domain));
-    expect(hosts).toEqual(
-      new Set(['github.com', 'api.github.com', 'codeload.github.com']),
-    );
-
-    const api = allows.find((p) => p.domain === 'api.github.com');
-    if (!api) throw new Error('expected api.github.com policy');
-    const apiMatchers = api.matchers ?? [];
-    // Has both contents endpoints (e.g. /repos/foo/bar metadata) and pulls.
-    expect(apiMatchers).toContainEqual({
-      exact: '/repos/foo/bar',
-      methods: ['GET'],
-    });
-    expect(apiMatchers).toContainEqual({
-      prefix: '/repos/foo/bar/pulls',
-      methods: ['GET'],
-    });
-  });
-
-  it('empty permissions object emits no allow policies (only catch-all blocks) but keeps github domains', () => {
-    const plugin: Plugin = {
-      type: 'github',
-      username: 'x-access-token',
-      repositories: [{ name: 'foo/bar', permissions: {} }],
-      token: 'env:GITHUB_TOKEN',
-    };
-    const expanded = expandPlugins([plugin], ctx);
-
-    expect(allowPolicies(expanded.policies)).toEqual([]);
-    expect(blockPolicies(expanded.policies)).toHaveLength(3);
-    expect(new Set(expanded.domains)).toEqual(
-      new Set([
-        'github.com',
-        'api.github.com',
-        'codeload.github.com',
-        '*.githubusercontent.com',
-        'cli.github.com',
-      ]),
-    );
-  });
-
-  it('mixed repos: scoped and unscoped coexist in one plugin', () => {
-    const plugin: Plugin = {
-      type: 'github',
-      username: 'x-access-token',
-      repositories: [
-        { name: 'a/b' },
-        { name: 'c/d', permissions: { pullRequests: 'read' } },
-      ],
-      token: 'env:GITHUB_TOKEN',
-    };
-    const expanded = expandPlugins([plugin], ctx);
-
-    // a/b → 3 coarse allows. c/d → 1 (api.github.com only). +3 catch-all blocks.
-    expect(expanded.policies).toHaveLength(7);
-    const allowIds = allowPolicies(expanded.policies)
-      .map((p) => p.id)
-      .sort();
-    expect(allowIds).toEqual([
-      'github:a/b:api.github.com',
-      'github:a/b:codeload.github.com',
-      'github:a/b:github.com',
-      'github:c/d:api.github.com',
-    ]);
-    const blockIds = blockPolicies(expanded.policies)
-      .map((p) => p.id)
-      .sort();
-    expect(blockIds).toEqual([
+    // 2 per-repo (github.com + codeload) + 1 api.github.com bypass = 3.
+    expect(allows).toHaveLength(3);
+    const apiPolicy = allows.find((p) => p.domain === 'api.github.com');
+    if (!apiPolicy) throw new Error('expected api.github.com allow policy');
+    expect(apiPolicy.id).toBe('github:api:api.github.com');
+    // No matchers — broad allow covers /graphql and every REST path.
+    expect(apiPolicy.matchers).toBeUndefined();
+    if (apiPolicy.action.type !== 'allow') throw new Error('expected allow');
+    expect(apiPolicy.action.mutations).toHaveLength(2);
+    // The api.github.com block is still emitted but is shadowed by the allow.
+    const blocks = blockPolicies(expanded.policies);
+    expect(blocks.map((p) => p.id).sort()).toEqual([
       'github:block:api.github.com',
       'github:block:codeload.github.com',
       'github:block:github.com',
     ]);
+    // First-match-wins: the api allow precedes the api block.
+    const apiAllowIdx = expanded.policies.indexOf(apiPolicy);
+    const apiBlockIdx = expanded.policies.findIndex(
+      (p) => p.id === 'github:block:api.github.com',
+    );
+    expect(apiAllowIdx).toBeLessThan(apiBlockIdx);
+  });
+
+  it('omits the api.github.com allow when api is false (the default)', () => {
+    const plugin: Plugin = {
+      type: 'github',
+      username: 'x-access-token',
+      repositories: [{ name: 'foo/bar' }],
+      tokenSource: 'env:GITHUB_TOKEN',
+    };
+    const expanded = expandPlugins([plugin], ctx);
+    const apiAllow = allowPolicies(expanded.policies).find(
+      (p) => p.domain === 'api.github.com',
+    );
+    expect(apiAllow).toBeUndefined();
+  });
+});
+
+describe('expandPlugins — claude-code', () => {
+  it('emits installer + api domains, the apiKeyHelper settings file, and an x-api-key substitution policy + Authorization strip in api-key mode', () => {
+    const plugin: Plugin = { type: 'claude-code', authMode: 'api-key' };
+    const expanded = expandPlugins([plugin], ctx);
+
+    expect(new Set(expanded.domains)).toEqual(
+      new Set(['claude.ai', 'downloads.claude.ai', 'api.anthropic.com']),
+    );
+
+    // Single allow policy targeting api.anthropic.com — no block / no
+    // matchers (the bare host allowlist is the outer gate).
+    expect(expanded.policies).toHaveLength(1);
+    const policy = expanded.policies[0];
+    if (!policy) throw new Error('expected one policy');
+    expect(policy.id).toBe('claude-code:api');
+    expect(policy.domain).toBe('api.anthropic.com');
+    expect(policy.matchers).toBeUndefined();
+    if (policy.action.type !== 'allow') throw new Error('expected allow');
+    const muts = policy.action.mutations ?? [];
+    // Two mutations: substitute into x-api-key, strip Authorization (which
+    // apiKeyHelper otherwise also fills with the same placeholder).
+    expect(muts).toHaveLength(2);
+    const replace = muts[0];
+    if (replace?.kind !== 'replace-header') {
+      throw new Error('expected replace-header mutation first');
+    }
+    expect(replace.header).toBe('x-api-key');
+    expect(replace.from).toMatch(PLACEHOLDER_RE);
+    expect(replace.to).toBe('env:ANTHROPIC_API_KEY');
+    expect(replace.transform).toBeUndefined();
+    expect(muts[1]).toEqual({ kind: 'remove-header', header: 'Authorization' });
+
+    // The settings.json command embeds the same placeholder in apiKeyHelper
+    // and disables auto-update + telemetry.
+    expect(expanded.commands).toHaveLength(1);
+    const cmd = expanded.commands[0];
+    if (!cmd) throw new Error('expected one command');
+    expect(cmd.user).toBe('default');
+    expect(cmd.argv[0]).toBe('sh');
+    expect(cmd.argv[2]).toMatch(/\$HOME\/\.claude\/settings\.json/);
+    const body = cmd.argv[4] ?? '';
+    const parsed = JSON.parse(body) as {
+      apiKeyHelper: string;
+      env: Record<string, string>;
+    };
+    expect(parsed.apiKeyHelper).toBe(`/bin/echo ${replace.from}`);
+    expect(parsed.env).toEqual({
+      DISABLE_AUTOUPDATER: '1',
+      DISABLE_TELEMETRY: '1',
+    });
+
+    // Bootstrap installs Claude Code via the documented one-liner.
+    expect(expanded.bootstrapScript).toMatch(
+      /sudo -iu sandbox bash -lc 'curl -fsSL https:\/\/claude\.ai\/install\.sh \| bash'/,
+    );
+  });
+
+  it('substitutes into Authorization and strips x-api-key in oauth-token mode', () => {
+    const plugin: Plugin = { type: 'claude-code', authMode: 'oauth-token' };
+    const expanded = expandPlugins([plugin], ctx);
+
+    const policy = expanded.policies[0];
+    if (policy?.action.type !== 'allow') {
+      throw new Error('expected allow policy');
+    }
+    const muts = policy.action.mutations ?? [];
+    expect(muts).toHaveLength(2);
+    const replace = muts[0];
+    if (replace?.kind !== 'replace-header') {
+      throw new Error('expected replace-header mutation first');
+    }
+    expect(replace.header).toBe('Authorization');
+    expect(replace.to).toBe('env:CLAUDE_CODE_OAUTH_TOKEN');
+    expect(muts[1]).toEqual({ kind: 'remove-header', header: 'x-api-key' });
+  });
+
+  it('honours an explicit tokenSource override', () => {
+    const plugin: Plugin = {
+      type: 'claude-code',
+      authMode: 'api-key',
+      tokenSource: 'env:MY_CUSTOM_KEY',
+    };
+    const expanded = expandPlugins([plugin], ctx);
+
+    const policy = expanded.policies[0];
+    if (policy?.action.type !== 'allow') {
+      throw new Error('expected allow policy');
+    }
+    const mut = policy.action.mutations?.[0];
+    if (mut?.kind !== 'replace-header') {
+      throw new Error('expected replace-header mutation');
+    }
+    expect(mut.to).toBe('env:MY_CUSTOM_KEY');
+  });
+
+  it('does not allowlist OAuth-flow or telemetry hosts', () => {
+    const expanded = expandPlugins(
+      [{ type: 'claude-code', authMode: 'oauth-token' }],
+      ctx,
+    );
+    // Login-flow hosts must stay out so a sandbox can't run /login on its
+    // own — auth is always a host operation. Telemetry stays out so
+    // DISABLE_TELEMETRY is the load-bearing setting, not the allowlist.
+    expect(expanded.domains).not.toContain('console.anthropic.com');
+    expect(expanded.domains).not.toContain('statsig.anthropic.com');
   });
 });
 
@@ -545,13 +581,19 @@ describe('pluginDomainsForGitCoverage', () => {
         type: 'github',
         username: 'x-access-token',
         repositories: [{ name: 'a/b' }],
-        token: 'env:T',
+        tokenSource: 'env:T',
       }),
     ).toEqual(['github.com', 'api.github.com', 'codeload.github.com']);
   });
 
-  it('returns nothing for docker / mise plugins', () => {
+  it('returns nothing for docker / mise / claude-code plugins', () => {
     expect(pluginDomainsForGitCoverage({ type: 'docker' })).toEqual([]);
     expect(pluginDomainsForGitCoverage({ type: 'mise' })).toEqual([]);
+    expect(
+      pluginDomainsForGitCoverage({
+        type: 'claude-code',
+        authMode: 'api-key',
+      }),
+    ).toEqual([]);
   });
 });

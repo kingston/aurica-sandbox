@@ -6,14 +6,7 @@ import type {
 } from '#src/config/index.js';
 
 import type { ExpandedPlugin, PluginCommand } from '../types.js';
-import {
-  GITHUB_CAPABILITY_MAP,
-  interpolateMatcher,
-  type GithubAuthHost,
-  type GithubCapability,
-  type GithubEndpoint,
-} from './permissions.js';
-import type { GithubPermissions, GithubPlugin, GithubUser } from './schema.js';
+import type { GithubPlugin, GithubUser } from './schema.js';
 
 /**
  * Hosts that github traffic legitimately reaches. The first four are auth /
@@ -33,7 +26,8 @@ const GITHUB_DOMAINS = [
   'cli.github.com',
 ] as const;
 
-/** Hosts that get policy-scoped credential injection (subset of GITHUB_DOMAINS). */
+/** Auth hosts that get a per-host catch-all block policy when not allowed. */
+type GithubAuthHost = 'github.com' | 'api.github.com' | 'codeload.github.com';
 const GITHUB_AUTH_HOSTS: readonly GithubAuthHost[] = [
   'github.com',
   'api.github.com',
@@ -96,39 +90,23 @@ AURICA_GIT_CREDENTIAL_HELPER_EOF
 chmod 0755 ${CREDENTIAL_HELPER_PATH}`;
 
 /**
- * Default coarse matchers per host when a repo doesn't opt into
- * `permissions`. Preserves today's behaviour: token attaches to anything
- * under the repo path on the three auth hosts.
- */
-const COARSE_PATH_PER_HOST: Record<GithubAuthHost, string> = {
-  'github.com': '/{owner}/{repo}',
-  'api.github.com': '/repos/{owner}/{repo}',
-  'codeload.github.com': '/{owner}/{repo}',
-};
-
-/**
- * Expand a single github plugin into proxy domains, per-(host, repo)
- * policies that scope credential injection, a final per-host **block**
- * catch-all so requests outside the allowlisted repo paths fail fast at the
- * proxy with 403 (instead of leaking the placeholder to GitHub and getting
- * a confusing 401 back), and in-VM init commands that wire git credentials,
- * gh CLI auth, and the host machine's git identity.
+ * Expand a single github plugin into proxy domains, per-repo allow policies
+ * for git smart-HTTP (one fetch matcher set per repo on `github.com` and
+ * `codeload.github.com`, plus a push matcher unless `readOnly: true`), an
+ * optional broad allow on `api.github.com` when plugin-level `api: true`, a
+ * per-host catch-all `block` policy so requests outside the allowlist fail
+ * fast at the proxy with 403 (instead of leaking the placeholder to GitHub),
+ * and in-VM init commands that wire git credentials, gh CLI auth, and the
+ * host machine's git identity.
  *
- * Each repo emits up to one policy per auth host. When the repo carries
- * `permissions`, matchers are derived from the capability map; when
- * `permissions` is omitted, matchers are omitted too and the policy is the
- * legacy coarse "anywhere under the repo path" rule. When `permissions: {}`
- * is given explicitly, no policies are emitted for that repo (host stays
- * allowlisted; requests pass through unauthenticated).
- *
- * After all per-repo allow policies, one catch-all `block` policy per auth
- * host is appended. Policy evaluation is first-match-wins, so the more
- * specific allows win over the broad block — but anything that doesn't
- * match an allow gets a clean 403 from the proxy with the policy id in the
- * body, instead of being silently passed through (and rejected by GitHub
- * with our placeholder still in the header). Hosts that are intentionally
- * pass-through (`*.githubusercontent.com`, `cli.github.com`) are NOT
- * blocked.
+ * Per-repo capability filtering at the proxy was removed: the GitHub token
+ * itself (fine-grained PAT or App installation token) is the source of
+ * truth for which repos and which capabilities are reachable. Duplicating
+ * that at the proxy added complexity and broke gh's GraphQL-backed
+ * commands, which post to `/graphql` with the repo identity in the body
+ * where path matchers can't see it. With `api: true` the `/graphql`
+ * surface (and the rest of `api.github.com`) is opened wholesale; the
+ * token is trusted to enforce per-repo scope on API traffic.
  *
  * Credentials are written to `~/.git-credentials` so other tools in the VM
  * (gh CLI, custom scripts) can read them, with a custom credential helper
@@ -172,59 +150,46 @@ export function expandGithub(
     type: 'base64',
     prefix: `${plugin.username}:`,
   };
+  const mutations = authMutations(placeholder, plugin.tokenSource, transform);
 
   for (const repo of plugin.repositories) {
     // Schema regex guarantees `<owner>/<repo>` shape, so split always yields
     // two non-empty strings.
     const [owner, name] = repo.name.split('/') as [string, string];
 
-    if (repo.permissions === undefined) {
-      // Legacy coarse policies — one per auth host, no matchers.
-      for (const host of GITHUB_AUTH_HOSTS) {
-        policies.push(
-          coarsePolicyFor(
-            repo.name,
-            host,
-            owner,
-            name,
-            placeholder,
-            plugin.token,
-            transform,
-          ),
-        );
-      }
-    } else {
-      // Bucket capability endpoints by host; one policy per (repo, host).
-      const buckets = bucketEndpointsByHost(repo.permissions);
-      const capList = listCapabilities(repo.permissions);
-      for (const host of GITHUB_AUTH_HOSTS) {
-        const endpoints = buckets[host];
-        if (endpoints.length === 0) continue;
-        const matchers = endpoints.map((e) =>
-          interpolateMatcher(e.matcher, owner, name),
-        );
-        policies.push({
-          id: `github:${repo.name}:${host}`,
-          description: `GitHub ${capList} for ${repo.name}`,
-          domain: host,
-          matchers,
-          action: {
-            type: 'allow',
-            mutations: authMutations(placeholder, plugin.token, transform),
-          },
-        });
-      }
-    }
+    policies.push(
+      gitHostPolicyFor(
+        repo.name,
+        owner,
+        name,
+        repo.readOnly === true,
+        mutations,
+      ),
+      codeloadPolicyFor(repo.name, owner, name, mutations),
+    );
 
     credentialUrls.push(
       `https://${plugin.username}:${placeholder}@github.com/${repo.name}`,
     );
   }
 
+  if (plugin.api === true) {
+    // Open all of api.github.com — GraphQL POSTs encode repo identity in
+    // the body, so per-repo scoping at the proxy isn't meaningful for the
+    // API surface. The configured token is trusted to enforce repo scope.
+    policies.push({
+      id: 'github:api:api.github.com',
+      description: 'GitHub API access (token-scoped, including /graphql)',
+      domain: 'api.github.com',
+      action: { type: 'allow', mutations },
+    });
+  }
+
   // Catch-all block per auth host. Appended after all allow policies so
   // first-match-wins preserves the allows. Anything that reaches a
   // catch-all gets a clean 403 from the proxy instead of leaking the
-  // placeholder to GitHub.
+  // placeholder to GitHub. The api.github.com block is shadowed by the
+  // broad allow above when `api: true`, but is still emitted for symmetry.
   for (const host of GITHUB_AUTH_HOSTS) {
     policies.push({
       id: `github:block:${host}`,
@@ -275,6 +240,57 @@ export function expandGithub(
 }
 
 /**
+ * Allow policy for git smart-HTTP on `github.com` covering fetch
+ * (`info/refs` GET + `git-upload-pack` POST). Push (`git-receive-pack`
+ * POST) is added unless `readOnly` is set.
+ */
+function gitHostPolicyFor(
+  repoName: string,
+  owner: string,
+  name: string,
+  readOnly: boolean,
+  mutations: Mutation[],
+): ProxyPolicy {
+  const matchers: MatcherEntry[] = [
+    { exact: `/${owner}/${name}/info/refs`, methods: ['GET'] },
+    { exact: `/${owner}/${name}/git-upload-pack`, methods: ['POST'] },
+  ];
+  if (!readOnly) {
+    matchers.push({
+      exact: `/${owner}/${name}/git-receive-pack`,
+      methods: ['POST'],
+    });
+  }
+  return {
+    id: `github:${repoName}:github.com`,
+    description: `GitHub git smart-HTTP for ${repoName}${readOnly ? ' (read-only)' : ''}`,
+    domain: 'github.com',
+    matchers,
+    action: { type: 'allow', mutations },
+  };
+}
+
+/**
+ * Allow policy for archive downloads on `codeload.github.com`. Codeload
+ * responds to GETs only, so `readOnly` doesn't change anything here — the
+ * policy is the same shape regardless.
+ */
+function codeloadPolicyFor(
+  repoName: string,
+  owner: string,
+  name: string,
+  mutations: Mutation[],
+): ProxyPolicy {
+  return {
+    id: `github:${repoName}:codeload.github.com`,
+    description: `GitHub archive downloads for ${repoName}`,
+    domain: 'codeload.github.com',
+    matchers: [{ prefix: `/${owner}/${name}`, methods: ['GET'] }],
+    action: { type: 'allow', mutations },
+  };
+}
+
+/**
  * Two mutations on the same `Authorization` header. The first matches the
  * base64-encoded form git uses for HTTP Basic; the second matches gh's
  * plaintext `token <X>` form. Substring substitution is no-op when `from`
@@ -283,7 +299,7 @@ export function expandGithub(
  */
 function authMutations(
   placeholder: string,
-  token: string,
+  tokenSource: string,
   transform: ProxyPolicyTransform,
 ): Mutation[] {
   return [
@@ -291,14 +307,14 @@ function authMutations(
       kind: 'replace-header',
       header: 'Authorization',
       from: placeholder,
-      to: token,
+      to: tokenSource,
       transform,
     },
     {
       kind: 'replace-header',
       header: 'Authorization',
       from: placeholder,
-      to: token,
+      to: tokenSource,
     },
   ];
 }
@@ -355,62 +371,4 @@ function userIdentityCommands(user: GithubUser | undefined): PluginCommand[] {
       argv: ['git', 'config', '--global', 'user.email', user.email],
     },
   ];
-}
-
-function coarsePolicyFor(
-  repoName: string,
-  host: GithubAuthHost,
-  owner: string,
-  name: string,
-  placeholder: string,
-  token: string,
-  transform: ProxyPolicyTransform,
-): ProxyPolicy {
-  const prefix = COARSE_PATH_PER_HOST[host]
-    .replaceAll('{owner}', owner)
-    .replaceAll('{repo}', name);
-  // Single matcher entry that's effectively the legacy `pathPrefix`
-  // behaviour but with segment-boundary correctness baked in.
-  const matchers: MatcherEntry[] = [{ prefix }];
-  return {
-    id: `github:${repoName}:${host}`,
-    description: `GitHub credentials for ${repoName} (no permissions scoping)`,
-    domain: host,
-    matchers,
-    action: {
-      type: 'allow',
-      mutations: authMutations(placeholder, token, transform),
-    },
-  };
-}
-
-function bucketEndpointsByHost(
-  permissions: GithubPermissions,
-): Record<GithubAuthHost, GithubEndpoint[]> {
-  const buckets: Record<GithubAuthHost, GithubEndpoint[]> = {
-    'github.com': [],
-    'api.github.com': [],
-    'codeload.github.com': [],
-  };
-  for (const [cap, level] of Object.entries(permissions) as [
-    GithubCapability,
-    'read' | 'write' | undefined,
-  ][]) {
-    if (!level) continue;
-    for (const endpoint of GITHUB_CAPABILITY_MAP[cap][level]) {
-      buckets[endpoint.host].push(endpoint);
-    }
-  }
-  return buckets;
-}
-
-function listCapabilities(permissions: GithubPermissions): string {
-  const parts: string[] = [];
-  for (const [cap, level] of Object.entries(permissions) as [
-    GithubCapability,
-    'read' | 'write' | undefined,
-  ][]) {
-    if (level) parts.push(`${cap}:${level}`);
-  }
-  return parts.join(', ') || 'no capabilities';
 }

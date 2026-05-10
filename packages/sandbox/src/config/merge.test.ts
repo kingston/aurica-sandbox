@@ -10,7 +10,7 @@ describe('mergePlugins', () => {
     const projectPlugin: Plugin = {
       type: 'github',
       username: 'x-access-token',
-      token: 'env:GITHUB_API_KEY',
+      tokenSource: 'env:GITHUB_API_KEY',
       repositories: [{ name: 'owner/repo' }],
     };
     const result = mergePlugins([], [projectPlugin]);
@@ -21,7 +21,7 @@ describe('mergePlugins', () => {
     const userPlugin: UserPlugin = {
       type: 'github',
       username: 'x-access-token',
-      token: 'env:GITHUB_API_KEY',
+      tokenSource: 'env:GITHUB_API_KEY',
       user: { name: 'Ada', email: 'ada@example.com' },
     };
     const projectPlugin = {
@@ -33,7 +33,7 @@ describe('mergePlugins', () => {
       {
         type: 'github',
         username: 'x-access-token',
-        token: 'env:GITHUB_API_KEY',
+        tokenSource: 'env:GITHUB_API_KEY',
         user: { name: 'Ada', email: 'ada@example.com' },
         repositories: [{ name: 'owner/repo' }],
       },
@@ -43,16 +43,16 @@ describe('mergePlugins', () => {
   it('lets the project override a user-level field', () => {
     const userPlugin: UserPlugin = {
       type: 'github',
-      token: 'env:GITHUB_API_KEY',
+      tokenSource: 'env:GITHUB_API_KEY',
     };
     const projectPlugin = {
       type: 'github' as const,
       username: 'x-access-token',
-      token: 'env:OTHER_KEY',
+      tokenSource: 'env:OTHER_KEY',
       repositories: [{ name: 'owner/repo' }],
     };
     const result = mergePlugins([userPlugin], [projectPlugin]);
-    expect(result[0]).toMatchObject({ token: 'env:OTHER_KEY' });
+    expect(result[0]).toMatchObject({ tokenSource: 'env:OTHER_KEY' });
   });
 
   it('replaces user repositories entirely when project sets repositories', () => {
@@ -63,7 +63,7 @@ describe('mergePlugins', () => {
     const projectPlugin = {
       type: 'github' as const,
       username: 'x-access-token',
-      token: 'env:GITHUB_API_KEY',
+      tokenSource: 'env:GITHUB_API_KEY',
       repositories: [{ name: 'owner/a' }, { name: 'owner/b' }],
     };
     const result = mergePlugins([userPlugin], [projectPlugin]);
@@ -75,7 +75,7 @@ describe('mergePlugins', () => {
   it('omits user-level plugin types the project did not opt into', () => {
     const userPlugin: UserPlugin = {
       type: 'github',
-      token: 'env:GITHUB_API_KEY',
+      tokenSource: 'env:GITHUB_API_KEY',
     };
     const result = mergePlugins([userPlugin], []);
     expect(result).toEqual([]);
@@ -83,8 +83,8 @@ describe('mergePlugins', () => {
 
   it('uses the first user-level plugin when multiple of same type exist', () => {
     const userPlugins: UserPlugin[] = [
-      { type: 'github', token: 'env:FIRST' },
-      { type: 'github', token: 'env:SECOND' },
+      { type: 'github', tokenSource: 'env:FIRST' },
+      { type: 'github', tokenSource: 'env:SECOND' },
     ];
     const projectPlugin = {
       type: 'github' as const,
@@ -92,6 +92,6 @@ describe('mergePlugins', () => {
       repositories: [{ name: 'owner/repo' }],
     };
     const result = mergePlugins(userPlugins, [projectPlugin]);
-    expect(result[0]).toMatchObject({ token: 'env:FIRST' });
+    expect(result[0]).toMatchObject({ tokenSource: 'env:FIRST' });
   });
 });

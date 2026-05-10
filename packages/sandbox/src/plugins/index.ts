@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 
 import type { ProxyPolicy } from '#src/config/proxy-policy.js';
 
+import { expandClaudeCode } from './claude-code/index.js';
 import { expandDocker } from './docker/index.js';
 import { expandGithub } from './github/index.js';
 import { expandMise } from './mise/index.js';
@@ -13,12 +14,14 @@ import type {
 } from './types.js';
 
 export {
+  claudeCodePluginSchema,
   dockerPluginSchema,
   githubPluginSchema,
   misePluginSchema,
   pluginSchema,
 } from './schema.js';
 export type {
+  ClaudeCodePlugin,
   DockerPlugin,
   GithubPlugin,
   MisePlugin,
@@ -130,6 +133,9 @@ function expandPlugin(
     }
     case 'mise': {
       return expandMise(plugin, ctx);
+    }
+    case 'claude-code': {
+      return expandClaudeCode(plugin, placeholder, ctx);
     }
   }
 }

@@ -1,9 +1,9 @@
 /**
- * A parsed credential reference of the form `<scheme>:<name>`.
+ * A parsed credential reference of the form `<scheme>:<name>` or `<scheme>`.
  *
  * `scheme` selects which provider resolves the credential (e.g. `env`,
- * `shell`); `name` is the provider-specific payload (an env-var name, a shell
- * command, etc.).
+ * `gh-token`); `name` is the provider-specific payload (an env-var name for
+ * `env`, empty for argument-less providers like `gh-token`).
  */
 export interface CredentialSource {
   scheme: string;
@@ -11,23 +11,27 @@ export interface CredentialSource {
 }
 
 /**
- * Parse a `<scheme>:<name>` credential reference. Both halves must be
- * non-empty; the scheme allowlist is enforced by the resolver based on
+ * Parse a `<scheme>:<name>` credential reference. The scheme half must be
+ * non-empty; the name half may be empty (for argument-less providers like
+ * `gh-token`). The scheme allowlist is enforced by the resolver based on
  * registered providers, not here.
  */
 export function parseCredentialSource(value: string): CredentialSource {
   const idx = value.indexOf(':');
-  if (idx <= 0) {
+  if (idx === 0) {
     throw new Error(
-      `Invalid credential source ${JSON.stringify(value)}: expected "<scheme>:<name>"`,
+      `Invalid credential source ${JSON.stringify(value)}: scheme is empty`,
     );
   }
-  const scheme = value.slice(0, idx);
-  const name = value.slice(idx + 1);
-  if (!name) {
-    throw new Error(`Empty credential name in ${JSON.stringify(value)}`);
+  if (idx === -1) {
+    if (!value) {
+      throw new Error(
+        `Invalid credential source ${JSON.stringify(value)}: scheme is empty`,
+      );
+    }
+    return { scheme: value, name: '' };
   }
-  return { scheme, name };
+  return { scheme: value.slice(0, idx), name: value.slice(idx + 1) };
 }
 
 /**

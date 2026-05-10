@@ -2,8 +2,13 @@ import fs from 'node:fs/promises';
 
 import { z } from 'zod';
 
-import { parseCredentialSource } from '#src/credentials/index.js';
 import {
+  GH_TOKEN_API_INCOMPATIBLE_MESSAGE,
+  githubPluginShape,
+  githubTokenSourceSchema,
+} from '#src/plugins/github/schema.js';
+import {
+  claudeCodePluginSchema,
   dockerPluginSchema,
   githubPluginSchema,
   misePluginSchema,
@@ -33,20 +38,39 @@ export type {
 
 /**
  * Project-side plugin schema with the fields users typically push to
- * user-level (`username`, `token`, `user`) marked optional. `repositories`,
- * `name`, and other repo-shape fields stay required so config errors at
- * the project layer surface clearly. After merging with user-level
- * defaults, the result is re-parsed against the strict schema.
+ * user-level (`username`, `tokenSource`, `user`) marked optional.
+ * `repositories`, `name`, and other repo-shape fields stay required so
+ * config errors at the project layer surface clearly. After merging with
+ * user-level defaults, the result is re-parsed against the strict schema.
  */
-const looseProjectGithubPluginSchema = githubPluginSchema.extend({
-  username: z.string().min(1).optional(),
-  token: z.string().min(1).optional(),
-});
+// Rebuild from {@link githubPluginShape} rather than `.extend()`-ing the
+// strict schema: Zod 4 errors out when `.extend()` is called on a refined
+// schema, and the strict schema carries a `.check()`. We re-apply the
+// same invariant here by hand. The check is gated on
+// `tokenSource !== undefined`, so user-layer-sourced fields don't
+// false-positive at the loose-parse stage; the strict re-parse after
+// merging catches the merged-bad case.
+const looseProjectGithubPluginSchema = z
+  .object({
+    ...githubPluginShape,
+    username: z.string().min(1).optional(),
+    tokenSource: githubTokenSourceSchema.optional(),
+  })
+  .check((ctx) => {
+    if (ctx.value.tokenSource === 'gh-token' && ctx.value.api === true) {
+      ctx.issues.push({
+        code: 'custom',
+        input: ctx.value,
+        message: GH_TOKEN_API_INCOMPATIBLE_MESSAGE,
+      });
+    }
+  });
 
 const looseProjectPluginSchema = z.discriminatedUnion('type', [
   looseProjectGithubPluginSchema,
   dockerPluginSchema,
   misePluginSchema,
+  claudeCodePluginSchema,
 ]);
 
 const looseProjectSandboxSchema = z.object({
@@ -88,6 +112,7 @@ export const sandboxConfigSchema = z.object({
         githubPluginSchema,
         dockerPluginSchema,
         misePluginSchema,
+        claudeCodePluginSchema,
       ]),
     )
     .default([]),
@@ -96,30 +121,20 @@ export const sandboxConfigSchema = z.object({
 export type SandboxConfig = z.infer<typeof sandboxConfigSchema>;
 
 /**
- * Cross-field invariants that don't fit naturally into the schema:
- * - Each credentialed plugin's `token` must be a parseable credential source.
- */
-function assertConfigInvariants(config: SandboxConfig): void {
-  for (const plugin of config.plugins) {
-    if (plugin.type === 'github') {
-      parseCredentialSource(plugin.token);
-    }
-  }
-}
-
-/**
  * Load and validate `.aurica/sandbox.json` for `projectDir`, layered with
  * user-level defaults from `~/.aurica/sandbox/config.json`.
  *
- * The project file is allowed to omit `username`/`token`/`user` on github
- * plugins — those can come from the user layer via `mergePlugins`. After
+ * The project file is allowed to omit `username`/`tokenSource`/`user` on
+ * github plugins — those can come from the user layer via `mergePlugins`. After
  * merging, the result must satisfy the strict schema; otherwise the parse
  * error names the merged-but-still-incomplete plugin so users can see
  * which field neither layer provided.
  *
- * Throws if the project file is missing, either layer fails its schema,
- * the merged config fails strict validation, or any cross-field invariant
- * fails (e.g. plugin token isn't a parseable credential source).
+ * Throws if the project file is missing, either layer fails its schema, or
+ * the merged config fails strict validation. Per-plugin cross-field
+ * invariants live on the plugin schemas themselves (e.g. github's
+ * `gh-token` + `api: true` incompatibility) and surface as part of the
+ * strict re-parse.
  */
 export async function loadSandboxConfig(
   projectDir: string,
@@ -133,9 +148,7 @@ export async function loadSandboxConfig(
     ...projectParsed,
     plugins: mergePlugins(userConfig.plugins, projectParsed.plugins),
   };
-  const config = sandboxConfigSchema.parse(merged);
-  assertConfigInvariants(config);
-  return config;
+  return sandboxConfigSchema.parse(merged);
 }
 
 export function defaultSandboxConfig(name: string): SandboxConfig {
