@@ -13,7 +13,7 @@ import {
   type GithubCapability,
   type GithubEndpoint,
 } from './permissions.js';
-import type { GithubPermissions, GithubPlugin } from './schema.js';
+import type { GithubPermissions, GithubPlugin, GithubUser } from './schema.js';
 
 /**
  * Hosts that github traffic legitimately reaches. The first four are auth /
@@ -108,8 +108,11 @@ const COARSE_PATH_PER_HOST: Record<GithubAuthHost, string> = {
 
 /**
  * Expand a single github plugin into proxy domains, per-(host, repo)
- * policies that scope credential injection, and in-VM init commands that
- * wire git credentials.
+ * policies that scope credential injection, a final per-host **block**
+ * catch-all so requests outside the allowlisted repo paths fail fast at the
+ * proxy with 403 (instead of leaking the placeholder to GitHub and getting
+ * a confusing 401 back), and in-VM init commands that wire git credentials,
+ * gh CLI auth, and the host machine's git identity.
  *
  * Each repo emits up to one policy per auth host. When the repo carries
  * `permissions`, matchers are derived from the capability map; when
@@ -118,6 +121,15 @@ const COARSE_PATH_PER_HOST: Record<GithubAuthHost, string> = {
  * is given explicitly, no policies are emitted for that repo (host stays
  * allowlisted; requests pass through unauthenticated).
  *
+ * After all per-repo allow policies, one catch-all `block` policy per auth
+ * host is appended. Policy evaluation is first-match-wins, so the more
+ * specific allows win over the broad block — but anything that doesn't
+ * match an allow gets a clean 403 from the proxy with the policy id in the
+ * body, instead of being silently passed through (and rejected by GitHub
+ * with our placeholder still in the header). Hosts that are intentionally
+ * pass-through (`*.githubusercontent.com`, `cli.github.com`) are NOT
+ * blocked.
+ *
  * Credentials are written to `~/.git-credentials` so other tools in the VM
  * (gh CLI, custom scripts) can read them, with a custom credential helper
  * installed by the bootstrap (see {@link GH_CLI_BOOTSTRAP_SCRIPT}) that
@@ -125,10 +137,21 @@ const COARSE_PATH_PER_HOST: Record<GithubAuthHost, string> = {
  * `erase` — failed auth attempts therefore can't wipe the file.
  * `credential.useHttpPath = true` keeps per-repo path scoping. The
  * placeholder lands inside an `Authorization: Basic
- * <base64(username:placeholder)>` header on the wire; the policy's
- * `replace-header` mutation uses a `base64` transform with the same
- * `username:` prefix so it can match the encoded blob and substitute
- * `base64(username:realToken)` at request time.
+ * <base64(username:placeholder)>` header for git, or a plaintext
+ * `Authorization: token <placeholder>` header for the gh CLI; each policy
+ * carries two `replace-header` mutations — one with a `base64` transform
+ * for git, one without for gh — so both schemes substitute correctly at
+ * request time.
+ *
+ * The `gh` CLI is pre-authenticated by writing `~/.config/gh/hosts.yml`
+ * with the placeholder as `oauth_token`. Same proxy substitution rules
+ * apply on the wire.
+ *
+ * If the plugin's optional `user` field is set, two additional commands
+ * mirror its `name` / `email` into the VM's global git config so commits
+ * use that identity. The field is part of `sandbox.json` (authoritative
+ * and reproducible across machines); `aurica-sandbox init` pre-fills it
+ * from the host's `~/.gitconfig` when available.
  *
  * The `~/.git-credentials` write truncates the file so re-running init is
  * idempotent. If a sandbox config ever has multiple github plugins, the
@@ -187,7 +210,7 @@ export function expandGithub(
           matchers,
           action: {
             type: 'allow',
-            mutations: [authMutation(placeholder, plugin.token, transform)],
+            mutations: authMutations(placeholder, plugin.token, transform),
           },
         });
       }
@@ -196,6 +219,19 @@ export function expandGithub(
     credentialUrls.push(
       `https://${plugin.username}:${placeholder}@github.com/${repo.name}`,
     );
+  }
+
+  // Catch-all block per auth host. Appended after all allow policies so
+  // first-match-wins preserves the allows. Anything that reaches a
+  // catch-all gets a clean 403 from the proxy instead of leaking the
+  // placeholder to GitHub.
+  for (const host of GITHUB_AUTH_HOSTS) {
+    policies.push({
+      id: `github:block:${host}`,
+      description: `Default-deny for ${host} — paths not in any repo's allowlist`,
+      domain: host,
+      action: { type: 'block' },
+    });
   }
 
   const commands: PluginCommand[] = [
@@ -226,6 +262,8 @@ export function expandGithub(
         ...credentialUrls,
       ],
     },
+    ghHostsYamlCommand(plugin.username, placeholder),
+    ...userIdentityCommands(plugin.user),
   ];
 
   return {
@@ -234,6 +272,89 @@ export function expandGithub(
     commands,
     bootstrapScript: GH_CLI_BOOTSTRAP_SCRIPT,
   };
+}
+
+/**
+ * Two mutations on the same `Authorization` header. The first matches the
+ * base64-encoded form git uses for HTTP Basic; the second matches gh's
+ * plaintext `token <X>` form. Substring substitution is no-op when `from`
+ * isn't present, so running both in order is safe — only the matching one
+ * fires per request.
+ */
+function authMutations(
+  placeholder: string,
+  token: string,
+  transform: ProxyPolicyTransform,
+): Mutation[] {
+  return [
+    {
+      kind: 'replace-header',
+      header: 'Authorization',
+      from: placeholder,
+      to: token,
+      transform,
+    },
+    {
+      kind: 'replace-header',
+      header: 'Authorization',
+      from: placeholder,
+      to: token,
+    },
+  ];
+}
+
+/**
+ * Pre-authenticate the gh CLI by writing `~/.config/gh/hosts.yml` with the
+ * placeholder as `oauth_token`. Run as the default user so the file lands
+ * in their home with correct ownership.
+ *
+ * The YAML body is passed through `printf "%s\n" "$@"` so the placeholder
+ * never gets interpolated by the wrapping shell.
+ */
+function ghHostsYamlCommand(
+  username: string,
+  placeholder: string,
+): PluginCommand {
+  // gh expects four-space indents under the host key.
+  const lines = [
+    'github.com:',
+    `    user: ${username}`,
+    `    oauth_token: ${placeholder}`,
+    '    git_protocol: https',
+  ];
+  return {
+    user: 'default',
+    argv: [
+      'sh',
+      '-c',
+      // mkdir is idempotent; truncating the file makes init re-runs clean.
+      // umask 077 keeps perms tight on the credential file.
+      String.raw`mkdir -p "$HOME/.config/gh" && umask 077 && printf "%s\n" "$@" > "$HOME/.config/gh/hosts.yml"`,
+      'sh',
+      ...lines,
+    ],
+  };
+}
+
+/**
+ * Mirror the plugin's configured `user.name` / `user.email` into the VM's
+ * global git config so commits inside the sandbox carry the configured
+ * identity. Returns an empty list when the plugin's `user` field is unset —
+ * the field is optional, so missing means the user opted out of having
+ * the sandbox manage their git identity.
+ */
+function userIdentityCommands(user: GithubUser | undefined): PluginCommand[] {
+  if (!user) return [];
+  return [
+    {
+      user: 'default',
+      argv: ['git', 'config', '--global', 'user.name', user.name],
+    },
+    {
+      user: 'default',
+      argv: ['git', 'config', '--global', 'user.email', user.email],
+    },
+  ];
 }
 
 function coarsePolicyFor(
@@ -258,22 +379,8 @@ function coarsePolicyFor(
     matchers,
     action: {
       type: 'allow',
-      mutations: [authMutation(placeholder, token, transform)],
+      mutations: authMutations(placeholder, token, transform),
     },
-  };
-}
-
-function authMutation(
-  placeholder: string,
-  token: string,
-  transform: ProxyPolicyTransform,
-): Mutation {
-  return {
-    kind: 'replace-header',
-    header: 'Authorization',
-    from: placeholder,
-    to: token,
-    transform,
   };
 }
 

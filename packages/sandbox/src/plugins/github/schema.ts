@@ -37,6 +37,23 @@ export const githubPermissionsSchema = z.object({
 export type GithubPermissions = z.infer<typeof githubPermissionsSchema>;
 
 /**
+ * Git committer identity mirrored into the VM as `git config --global
+ * user.name` / `user.email`. Optional at the plugin level; when present,
+ * BOTH fields are required so commits never carry a half-identity.
+ *
+ * `aurica-sandbox init` pre-fills this from the host's `~/.gitconfig` when
+ * possible, but the values become part of the committed sandbox config —
+ * authoritative and reproducible across machines.
+ */
+export const githubUserSchema = z.object({
+  name: z.string().min(1),
+  email: z.string().min(1),
+});
+
+/** Git committer identity — see {@link githubUserSchema}. */
+export type GithubUser = z.infer<typeof githubUserSchema>;
+
+/**
  * GitHub auth plugin. `repositories` lists the `<owner>/<repo>` pairs the
  * token should be attached to. Path-scoping at the proxy + per-repo entries
  * in `~/.git-credentials` (with `credential.useHttpPath = true`) together
@@ -53,12 +70,16 @@ export type GithubPermissions = z.infer<typeof githubPermissionsSchema>;
  * app installation tokens the conventional value is `x-access-token`, but
  * any non-empty string is accepted.
  *
+ * `user` (optional) sets the VM's global git committer identity. See
+ * {@link githubUserSchema}.
+ *
  * `token` is a credential-source string parseable by `parseCredentialSource`
  * (v1: only `env:VAR`).
  */
 export const githubPluginSchema = z.object({
   type: z.literal('github'),
   username: z.string().min(1),
+  user: githubUserSchema.optional(),
   repositories: z
     .array(
       z.object({
