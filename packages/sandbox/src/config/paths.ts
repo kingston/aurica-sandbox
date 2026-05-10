@@ -32,3 +32,8 @@ export function stateFilePath(): string {
 export function sandboxConfigPath(projectDir: string): string {
   return path.join(projectDir, '.aurica', 'sandbox.json');
 }
+
+/** Path to the per-project env file, relative to a project dir. */
+export function projectEnvPath(projectDir: string): string {
+  return path.join(projectDir, '.aurica', '.env');
+}

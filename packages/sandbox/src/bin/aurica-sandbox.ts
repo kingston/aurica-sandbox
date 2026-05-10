@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { existsSync } from 'node:fs';
 import process from 'node:process';
 
 import { Command } from 'commander';
@@ -13,8 +14,14 @@ import { runRun } from '#src/cli/commands/run.js';
 import { runShell } from '#src/cli/commands/shell.js';
 import { runStart } from '#src/cli/commands/start.js';
 import { runStop } from '#src/cli/commands/stop.js';
+import { projectEnvPath } from '#src/config/paths.js';
 import { logger } from '#src/logger.js';
 import { runProxyProcess } from '#src/proxy/index.js';
+
+const envPath = projectEnvPath(process.cwd());
+if (existsSync(envPath)) {
+  process.loadEnvFile(envPath);
+}
 
 const program = new Command();
 
