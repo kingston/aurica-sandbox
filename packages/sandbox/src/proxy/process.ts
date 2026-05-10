@@ -111,17 +111,20 @@ export async function runProxyProcess(
   await applyRegistrations(proxy, watcher, await readState(), linuxUser, log);
 
   // Visibility: mockttp emits structured events for every request lifecycle.
-  const events = proxy.events();
-  await events.on('request', (req) => {
-    log.info(`-> ${req.method} ${req.url}`);
-  });
-  await events.on('abort', (req) => {
-    log.error(`aborted ${req.method} ${req.url}`);
-  });
-  await events.on('tls-client-error', (err) => {
-    log.error(
-      `tls error ${err.failureCause}: ${err.tlsMetadata.sniHostname ?? '?'}`,
-    );
+  // Registered via setEventSubscriber so the listeners get re-attached after
+  // every rule rebuild — mockttp's reset() drops both rules and listeners.
+  await proxy.setEventSubscriber(async (server) => {
+    await server.on('request', (req) => {
+      log.info(`-> ${req.method} ${req.url}`);
+    });
+    await server.on('abort', (req) => {
+      log.error(`aborted ${req.method} ${req.url}`);
+    });
+    await server.on('tls-client-error', (err) => {
+      log.error(
+        `tls error ${err.failureCause}: ${err.tlsMetadata.sniHostname ?? '?'}`,
+      );
+    });
   });
 
   log.info(`proxy http://${addr.host}:${addr.port} (pid ${process.pid})`);

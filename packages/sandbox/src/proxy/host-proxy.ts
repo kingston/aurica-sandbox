@@ -32,12 +32,22 @@ export interface HostProxyOptions {
  * Public surface is intentionally unchanged from the previous hand-rolled
  * implementation so `proxy/process.ts` doesn't need rewiring.
  */
+/**
+ * Callback that re-attaches event listeners to the underlying mockttp server
+ * after each rule rebuild. Mockttp's `reset()` clears event subscriptions
+ * along with rules, so consumers must re-subscribe on every rebuild or they
+ * will silently stop receiving `request` / `abort` / `tls-client-error`
+ * events after the first reload.
+ */
+export type EventSubscriber = (server: Mockttp) => Promise<void>;
+
 export class HostProxy {
   private readonly server: Mockttp;
   private readonly resolver: SubstitutionResolver;
   private readonly registrations = new Map<string, SandboxRegistration>();
   private readonly preferredPort: number;
   private listenAddress?: { host: string; port: number };
+  private eventSubscriber?: EventSubscriber;
 
   private constructor(server: Mockttp, options: HostProxyOptions) {
     this.server = server;
@@ -115,11 +125,16 @@ export class HostProxy {
   }
 
   /**
-   * The mockttp instance, exposed read-only so `proxy/process.ts` can subscribe
-   * to events (`request`, `abort`, `tls-client-error`).
+   * Register a function that re-attaches event listeners to the underlying
+   * mockttp server. Invoked once immediately and again after every rule
+   * rebuild, because mockttp's `reset()` (which we call to swap rules)
+   * also clears event subscriptions.
+   *
+   * Replaces any previously-registered subscriber.
    */
-  events(): Mockttp {
-    return this.server;
+  async setEventSubscriber(subscriber: EventSubscriber): Promise<void> {
+    this.eventSubscriber = subscriber;
+    await subscriber(this.server);
   }
 
   /**
@@ -186,6 +201,12 @@ export class HostProxy {
         'aurica-sandbox: domain not in allowlist\n',
         { 'content-type': 'text/plain' },
       );
+
+    // Mockttp's reset() above also tore down any event listeners; re-attach
+    // them now so log streams keep working across reloads.
+    if (this.eventSubscriber) {
+      await this.eventSubscriber(this.server);
+    }
   }
 }
 
