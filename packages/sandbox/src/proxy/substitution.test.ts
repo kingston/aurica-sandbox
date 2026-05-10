@@ -155,4 +155,53 @@ describe('applyActions', () => {
     );
     expect(headers.Authorization).toBe('Bearer <resolved:env:GITHUB_API_KEY>');
   });
+
+  it('applies a base64 transform symmetrically to placeholder and replacement', async () => {
+    // Mimic git Basic auth: Authorization: Basic <base64(user:placeholder)>.
+    // The proxy should match the encoded blob and substitute the encoded
+    // resolved value, with the same `username:` prefix on both sides.
+    const username = 'x-access-token';
+    const placeholder = 'gh-placeholder';
+    const action: ProxyAction = {
+      domain: 'api.github.com',
+      hook: 'replaceApiKey',
+      header: 'Authorization',
+      placeholderValue: placeholder,
+      replacementValue: 'env:GITHUB_API_KEY',
+      transform: { type: 'base64', prefix: `${username}:` },
+    };
+    const sentBlob = Buffer.from(`${username}:${placeholder}`).toString(
+      'base64',
+    );
+    const headers = { Authorization: `Basic ${sentBlob}` };
+    await applyActions(
+      [action],
+      'api.github.com',
+      '/repos/foo/bar',
+      headers,
+      resolver,
+    );
+    const expectedBlob = Buffer.from(
+      `${username}:<resolved:env:GITHUB_API_KEY>`,
+    ).toString('base64');
+    expect(headers.Authorization).toBe(`Basic ${expectedBlob}`);
+  });
+
+  it('does not match the raw placeholder when a transform is set', async () => {
+    // Defense check: with a transform configured, the raw placeholder
+    // string in the header must NOT be substituted — only the transformed
+    // form is. Otherwise an attacker who guessed the placeholder could
+    // exfiltrate the resolved token via a Bearer header.
+    const action: ProxyAction = {
+      domain: 'api.github.com',
+      hook: 'replaceApiKey',
+      header: 'Authorization',
+      placeholderValue: 'raw-placeholder',
+      replacementValue: 'env:GITHUB_API_KEY',
+      transform: { type: 'base64', prefix: 'user:' },
+    };
+    const headers = { Authorization: 'Bearer raw-placeholder' };
+    await applyActions([action], 'api.github.com', '/', headers, resolver);
+    expect(headers.Authorization).toBe('Bearer raw-placeholder');
+  });
 });

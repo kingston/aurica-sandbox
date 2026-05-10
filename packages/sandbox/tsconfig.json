@@ -2,10 +2,10 @@
   "extends": "../../tsconfig.json",
   "compilerOptions": {
     "rootDir": "src",
-    "outDir": "dist",
+    "noEmit": true,
     "types": ["node"],
     "customConditions": ["@aurica/source"]
   },
   "include": ["src"],
-  "exclude": ["src/**/*.test.ts", "dist", "node_modules"]
+  "exclude": ["dist", "node_modules"]
 }

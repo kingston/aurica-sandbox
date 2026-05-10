@@ -2,15 +2,21 @@ import { z } from 'zod';
 
 /**
  * GitHub auth plugin. `repositories` lists the `<owner>/<repo>` pairs the
- * token should be attached to. Path-scoping at the proxy + per-repo
- * `extraHeader` config in the VM together ensure the token is only sent to
- * those specific repos.
+ * token should be attached to. Path-scoping at the proxy + per-repo entries
+ * in `~/.git-credentials` (with `credential.useHttpPath = true`) together
+ * ensure the token is only sent to those specific repos.
+ *
+ * `username` is the credential username embedded in `~/.git-credentials`
+ * URLs (`https://<username>:<token>@github.com/...`). For GitHub PATs and
+ * app installation tokens the conventional value is `x-access-token`, but
+ * any non-empty string is accepted.
  *
  * `token` is a credential-source string parseable by `parseCredentialSource`
  * (v1: only `env:VAR`).
  */
 export const githubPluginSchema = z.object({
   type: z.literal('github'),
+  username: z.string().min(1),
   repositories: z
     .array(
       z.object({

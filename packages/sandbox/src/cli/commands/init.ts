@@ -22,6 +22,7 @@ export async function runInit(projectDir: string): Promise<void> {
     plugins: [
       {
         type: 'github',
+        username: 'x-access-token',
         repositories: [{ name: 'owner/repo' }],
         token: 'env:GITHUB_API_KEY',
       },

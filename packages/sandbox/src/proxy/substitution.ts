@@ -1,4 +1,4 @@
-import type { ProxyAction } from '#src/config/index.js';
+import type { ProxyAction, ProxyActionTransform } from '#src/config/index.js';
 
 /**
  * Match a host against a pattern. `*.example.com` matches `example.com` and
@@ -19,6 +19,16 @@ export interface SubstitutionResolver {
   resolve: (rawSource: string) => Promise<string>;
 }
 
+function applyTransform(
+  value: string,
+  transform: ProxyActionTransform | undefined,
+): string {
+  if (!transform) return value;
+  // Only `base64` is defined today; the discriminator is exhaustive on the
+  // schema side, so adding a new variant will surface here as a type error.
+  return Buffer.from(transform.prefix + value).toString('base64');
+}
+
 /**
  * Apply credential substitutions to a header map for a request to
  * `host`+`path`.
@@ -29,6 +39,11 @@ export interface SubstitutionResolver {
  * fires if `path.startsWith(pathPrefix)`; otherwise it fires for any path on
  * the matching host. Collisions across domains, headers, or paths cannot
  * occur.
+ *
+ * If the action has a `transform`, the placeholder and resolved replacement
+ * are both passed through it before substring matching/replacing — this lets
+ * us swap credentials inside encoded headers like `Authorization: Basic
+ * <base64(user:token)>`.
  *
  * Mutates `headers` in place and returns it.
  */
@@ -46,17 +61,18 @@ export async function applyActions(
     if (!headerKey) continue;
     const original = headers[headerKey];
     if (original === undefined) continue;
-    const replacement = await resolver.resolve(action.replacementValue);
+    const matchValue = applyTransform(
+      action.placeholderValue,
+      action.transform,
+    );
+    const resolved = await resolver.resolve(action.replacementValue);
+    const replacement = applyTransform(resolved, action.transform);
     if (Array.isArray(original)) {
       headers[headerKey] = original.map((v) =>
-        v.includes(action.placeholderValue)
-          ? v.split(action.placeholderValue).join(replacement)
-          : v,
+        v.includes(matchValue) ? v.split(matchValue).join(replacement) : v,
       );
-    } else if (original.includes(action.placeholderValue)) {
-      headers[headerKey] = original
-        .split(action.placeholderValue)
-        .join(replacement);
+    } else if (original.includes(matchValue)) {
+      headers[headerKey] = original.split(matchValue).join(replacement);
     }
   }
   return headers;

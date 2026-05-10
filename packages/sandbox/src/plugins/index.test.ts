@@ -11,6 +11,7 @@ describe('expandPlugins', () => {
   it('emits domains, actions, and commands for one github plugin', () => {
     const plugin: Plugin = {
       type: 'github',
+      username: 'x-access-token',
       repositories: [{ name: 'foo/bar' }],
       token: 'env:GITHUB_TOKEN',
     };
@@ -38,45 +39,69 @@ describe('expandPlugins', () => {
     expect(byDomain['github.com']?.pathPrefix).toBe('/foo/bar');
     expect(byDomain['api.github.com']?.pathPrefix).toBe('/repos/foo/bar');
     expect(byDomain['codeload.github.com']?.pathPrefix).toBe('/foo/bar');
+    for (const action of expanded.actions) {
+      expect(action.header).toBe('Authorization');
+      expect(action.transform).toEqual({
+        type: 'base64',
+        prefix: 'x-access-token:',
+      });
+    }
 
     expect(expanded.commands).toEqual([
       {
         user: 'default',
+        argv: ['git', 'config', '--global', 'credential.helper', 'store'],
+      },
+      {
+        user: 'default',
+        argv: ['git', 'config', '--global', 'credential.useHttpPath', 'true'],
+      },
+      {
+        user: 'default',
         argv: [
-          'git',
-          'config',
-          '--global',
-          'http.https://github.com/foo/bar.extraHeader',
-          `Authorization: Bearer ${placeholder}`,
+          'sh',
+          '-c',
+          String.raw`umask 077 && printf "%s\n" "$@" > "$HOME/.git-credentials"`,
+          'sh',
+          `https://x-access-token:${placeholder}@github.com/foo/bar`,
         ],
       },
     ]);
     expect(expanded.bootstrapScript).toBe('');
   });
 
-  it('expands multiple repos into N actions per host', () => {
+  it('expands multiple repos into N actions per host and one credentials write', () => {
     const plugin: Plugin = {
       type: 'github',
+      username: 'x-access-token',
       repositories: [{ name: 'a/b' }, { name: 'c/d' }],
       token: 'env:GITHUB_TOKEN',
     };
     const expanded = expandPlugins([plugin], ctx);
 
     expect(expanded.actions).toHaveLength(6);
-    expect(expanded.commands).toHaveLength(2);
-    const headerArgs = expanded.commands.map((c) => c.argv[3]);
-    expect(headerArgs).toContain('http.https://github.com/a/b.extraHeader');
-    expect(headerArgs).toContain('http.https://github.com/c/d.extraHeader');
+    // helper config (2) + single credentials write
+    expect(expanded.commands).toHaveLength(3);
+    const credsWrite = expanded.commands[2];
+    expect(credsWrite?.argv[0]).toBe('sh');
+    const placeholder = expanded.actions[0]?.placeholderValue ?? '';
+    const urls = credsWrite?.argv.slice(4) ?? [];
+    expect(urls).toEqual([
+      `https://x-access-token:${placeholder}@github.com/a/b`,
+      `https://x-access-token:${placeholder}@github.com/c/d`,
+    ]);
   });
 
   it('derives a unique placeholder per plugin', () => {
     const i1: Plugin = {
       type: 'github',
+      username: 'x-access-token',
       repositories: [{ name: 'foo/bar' }],
       token: 'env:GITHUB_TOKEN_1',
     };
     const i2: Plugin = {
       type: 'github',
+      username: 'x-access-token',
       repositories: [{ name: 'foo/bar' }],
       token: 'env:GITHUB_TOKEN_2',
     };
@@ -91,6 +116,7 @@ describe('expandPlugins', () => {
   it('derives the same placeholder across calls for identical plugin config', () => {
     const plugin: Plugin = {
       type: 'github',
+      username: 'x-access-token',
       repositories: [{ name: 'foo/bar' }],
       token: 'env:GITHUB_TOKEN',
     };
@@ -172,6 +198,7 @@ describe('pluginDomainsForGitCoverage', () => {
     expect(
       pluginDomainsForGitCoverage({
         type: 'github',
+        username: 'x-access-token',
         repositories: [{ name: 'a/b' }],
         token: 'env:T',
       }),

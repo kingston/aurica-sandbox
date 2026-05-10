@@ -8,8 +8,11 @@ import { pluginSchema } from '#src/plugins/schema.js';
 import { sandboxConfigPath } from './paths.js';
 import { proxyActionSchema } from './proxy-action.js';
 
-export { proxyActionSchema } from './proxy-action.js';
-export type { ProxyAction } from './proxy-action.js';
+export {
+  proxyActionSchema,
+  proxyActionTransformSchema,
+} from './proxy-action.js';
+export type { ProxyAction, ProxyActionTransform } from './proxy-action.js';
 
 export const sandboxConfigSchema = z.object({
   name: z.string().min(1),
