@@ -1,7 +1,7 @@
 import { assertSafeShellIdent } from '#src/utils/shell-safety.js';
 
-import type { DockerPlugin } from '../schema.js';
 import type { ExpandedPlugin, PluginExpansionContext } from '../types.js';
+import type { DockerPlugin } from './schema.js';
 
 /**
  * Hosts Docker reaches once the iptables lockdown is in place. The apt repo

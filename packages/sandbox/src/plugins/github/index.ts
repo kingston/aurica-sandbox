@@ -5,7 +5,6 @@ import type {
   ProxyPolicyTransform,
 } from '#src/config/index.js';
 
-import type { GithubPermissions, GithubPlugin } from '../schema.js';
 import type { ExpandedPlugin, PluginCommand } from '../types.js';
 import {
   GITHUB_CAPABILITY_MAP,
@@ -13,7 +12,8 @@ import {
   type GithubAuthHost,
   type GithubCapability,
   type GithubEndpoint,
-} from './github-permissions.js';
+} from './permissions.js';
+import type { GithubPermissions, GithubPlugin } from './schema.js';
 
 /**
  * Hosts that github traffic legitimately reaches. The first four are auth /

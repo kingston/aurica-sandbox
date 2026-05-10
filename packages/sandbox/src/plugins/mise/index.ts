@@ -1,7 +1,7 @@
 import { assertSafeShellIdent } from '#src/utils/shell-safety.js';
 
-import type { MisePlugin } from '../schema.js';
 import type { ExpandedPlugin, PluginExpansionContext } from '../types.js';
+import type { MisePlugin } from './schema.js';
 
 /**
  * Hosts mise reaches both for its own install and for `mise install <tool>`

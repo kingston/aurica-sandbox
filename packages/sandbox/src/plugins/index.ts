@@ -2,9 +2,9 @@ import { createHash } from 'node:crypto';
 
 import type { ProxyPolicy } from '#src/config/proxy-policy.js';
 
-import { expandDocker } from './providers/docker.js';
-import { expandGithub } from './providers/github.js';
-import { expandMise } from './providers/mise.js';
+import { expandDocker } from './docker/index.js';
+import { expandGithub } from './github/index.js';
+import { expandMise } from './mise/index.js';
 import type { Plugin } from './schema.js';
 import type {
   ExpandedPlugin,
