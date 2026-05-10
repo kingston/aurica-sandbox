@@ -59,7 +59,7 @@ export function expandDocker(
   assertSafeShellIdent('user', ctx.user);
   return {
     domains: [...DOCKER_DOMAINS],
-    actions: [],
+    policies: [],
     commands: [],
     bootstrapScript: dockerBootstrapScript(ctx.user),
   };

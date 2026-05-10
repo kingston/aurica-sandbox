@@ -1,4 +1,4 @@
-import type { ProxyAction } from '#src/config/proxy-action.js';
+import type { ProxyPolicy } from '#src/config/proxy-policy.js';
 
 /**
  * One command a plugin wants the orchestrator to run inside the VM after the
@@ -19,7 +19,7 @@ export interface PluginCommand {
 
 /**
  * Result of expanding a single plugin into low-level rules. `domains` and
- * `actions` shape the proxy allowlist; `commands` run post-lockdown;
+ * `policies` shape the proxy allowlist; `commands` run post-lockdown;
  * `bootstrapScript` is concatenated into the pre-lockdown init script.
  *
  * `bootstrapScript`, when set, is a shell snippet that runs as root with the
@@ -30,7 +30,7 @@ export interface PluginCommand {
  */
 export interface ExpandedPlugin {
   domains: string[];
-  actions: ProxyAction[];
+  policies: ProxyPolicy[];
   commands: PluginCommand[];
   bootstrapScript?: string;
 }

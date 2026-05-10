@@ -49,7 +49,7 @@ export function expandMise(
   assertSafeShellIdent('user', ctx.user);
   return {
     domains: [...MISE_DOMAINS],
-    actions: [],
+    policies: [],
     commands: [],
     bootstrapScript: miseBootstrapScript(ctx.user),
   };

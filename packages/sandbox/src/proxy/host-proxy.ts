@@ -1,23 +1,23 @@
 import { getLocal } from 'mockttp';
 import type { CompletedRequest, Mockttp } from 'mockttp';
 
-import type { ProxyAction } from '#src/config/index.js';
+import type { ProxyPolicy } from '#src/config/index.js';
 
 import { ensureCA } from './ca.js';
-import { applyActions, matchDomain } from './substitution.js';
+import { applyPolicies, matchDomain } from './substitution.js';
 import type { SubstitutionResolver } from './substitution.js';
 
 interface SandboxRegistration {
   /**
    * Client IP this registration's rules apply to. A request whose
    * `remoteIpAddress` matches `sourceIp` exactly is governed by this
-   * registration's `domains` + `actions`. `null` disables the registration
+   * registration's `domains` + `policies`. `null` disables the registration
    * (every request from any IP falls through to the 403 sweep) — used when a
    * sandbox's IP allocation hasn't completed.
    */
   sourceIp: string | null;
   domains: readonly string[];
-  actions: readonly ProxyAction[];
+  policies: readonly ProxyPolicy[];
 }
 
 export interface HostProxyOptions {
@@ -148,8 +148,10 @@ export class HostProxy {
     );
   }
 
-  private actionsFor(remoteIp: string): ProxyAction[] {
-    return this.registrationsForIp(remoteIp).flatMap((reg) => [...reg.actions]);
+  private policiesFor(remoteIp: string): ProxyPolicy[] {
+    return this.registrationsForIp(remoteIp).flatMap((reg) => [
+      ...reg.policies,
+    ]);
   }
 
   private isAllowedFor(host: string, remoteIp: string): boolean {
@@ -162,7 +164,8 @@ export class HostProxy {
     this.server.reset();
 
     // Allowed hosts (scoped to the requesting sandbox's IP): pass through,
-    // applying credential substitution to headers.
+    // running policies to mutate headers or short-circuit with 403 when a
+    // matching policy's action is `block`.
     await this.server
       .forAnyRequest()
       .matching((req: CompletedRequest) => {
@@ -181,14 +184,25 @@ export class HostProxy {
           const headers: Record<string, string | string[] | undefined> = {
             ...req.headers,
           };
-          await applyActions(
-            this.actionsFor(remoteIp),
+          const result = await applyPolicies(
+            this.policiesFor(remoteIp),
             parts.host,
             parts.path,
+            parts.method,
             headers,
             this.resolver,
           );
-          return { headers };
+          if (result.outcome === 'block') {
+            return {
+              response: {
+                statusCode: 403,
+                statusMessage: 'Forbidden',
+                headers: { 'content-type': 'text/plain' },
+                body: `aurica-sandbox: blocked by policy ${result.blockedBy}\n`,
+              },
+            };
+          }
+          return { headers: result.headers };
         },
       });
 
@@ -212,15 +226,16 @@ export class HostProxy {
 
 function hostAndPathFromRequest(
   req: CompletedRequest,
-): { host: string; path: string } | null {
+): { host: string; path: string; method: string } | null {
   try {
     const url = new URL(req.url);
     return {
       host: url.hostname.toLowerCase(),
       // Path is case-preserving — github paths rely on this. Includes leading
-      // slash and any query string-stripped path; pathPrefix matching is
-      // startsWith on this value.
+      // slash and any query string-stripped path; matcher prefix evaluation
+      // is segment-boundary aware (see substitution.ts).
       path: url.pathname,
+      method: req.method,
     };
   } catch {
     return null;

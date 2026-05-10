@@ -91,13 +91,21 @@ describe('HostProxy (mockttp-backed)', () => {
     proxy.register('test', {
       sourceIp: '127.0.0.1',
       domains: ['127.0.0.1'],
-      actions: [
+      policies: [
         {
+          id: 'test-policy',
           domain: '127.0.0.1',
-          hook: 'replaceApiKey',
-          header: 'Authorization',
-          placeholderValue: 'placeholder-key',
-          replacementValue: 'env:TEST_TOKEN',
+          action: {
+            type: 'allow',
+            mutations: [
+              {
+                kind: 'replace-header',
+                header: 'Authorization',
+                from: 'placeholder-key',
+                to: 'env:TEST_TOKEN',
+              },
+            ],
+          },
         },
       ],
     });
@@ -150,7 +158,7 @@ describe('HostProxy (mockttp-backed)', () => {
     proxy.register('other', {
       sourceIp: '127.0.0.1',
       domains: ['127.0.0.1', '*.example.com'],
-      actions: [],
+      policies: [],
     });
     await proxy.refresh();
     const after = proxy.summary().flatMap((e) => e.domains);
@@ -165,7 +173,7 @@ describe('HostProxy (mockttp-backed)', () => {
     proxy.register('null-ip', {
       sourceIp: null,
       domains: ['null.example.com'],
-      actions: [],
+      policies: [],
     });
     await proxy.refresh();
     try {
@@ -191,7 +199,7 @@ describe('HostProxy (mockttp-backed)', () => {
     proxy.register('sandbox-A', {
       sourceIp: '10.0.0.42',
       domains: ['127.0.0.1'],
-      actions: [],
+      policies: [],
     });
     await proxy.refresh();
     try {
@@ -207,13 +215,21 @@ describe('HostProxy (mockttp-backed)', () => {
       proxy.register('test', {
         sourceIp: '127.0.0.1',
         domains: ['127.0.0.1'],
-        actions: [
+        policies: [
           {
+            id: 'test-policy',
             domain: '127.0.0.1',
-            hook: 'replaceApiKey',
-            header: 'Authorization',
-            placeholderValue: 'placeholder-key',
-            replacementValue: 'env:TEST_TOKEN',
+            action: {
+              type: 'allow',
+              mutations: [
+                {
+                  kind: 'replace-header',
+                  header: 'Authorization',
+                  from: 'placeholder-key',
+                  to: 'env:TEST_TOKEN',
+                },
+              ],
+            },
           },
         ],
       });

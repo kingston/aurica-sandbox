@@ -6,13 +6,24 @@ import { parseCredentialSource } from '#src/credentials/index.js';
 import { pluginSchema } from '#src/plugins/schema.js';
 
 import { sandboxConfigPath } from './paths.js';
-import { proxyActionSchema } from './proxy-action.js';
+import { proxyPolicySchema } from './proxy-policy.js';
 
 export {
-  proxyActionSchema,
-  proxyActionTransformSchema,
-} from './proxy-action.js';
-export type { ProxyAction, ProxyActionTransform } from './proxy-action.js';
+  httpMethodSchema,
+  matcherEntrySchema,
+  mutationSchema,
+  policyActionSchema,
+  proxyPolicySchema,
+  proxyPolicyTransformSchema,
+} from './proxy-policy.js';
+export type {
+  HttpMethod,
+  MatcherEntry,
+  Mutation,
+  PolicyAction,
+  ProxyPolicy,
+  ProxyPolicyTransform,
+} from './proxy-policy.js';
 
 export const sandboxConfigSchema = z.object({
   name: z.string().min(1),
@@ -26,9 +37,9 @@ export const sandboxConfigSchema = z.object({
   proxy: z
     .object({
       domains: z.array(z.string().min(1)).default([]),
-      actions: z.array(proxyActionSchema).default([]),
+      policies: z.array(proxyPolicySchema).default([]),
     })
-    .default({ domains: [], actions: [] }),
+    .default({ domains: [], policies: [] }),
   plugins: z.array(pluginSchema).default([]),
 });
 
@@ -66,7 +77,7 @@ export function defaultSandboxConfig(name: string): SandboxConfig {
   return {
     name,
     resources: { cpu: 4, memoryMb: 8192, diskGb: 50 },
-    proxy: { domains: [], actions: [] },
+    proxy: { domains: [], policies: [] },
     plugins: [],
   };
 }

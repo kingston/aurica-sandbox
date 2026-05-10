@@ -1,15 +1,15 @@
-import type { ProxyAction, SandboxConfig } from '#src/config/index.js';
+import type { ProxyPolicy, SandboxConfig } from '#src/config/index.js';
 import { expandPlugins, type ExpandedPlugins } from '#src/plugins/index.js';
 
 /**
  * The proxy-relevant subset of a sandbox's rules: the host allowlist and the
- * credential-substitution actions. Everything else `expandPlugins` produces
+ * credential-substitution policies. Everything else `expandPlugins` produces
  * (post-lockdown commands, pre-lockdown bootstrap script) is consumed at VM
  * create time, not at proxy reload time.
  */
 export interface DerivedRules {
   domains: string[];
-  actions: ProxyAction[];
+  policies: ProxyPolicy[];
 }
 
 /** Context required to expand plugins (e.g. the linux user inside the VM). */
@@ -54,10 +54,13 @@ export function deriveFromConfig(
   const expanded = expandPlugins(config.plugins, { user: ctx.user });
 
   const domains = [...config.proxy.domains, ...expanded.domains];
-  const actions: ProxyAction[] = [...config.proxy.actions, ...expanded.actions];
+  const policies: ProxyPolicy[] = [
+    ...config.proxy.policies,
+    ...expanded.policies,
+  ];
 
   return {
     ...expanded,
-    rules: { domains, actions },
+    rules: { domains, policies },
   };
 }

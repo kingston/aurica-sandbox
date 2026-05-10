@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import type { ProxyAction } from '#src/config/proxy-action.js';
+import type { ProxyPolicy } from '#src/config/proxy-policy.js';
 
 import { expandDocker } from './providers/docker.js';
 import { expandGithub } from './providers/github.js';
@@ -73,7 +73,7 @@ function placeholderFor(plugin: Plugin): string {
  */
 export interface ExpandedPlugins {
   domains: string[];
-  actions: ProxyAction[];
+  policies: ProxyPolicy[];
   commands: PluginCommand[];
   bootstrapScript: string;
 }
@@ -93,7 +93,7 @@ export function expandPlugins(
   ctx: PluginExpansionContext,
 ): ExpandedPlugins {
   const domains = new Set<string>();
-  const actions: ProxyAction[] = [];
+  const policies: ProxyPolicy[] = [];
   const commands: PluginCommand[] = [];
   const bootstrapSnippets: string[] = [];
 
@@ -101,7 +101,7 @@ export function expandPlugins(
     const placeholder = placeholderFor(plugin);
     const expanded = expandPlugin(plugin, placeholder, ctx);
     for (const d of expanded.domains) domains.add(d);
-    actions.push(...expanded.actions);
+    policies.push(...expanded.policies);
     commands.push(...expanded.commands);
     if (expanded.bootstrapScript) {
       bootstrapSnippets.push(expanded.bootstrapScript);
@@ -110,7 +110,7 @@ export function expandPlugins(
 
   return {
     domains: [...domains],
-    actions,
+    policies,
     commands,
     bootstrapScript: bootstrapSnippets.join('\n\n'),
   };

@@ -6,14 +6,22 @@ export {
 } from './paths.js';
 export {
   defaultSandboxConfig,
+  httpMethodSchema,
   loadSandboxConfig,
-  proxyActionSchema,
-  proxyActionTransformSchema,
+  matcherEntrySchema,
+  mutationSchema,
+  policyActionSchema,
+  proxyPolicySchema,
+  proxyPolicyTransformSchema,
   sandboxConfigSchema,
 } from './sandbox.js';
 export type {
-  ProxyAction,
-  ProxyActionTransform,
+  HttpMethod,
+  MatcherEntry,
+  Mutation,
+  PolicyAction,
+  ProxyPolicy,
+  ProxyPolicyTransform,
   SandboxConfig,
 } from './sandbox.js';
 export { loadUserConfig } from './user.js';

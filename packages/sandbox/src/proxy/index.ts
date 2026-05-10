@@ -4,5 +4,8 @@ export { HostProxy } from './host-proxy.js';
 export type { HostProxyOptions } from './host-proxy.js';
 export { runProxyProcess } from './process.js';
 export type { ProxyProcessHandle } from './process.js';
-export { applyActions, matchDomain } from './substitution.js';
-export type { SubstitutionResolver } from './substitution.js';
+export { applyPolicies, matchDomain } from './substitution.js';
+export type {
+  EvaluationOutcome,
+  SubstitutionResolver,
+} from './substitution.js';

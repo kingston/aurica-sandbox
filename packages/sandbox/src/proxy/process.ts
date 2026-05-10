@@ -208,13 +208,13 @@ async function loadAndRegister(
 ): Promise<boolean> {
   try {
     const config = await loadSandboxConfig(entry.projectDir);
-    const { domains, actions } = deriveRulesFromConfig(config, {
+    const { domains, policies } = deriveRulesFromConfig(config, {
       user: linuxUser,
     });
     proxy.register(entry.name, {
       sourceIp: entry.ip,
       domains,
-      actions,
+      policies,
     });
     watcher.watch(entry.name, sandboxConfigPath(entry.projectDir));
     return true;
