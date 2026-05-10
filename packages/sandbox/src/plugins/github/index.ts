@@ -41,8 +41,28 @@ const GITHUB_AUTH_HOSTS: readonly GithubAuthHost[] = [
 ];
 
 /**
+ * Absolute path to the custom git credential helper installed by this
+ * plugin's bootstrap. We point `credential.helper` at this path instead of
+ * the built-in `store` so failed auth attempts can't erase the user's
+ * `~/.git-credentials` (the helper's `erase` verb is a no-op).
+ */
+const CREDENTIAL_HELPER_PATH = '/usr/local/bin/aurica-git-credential';
+
+/**
  * Pre-lockdown shell snippet that installs the GitHub CLI from its official
- * apt repo.
+ * apt repo and drops a custom git credential helper at
+ * {@link CREDENTIAL_HELPER_PATH}.
+ *
+ * The credential helper delegates `get` to `git credential-store --file
+ * ~/.git-credentials get` (so we keep git's URL/path matcher and honour
+ * `credential.useHttpPath`), but treats `store` and `erase` as no-ops. Why:
+ * `credential.helper store` deletes lines from `~/.git-credentials` when the
+ * remote returns 401 — a misfiring proxy or expired token would otherwise
+ * silently wipe the user's credentials and force a sandbox re-init. Aurica
+ * owns the file (rewritten on every init); git must not mutate it.
+ *
+ * The heredoc terminator is single-quoted so `$HOME` and `$1` inside the
+ * helper are written literally (not expanded by the bootstrap shell).
  *
  * Mirrors the shape of the docker plugin's bootstrap: curl the keyring
  * directly to /etc/apt/keyrings, write the sources file, then apt-get
@@ -58,7 +78,22 @@ ARCH=$(dpkg --print-architecture)
 echo "deb [arch=\${ARCH} signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list
 
 apt-get update -y
-apt-get install -y --no-install-recommends gh`;
+apt-get install -y --no-install-recommends gh
+
+# github plugin: install custom git credential helper. See JSDoc on
+# GH_CLI_BOOTSTRAP_SCRIPT for why we don't use \`credential.helper store\`.
+cat > ${CREDENTIAL_HELPER_PATH} <<'AURICA_GIT_CREDENTIAL_HELPER_EOF'
+#!/bin/sh
+# Aurica sandbox custom git credential helper.
+# - get: delegate to git credential-store so per-host/path scoping still works
+# - store/erase: no-op so the user's ~/.git-credentials is never mutated
+case "$1" in
+  get) exec git credential-store --file "$HOME/.git-credentials" get ;;
+  store|erase) exit 0 ;;
+  *) exit 0 ;;
+esac
+AURICA_GIT_CREDENTIAL_HELPER_EOF
+chmod 0755 ${CREDENTIAL_HELPER_PATH}`;
 
 /**
  * Default coarse matchers per host when a repo doesn't opt into
@@ -84,9 +119,12 @@ const COARSE_PATH_PER_HOST: Record<GithubAuthHost, string> = {
  * allowlisted; requests pass through unauthenticated).
  *
  * Credentials are written to `~/.git-credentials` so other tools in the VM
- * (gh CLI, custom scripts) can read them, with `credential.helper = store`
- * and `credential.useHttpPath = true` so git matches per repo path rather
- * than per host. The placeholder lands inside an `Authorization: Basic
+ * (gh CLI, custom scripts) can read them, with a custom credential helper
+ * installed by the bootstrap (see {@link GH_CLI_BOOTSTRAP_SCRIPT}) that
+ * delegates `get` to git's own credential-store but no-ops on `store`/
+ * `erase` — failed auth attempts therefore can't wipe the file.
+ * `credential.useHttpPath = true` keeps per-repo path scoping. The
+ * placeholder lands inside an `Authorization: Basic
  * <base64(username:placeholder)>` header on the wire; the policy's
  * `replace-header` mutation uses a `base64` transform with the same
  * `username:` prefix so it can match the encoded blob and substitute
@@ -163,7 +201,13 @@ export function expandGithub(
   const commands: PluginCommand[] = [
     {
       user: 'default',
-      argv: ['git', 'config', '--global', 'credential.helper', 'store'],
+      argv: [
+        'git',
+        'config',
+        '--global',
+        'credential.helper',
+        CREDENTIAL_HELPER_PATH,
+      ],
     },
     {
       user: 'default',

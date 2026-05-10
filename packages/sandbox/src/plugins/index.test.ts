@@ -80,7 +80,13 @@ describe('expandPlugins', () => {
     expect(expanded.commands).toEqual([
       {
         user: 'default',
-        argv: ['git', 'config', '--global', 'credential.helper', 'store'],
+        argv: [
+          'git',
+          'config',
+          '--global',
+          'credential.helper',
+          '/usr/local/bin/aurica-git-credential',
+        ],
       },
       {
         user: 'default',
@@ -100,6 +106,15 @@ describe('expandPlugins', () => {
     expect(expanded.bootstrapScript).toMatch(
       /apt-get install -y --no-install-recommends gh/,
     );
+    // Custom credential helper installed alongside gh CLI; `store` and
+    // `erase` are no-ops so failed auth can't wipe ~/.git-credentials.
+    expect(expanded.bootstrapScript).toMatch(
+      /cat > \/usr\/local\/bin\/aurica-git-credential/,
+    );
+    expect(expanded.bootstrapScript).toMatch(
+      /git credential-store --file "\$HOME\/\.git-credentials" get/,
+    );
+    expect(expanded.bootstrapScript).toMatch(/store\|erase\) exit 0/);
   });
 
   it('expands multiple repos into N policies per host and one credentials write', () => {
