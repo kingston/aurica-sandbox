@@ -11,25 +11,21 @@ import { parseCredentialSource } from '#src/credentials/index.js';
  * possible, but the values become part of the committed sandbox config —
  * authoritative and reproducible across machines.
  */
-export const githubUserSchema = z.object({
+export const githubUserIdentitySchema = z.object({
   name: z.string().min(1),
   email: z.string().min(1),
 });
 
-/** Git committer identity — see {@link githubUserSchema}. */
-export type GithubUser = z.infer<typeof githubUserSchema>;
+/** Git committer identity — see {@link githubUserIdentitySchema}. */
+export type GithubUserIdentity = z.infer<typeof githubUserIdentitySchema>;
 
 /**
- * `tokenSource` must be a parseable credential source — any
- * `<scheme>:<name>` string the credential cache knows how to dispatch
- * (`env:<VAR>`, `gh-token`). Wrapping `parseCredentialSource` in a `.check`
- * surfaces the parser's own error message at config-load time, instead of
- * letting it throw later when the proxy tries to resolve the credential.
- *
- * Exposed so the loose project-side schema in `config/sandbox.ts` can
- * reuse the same field via `.optional()`.
+ * Credential-source string parseable by `parseCredentialSource` (e.g.
+ * `env:<VAR>`, `gh-token`). The `.check()` surfaces the parser's own error
+ * message at config-load time rather than letting it throw later when the
+ * proxy tries to resolve the credential.
  */
-export const githubTokenSourceSchema = z
+const tokenSourceSchema = z
   .string()
   .min(1)
   .check((ctx) => {
@@ -45,96 +41,81 @@ export const githubTokenSourceSchema = z
   });
 
 /**
- * Raw github plugin shape. Exposed (alongside
- * {@link GH_TOKEN_API_INCOMPATIBLE_MESSAGE}) so the loose project-side
- * schema in `config/sandbox.ts` can rebuild a variant with `username` /
- * `tokenSource` optional and re-apply the same cross-field invariant —
- * without going through `.extend()`, which Zod 4 rejects on refined
- * schemas.
- */
-export const githubPluginShape = {
-  type: z.literal('github'),
-  username: z.string().min(1),
-  user: githubUserSchema.optional(),
-  repositories: z
-    .array(
-      z.object({
-        name: z
-          .string()
-          .min(1)
-          .regex(
-            /^[^/\s]+\/[^/\s]+$/,
-            'expected "<owner>/<repo>" with no slashes inside owner or repo',
-          ),
-        readOnly: z.boolean().optional(),
-      }),
-    )
-    .min(1),
-  tokenSource: githubTokenSourceSchema,
-  api: z.boolean().optional(),
-};
-
-/**
- * Error message for the `gh-token` + `api: true` cross-field invariant.
- * Exposed so the loose project-side schema can emit the same message from
- * its own `.check()`.
+ * Error message for the `gh-token` + `api: true` cross-field invariant. The
+ * gh CLI's token usually lacks the scopes for full API access, so combining
+ * the two would create a sandbox where the API surface is opened but
+ * authenticated with a token that can't use most of it.
  */
 export const GH_TOKEN_API_INCOMPATIBLE_MESSAGE =
   "github plugin: `tokenSource: gh-token` cannot be combined with `api: true`. The gh CLI's token usually lacks the scopes for full API access — configure a fine-grained PAT via `tokenSource: env:<VAR>` instead.";
 
 /**
- * GitHub auth plugin. `repositories` lists the `<owner>/<repo>` pairs the
- * token should be attached to. Path-scoping at the proxy + per-repo entries
- * in `~/.git-credentials` (with `credential.useHttpPath = true`) together
- * ensure the token is only sent to those specific repos.
+ * Project-level github plugin config. `username` and `tokenSource` are
+ * optional: a user-level config block may supply `defaultUsername` /
+ * `defaultTokenSource` as fallbacks. Resolution happens in the github
+ * plugin's `initialize` — if neither layer provides a value, `initialize`
+ * throws with a message that names the missing field.
  *
- * Each repo defaults to allowing fetch + push over git smart-HTTP; setting
- * `readOnly: true` drops `git-receive-pack` so push is denied at the proxy.
- *
- * Every listed repository is cloned into `/workspaces/<repo>` inside the
- * VM during init. The first entry in `repositories[]` is treated as the
- * **primary** repo: the project-level init hook (`setup-project.sh`) runs
- * with its cwd set to the primary repo path, and `AURICA_PROJECT_DIR` is
- * written into `/etc/environment` so every PAM-launched shell sees it.
- *
- * `api` (plugin-level, default `false`) controls whether the configured
- * token is attached to `api.github.com` traffic. `api.github.com` is always
- * reachable through the proxy — the flag only governs authentication:
- *
- * - `api: true` attaches the token to every request, opening the
- *   token-scoped API surface (including `/graphql`). This is a deliberate
- *   bypass of repo scoping for the API — GraphQL POSTs encode repo identity
- *   in the request body rather than the URL, so the proxy can't constrain
- *   them per-repo; the token is trusted to enforce that. Disallowed in
- *   combination with `tokenSource: gh-token`, since the gh CLI's token
- *   typically lacks the scopes that make this useful.
- * - `api: false` (the default) lets requests through unauthenticated, so
- *   tools that only need public endpoints (e.g. mise resolving release
- *   versions) keep working without granting the token broad API scope.
- *   Subject to GitHub's anonymous rate limit (60/hr/IP).
- *
- * `username` is the credential username embedded in `~/.git-credentials`
- * URLs (`https://<username>:<token>@github.com/...`). For GitHub PATs and
- * app installation tokens the conventional value is `x-access-token`, but
- * any non-empty string is accepted.
- *
- * `user` (optional) sets the VM's global git committer identity. See
- * {@link githubUserSchema}.
- *
- * `tokenSource` is a credential-source string parseable by
- * `parseCredentialSource`. Supported schemes: `env:<VAR>` and `gh-token`.
+ * `repositories` is required and must be non-empty so a project's
+ * `sandbox.json` always names exactly which repos the plugin should clone +
+ * scope auth to. `api` (default false) controls whether the configured
+ * token is attached to `api.github.com` traffic; `api: true` plus
+ * `tokenSource: gh-token` is rejected here, since user-level
+ * `defaultTokenSource` is never `gh-token` (env-only).
  */
-export const githubPluginSchema = z.object(githubPluginShape).check((ctx) => {
-  // Skips when `tokenSource` is undefined — the loose project-side schema
-  // may defer it to the user layer, and the strict re-parse after merging
-  // catches the merged-bad case.
-  if (ctx.value.tokenSource === 'gh-token' && ctx.value.api === true) {
-    ctx.issues.push({
-      code: 'custom',
-      input: ctx.value,
-      message: GH_TOKEN_API_INCOMPATIBLE_MESSAGE,
-    });
-  }
+export const githubProjectConfigSchema = z
+  .object({
+    username: z.string().min(1).optional(),
+    user: githubUserIdentitySchema.optional(),
+    repositories: z
+      .array(
+        z.object({
+          name: z
+            .string()
+            .min(1)
+            .regex(
+              /^[^/\s]+\/[^/\s]+$/,
+              'expected "<owner>/<repo>" with no slashes inside owner or repo',
+            ),
+          readOnly: z.boolean().optional(),
+        }),
+      )
+      .min(1),
+    tokenSource: tokenSourceSchema.optional(),
+    api: z.boolean().optional(),
+  })
+  .check((ctx) => {
+    if (ctx.value.tokenSource === 'gh-token' && ctx.value.api === true) {
+      ctx.issues.push({
+        code: 'custom',
+        input: ctx.value,
+        message: GH_TOKEN_API_INCOMPATIBLE_MESSAGE,
+      });
+    }
+  });
+
+/** Github project config — see {@link githubProjectConfigSchema}. */
+export type GithubProjectConfig = z.infer<typeof githubProjectConfigSchema>;
+
+/**
+ * User-level github defaults. All fields are optional. `defaultTokenSource`
+ * is the env-var-resolved credential the github plugin falls back to when
+ * the project's `tokenSource` is omitted; `defaultUsername` is the
+ * git-credentials username (conventionally `x-access-token` for GitHub
+ * PATs); `defaultUser` is the global git committer identity.
+ *
+ * The user-level layer never carries `gh-token` semantics — the gh CLI's
+ * token is implicit and project-bound by design, so users who want
+ * gh-token must declare it explicitly in `sandbox.json`. The schema
+ * therefore reuses the same `tokenSource` validator but the
+ * `gh-token`/`api: true` invariant is moot here (no `api` field on the
+ * user side).
+ */
+export const githubUserConfigSchema = z.object({
+  defaultUsername: z.string().min(1).optional(),
+  defaultTokenSource: tokenSourceSchema.optional(),
+  defaultUser: githubUserIdentitySchema.optional(),
 });
 
-export type GithubPlugin = z.infer<typeof githubPluginSchema>;
+/** Github user-level defaults — see {@link githubUserConfigSchema}. */
+export type GithubUserConfig = z.infer<typeof githubUserConfigSchema>;

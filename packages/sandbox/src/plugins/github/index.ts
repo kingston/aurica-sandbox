@@ -6,12 +6,13 @@ import type {
 } from '#src/config/index.js';
 import { assertSafeShellIdent } from '#src/utils/shell-safety.js';
 
-import type {
-  ExpandedPlugin,
-  PluginCommand,
-  PluginExpansionContext,
-} from '../types.js';
-import type { GithubPlugin, GithubUser } from './schema.js';
+import type { PluginCommand, SandboxPlugin } from '../types.js';
+import {
+  type GithubProjectConfig,
+  type GithubUserIdentity,
+  githubProjectConfigSchema,
+  githubUserConfigSchema,
+} from './schema.js';
 
 /**
  * Hosts that github traffic legitimately reaches. The first four are auth /
@@ -87,197 +88,194 @@ AURICA_GIT_CREDENTIAL_HELPER_EOF
 chmod 0755 ${CREDENTIAL_HELPER_PATH}`;
 
 /**
- * Expand a single github plugin into proxy domains, per-repo allow policies
- * for git smart-HTTP (one fetch matcher set per repo on `github.com` and
- * `codeload.github.com`, plus a push matcher unless `readOnly: true`), a
- * broad allow on `api.github.com` (token-bearing when plugin-level `api:
- * true`, anonymous passthrough otherwise), and in-VM init commands that
- * wire git credentials, gh CLI auth, and the host machine's git identity.
+ * GitHub auth plugin. `repositories` lists the `<owner>/<repo>` pairs the
+ * token should be attached to. Path-scoping at the proxy + per-repo entries
+ * in `~/.git-credentials` (with `credential.useHttpPath = true`) together
+ * ensure the token is only sent to those specific repos.
  *
- * No catch-all block policies are emitted. Requests to allowlisted hosts
- * that don't match a per-repo allow pass through unmodified (see
- * `applyPolicies`); placeholder leakage is prevented upstream by
- * `credential.useHttpPath = true`, which makes git only send credentials
- * when the request path matches a stored credential URL's path — so a
- * request to a non-configured repo arrives unauthenticated rather than
- * carrying the placeholder.
+ * Each repo defaults to allowing fetch + push over git smart-HTTP; setting
+ * `readOnly: true` drops `git-receive-pack` so push is denied at the proxy.
  *
- * Per-repo capability filtering at the proxy was removed: the GitHub token
- * itself (fine-grained PAT or App installation token) is the source of
- * truth for which repos and which capabilities are reachable. Duplicating
- * that at the proxy added complexity and broke gh's GraphQL-backed
- * commands, which post to `/graphql` with the repo identity in the body
- * where path matchers can't see it. With `api: true` the `/graphql`
- * surface (and the rest of `api.github.com`) is opened wholesale and the
- * token is attached; with `api: false` the same surface is reachable but
- * unauthenticated, so anonymous tooling (e.g. mise's release-version
- * probes) works without granting the token broad API scope.
+ * Every listed repository is cloned into `/workspaces/<repo>` inside the
+ * VM during init. The first entry in `repositories[]` is treated as the
+ * **primary** repo: the project-level init hook (`setup-project.sh`) runs
+ * with its cwd set to the primary repo path, and `AURICA_PROJECT_DIR` is
+ * written into `/etc/environment` so every PAM-launched shell sees it.
  *
- * Credentials are written to `~/.git-credentials` so other tools in the VM
- * (gh CLI, custom scripts) can read them, with a custom credential helper
- * installed by the bootstrap (see {@link GH_CLI_BOOTSTRAP_SCRIPT}) that
- * delegates `get` to git's own credential-store but no-ops on `store`/
- * `erase` — failed auth attempts therefore can't wipe the file.
- * `credential.useHttpPath = true` keeps per-repo path scoping. The
- * placeholder lands inside an `Authorization: Basic
- * <base64(username:placeholder)>` header for git, or a plaintext
- * `Authorization: token <placeholder>` header for the gh CLI; each policy
- * carries two `replace-header` mutations — one with a `base64` transform
- * for git, one without for gh — so both schemes substitute correctly at
- * request time.
+ * `api` (plugin-level, default `false`) controls whether the configured
+ * token is attached to `api.github.com` traffic. `api.github.com` is always
+ * reachable through the proxy — the flag only governs authentication:
  *
- * When `api: true`, the `gh` CLI is pre-authenticated by writing
- * `~/.config/gh/hosts.yml` with the placeholder as `oauth_token`; the
- * `api.github.com` allow policy carries the same `replace-header`
- * mutations as the git-host policies, so the placeholder is substituted
- * for the real token on the wire. When `api: false`, the hosts.yml file
- * is intentionally NOT written: the `api.github.com` policy is an
- * unauthenticated passthrough with no mutations, so writing the
- * placeholder there would leak it verbatim to GitHub on any `gh` call.
- * The user opted out of API auth, so leaving `gh` unauthenticated inside
- * the VM is the honest behavior.
+ * - `api: true` attaches the token to every request, opening the
+ *   token-scoped API surface (including `/graphql`). This is a deliberate
+ *   bypass of repo scoping for the API — GraphQL POSTs encode repo identity
+ *   in the request body rather than the URL, so the proxy can't constrain
+ *   them per-repo; the token is trusted to enforce that. Disallowed in
+ *   combination with `tokenSource: gh-token`, since the gh CLI's token
+ *   typically lacks the scopes that make this useful.
+ * - `api: false` (the default) lets requests through unauthenticated, so
+ *   tools that only need public endpoints (e.g. mise resolving release
+ *   versions) keep working without granting the token broad API scope.
+ *   Subject to GitHub's anonymous rate limit (60/hr/IP).
  *
- * If the plugin's optional `user` field is set, two additional commands
- * mirror its `name` / `email` into the VM's global git config so commits
- * use that identity. The field is part of `sandbox.json` (authoritative
- * and reproducible across machines); `aurica-sandbox init` pre-fills it
- * from the host's `~/.gitconfig` when available.
+ * `username` is the credential username embedded in `~/.git-credentials`
+ * URLs (`https://<username>:<token>@github.com/...`). For GitHub PATs and
+ * app installation tokens the conventional value is `x-access-token`, but
+ * any non-empty string is accepted. May come from user-level
+ * `defaultUsername` when omitted at the project level.
  *
- * The `~/.git-credentials` write truncates the file so re-running init is
- * idempotent. If a sandbox config ever has multiple github plugins, the
- * last-emitted plugin's command would clobber earlier ones — config
- * validation should reject that case (out of scope here).
+ * `user` (optional) sets the VM's global git committer identity. May come
+ * from user-level `defaultUser` when omitted at the project level.
  *
- * All policies for one plugin share `placeholder`, so the resolver only
- * needs to know which plugin the placeholder belongs to.
+ * `tokenSource` is a credential-source string parseable by
+ * `parseCredentialSource`. Supported schemes: `env:<VAR>` and `gh-token`.
+ * May come from user-level `defaultTokenSource` when omitted at the
+ * project level.
  */
-export function expandGithub(
-  plugin: GithubPlugin,
-  placeholder: string,
-  ctx: PluginExpansionContext,
-): ExpandedPlugin {
-  // The clone destination paths are interpolated as argv (not shell), so
-  // they are not vulnerable to shell metacharacters, but we still validate
-  // the linux user for consistency with the other plugins and to keep the
-  // home-directory path predictable.
-  assertSafeShellIdent('user', ctx.user);
+export const githubPlugin: SandboxPlugin<
+  typeof githubUserConfigSchema,
+  typeof githubProjectConfigSchema
+> = {
+  name: 'github',
+  projectConfigSchema: githubProjectConfigSchema,
+  userConfigSchema: githubUserConfigSchema,
+  initialize({ project, user, placeholder, linuxUser }) {
+    // The clone destination paths are interpolated as argv (not shell), so
+    // they are not vulnerable to shell metacharacters, but we still validate
+    // the linux user for consistency with the other plugins and to keep the
+    // home-directory path predictable.
+    assertSafeShellIdent('linuxUser', linuxUser);
 
-  const policies: ProxyPolicy[] = [];
-  const credentialUrls: string[] = [];
+    const username = project.username ?? user?.defaultUsername;
+    if (!username) {
+      throw new Error(
+        'github plugin: `username` must be set on the project config or as `defaultUsername` on the user-level config.',
+      );
+    }
+    const tokenSource = project.tokenSource ?? user?.defaultTokenSource;
+    if (!tokenSource) {
+      throw new Error(
+        'github plugin: `tokenSource` must be set on the project config or as `defaultTokenSource` on the user-level config.',
+      );
+    }
+    const gitUser = project.user ?? user?.defaultUser;
 
-  const transform: ProxyPolicyTransform = {
-    type: 'base64',
-    prefix: `${plugin.username}:`,
-  };
-  const mutations = authMutations(placeholder, plugin.tokenSource, transform);
+    const policies: ProxyPolicy[] = [];
+    const credentialUrls: string[] = [];
 
-  for (const repo of plugin.repositories) {
-    // Schema regex guarantees `<owner>/<repo>` shape, so split always yields
-    // two non-empty strings.
-    const [owner, name] = repo.name.split('/') as [string, string];
+    const transform: ProxyPolicyTransform = {
+      type: 'base64',
+      prefix: `${username}:`,
+    };
+    const mutations = authMutations(placeholder, tokenSource, transform);
 
-    policies.push(
-      gitHostPolicyFor(
-        repo.name,
-        owner,
-        name,
-        repo.readOnly === true,
-        mutations,
-      ),
-      codeloadPolicyFor(repo.name, owner, name, mutations),
-    );
+    for (const repo of project.repositories) {
+      // Schema regex guarantees `<owner>/<repo>` shape, so split always yields
+      // two non-empty strings.
+      const [owner, name] = repo.name.split('/') as [string, string];
 
-    // Write both URL forms (bare and `.git`-suffixed). With
-    // `credential.useHttpPath = true`, git credential-store matches the
-    // stored URL's path against the request's path exactly — so a clone of
-    // `<owner>/<repo>.git` won't find an entry stored under
-    // `<owner>/<repo>`. Our checkout uses the `.git` form, but user scripts
-    // inside the VM may clone with either, so we store both.
-    credentialUrls.push(
-      `https://${plugin.username}:${placeholder}@github.com/${repo.name}`,
-      `https://${plugin.username}:${placeholder}@github.com/${repo.name}.git`,
-    );
-  }
+      policies.push(
+        gitHostPolicyFor(
+          repo.name,
+          owner,
+          name,
+          repo.readOnly === true,
+          mutations,
+        ),
+        codeloadPolicyFor(repo.name, owner, name, mutations),
+      );
 
-  if (plugin.api === true) {
-    // Open all of api.github.com — GraphQL POSTs encode repo identity in
-    // the body, so per-repo scoping at the proxy isn't meaningful for the
-    // API surface. The configured token is trusted to enforce repo scope.
-    policies.push({
-      id: 'github:api:api.github.com',
-      description: 'GitHub API access (token-scoped, including /graphql)',
-      domain: 'api.github.com',
-      action: { type: 'allow', mutations },
-    });
-  } else {
-    // No token attached, but let requests through — tools like mise hit
-    // `api.github.com/repos/<owner>/<repo>/releases` for version
-    // resolution and only need anonymous access (subject to GitHub's
-    // 60/hr/IP unauthenticated rate limit).
-    policies.push({
-      id: 'github:api:passthrough:api.github.com',
-      description: 'GitHub API anonymous passthrough (no token attached)',
-      domain: 'api.github.com',
-      action: { type: 'allow' },
-    });
-  }
+      // Write both URL forms (bare and `.git`-suffixed). With
+      // `credential.useHttpPath = true`, git credential-store matches the
+      // stored URL's path against the request's path exactly — so a clone of
+      // `<owner>/<repo>.git` won't find an entry stored under
+      // `<owner>/<repo>`. Our checkout uses the `.git` form, but user scripts
+      // inside the VM may clone with either, so we store both.
+      credentialUrls.push(
+        `https://${username}:${placeholder}@github.com/${repo.name}`,
+        `https://${username}:${placeholder}@github.com/${repo.name}.git`,
+      );
+    }
 
-  // Every listed repo is cloned. The first entry is the primary repo —
-  // `setup-project.sh` runs inside its directory and `AURICA_PROJECT_DIR`
-  // points at it via `/etc/environment`. The schema requires at least one
-  // repository, so `primary` is always defined; guard for the type system.
-  const primary = plugin.repositories[0];
-  if (!primary) {
-    throw new Error('github plugin: repositories[] must be non-empty');
-  }
-  // Schema regex guarantees `<owner>/<repo>` shape.
-  const [, primaryName] = primary.name.split('/') as [string, string];
-  const projectDir = `/workspaces/${primaryName}`;
+    if (project.api === true) {
+      // Open all of api.github.com — GraphQL POSTs encode repo identity in
+      // the body, so per-repo scoping at the proxy isn't meaningful for the
+      // API surface. The configured token is trusted to enforce repo scope.
+      policies.push({
+        id: 'github:api:api.github.com',
+        description: 'GitHub API access (token-scoped, including /graphql)',
+        domain: 'api.github.com',
+        action: { type: 'allow', mutations },
+      });
+    } else {
+      // No token attached, but let requests through — tools like mise hit
+      // `api.github.com/repos/<owner>/<repo>/releases` for version
+      // resolution and only need anonymous access (subject to GitHub's
+      // 60/hr/IP unauthenticated rate limit).
+      policies.push({
+        id: 'github:api:passthrough:api.github.com',
+        description: 'GitHub API anonymous passthrough (no token attached)',
+        domain: 'api.github.com',
+        action: { type: 'allow' },
+      });
+    }
 
-  const commands: PluginCommand[] = [
-    {
-      user: 'default',
-      argv: [
-        'git',
-        'config',
-        '--global',
-        'credential.helper',
-        CREDENTIAL_HELPER_PATH,
-      ],
-    },
-    {
-      user: 'default',
-      argv: ['git', 'config', '--global', 'credential.useHttpPath', 'true'],
-    },
-    {
-      user: 'default',
-      argv: [
-        'sh',
-        '-c',
-        // umask 0600s the file on creation; truncating each init makes the
-        // operation idempotent. URLs come in via "$@" so the placeholder is
-        // never interpolated into the script body.
-        String.raw`umask 077 && printf "%s\n" "$@" > "$HOME/.git-credentials"`,
-        'sh',
-        ...credentialUrls,
-      ],
-    },
-    ...(plugin.api === true
-      ? [ghHostsYamlCommand(plugin.username, placeholder)]
-      : []),
-    ...userIdentityCommands(plugin.user),
-    ...checkoutCommands(plugin.repositories),
-    etcEnvironmentProjectDirCommand(projectDir),
-  ];
+    // Every listed repo is cloned. The first entry is the primary repo —
+    // `setup-project.sh` runs inside its directory and `AURICA_PROJECT_DIR`
+    // points at it via `/etc/environment`. The schema requires at least one
+    // repository, so `primary` is always defined; guard for the type system.
+    const primary = project.repositories[0];
+    if (!primary) {
+      throw new Error('github plugin: repositories[] must be non-empty');
+    }
+    const [, primaryName] = primary.name.split('/') as [string, string];
+    const projectDir = `/workspaces/${primaryName}`;
 
-  return {
-    domains: [...GITHUB_DOMAINS],
-    policies,
-    commands,
-    bootstrapScript: GH_CLI_BOOTSTRAP_SCRIPT,
-    projectInitCwdOverride: projectDir,
-  };
-}
+    const commands: PluginCommand[] = [
+      {
+        user: 'default',
+        argv: [
+          'git',
+          'config',
+          '--global',
+          'credential.helper',
+          CREDENTIAL_HELPER_PATH,
+        ],
+      },
+      {
+        user: 'default',
+        argv: ['git', 'config', '--global', 'credential.useHttpPath', 'true'],
+      },
+      {
+        user: 'default',
+        argv: [
+          'sh',
+          '-c',
+          // umask 0600s the file on creation; truncating each init makes the
+          // operation idempotent. URLs come in via "$@" so the placeholder is
+          // never interpolated into the script body.
+          String.raw`umask 077 && printf "%s\n" "$@" > "$HOME/.git-credentials"`,
+          'sh',
+          ...credentialUrls,
+        ],
+      },
+      ...(project.api === true
+        ? [ghHostsYamlCommand(username, placeholder)]
+        : []),
+      ...userIdentityCommands(gitUser),
+      ...checkoutCommands(project.repositories),
+      etcEnvironmentProjectDirCommand(projectDir),
+    ];
+
+    return {
+      domains: [...GITHUB_DOMAINS],
+      policies,
+      commands,
+      bootstrapScript: GH_CLI_BOOTSTRAP_SCRIPT,
+      projectInitCwdOverride: projectDir,
+    };
+  },
+};
 
 /**
  * Allow policy for git smart-HTTP on `github.com` covering fetch
@@ -378,7 +376,7 @@ function authMutations(
  * placeholder as `oauth_token`. Run as the default user so the file lands
  * in their home with correct ownership.
  *
- * Only called when the plugin's `api: true` — see {@link expandGithub} for
+ * Only called when the plugin's `api: true` — see {@link githubPlugin} for
  * why writing this file with `api: false` would leak the placeholder.
  *
  * The YAML body is passed through `printf "%s\n" "$@"` so the placeholder
@@ -428,10 +426,9 @@ function ghHostsYamlCommand(
  * no-op for already-checked-out repos.
  */
 function checkoutCommands(
-  repos: readonly GithubPlugin['repositories'][number][],
+  repos: readonly GithubProjectConfig['repositories'][number][],
 ): PluginCommand[] {
   return repos.map((repo) => {
-    // Schema regex guarantees `<owner>/<repo>` shape.
     const [, repoName] = repo.name.split('/') as [string, string];
     const url = `https://github.com/${repo.name}.git`;
     const dest = `/workspaces/${repoName}`;
@@ -480,13 +477,14 @@ function etcEnvironmentProjectDirCommand(projectDir: string): PluginCommand {
 }
 
 /**
- * Mirror the plugin's configured `user.name` / `user.email` into the VM's
- * global git config so commits inside the sandbox carry the configured
- * identity. Returns an empty list when the plugin's `user` field is unset —
- * the field is optional, so missing means the user opted out of having
- * the sandbox manage their git identity.
+ * Mirror the resolved `user.name` / `user.email` into the VM's global git
+ * config so commits inside the sandbox carry the configured identity.
+ * Returns an empty list when no identity was resolved — `user` is optional
+ * on both project and user-level configs.
  */
-function userIdentityCommands(user: GithubUser | undefined): PluginCommand[] {
+function userIdentityCommands(
+  user: GithubUserIdentity | undefined,
+): PluginCommand[] {
   if (!user) return [];
   return [
     {

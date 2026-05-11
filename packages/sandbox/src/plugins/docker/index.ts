@@ -1,7 +1,7 @@
 import { assertSafeShellIdent } from '#src/utils/shell-safety.js';
 
-import type { ExpandedPlugin, PluginExpansionContext } from '../types.js';
-import type { DockerPlugin } from './schema.js';
+import type { SandboxPlugin } from '../types.js';
+import { dockerProjectConfigSchema } from './schema.js';
 
 /**
  * Hosts Docker reaches once the iptables lockdown is in place. The apt repo
@@ -48,19 +48,24 @@ usermod -aG docker ${user}`;
 }
 
 /**
- * Expand a docker plugin. Contributes proxy domains for the apt repo and
- * Docker Hub, plus a pre-lockdown bootstrap snippet that installs Docker.
- * No post-lockdown commands or proxy actions.
+ * Docker plugin. Installs Docker Engine pre-lockdown and adds the default
+ * user to the `docker` group. Contributes proxy domains for the apt repo
+ * and Docker Hub so post-lockdown `docker pull` works.
  */
-export function expandDocker(
-  _plugin: DockerPlugin,
-  ctx: PluginExpansionContext,
-): ExpandedPlugin {
-  assertSafeShellIdent('user', ctx.user);
-  return {
-    domains: [...DOCKER_DOMAINS],
-    policies: [],
-    commands: [],
-    bootstrapScript: dockerBootstrapScript(ctx.user),
-  };
-}
+export const dockerPlugin: SandboxPlugin<
+  undefined,
+  typeof dockerProjectConfigSchema
+> = {
+  name: 'docker',
+  projectConfigSchema: dockerProjectConfigSchema,
+  userConfigSchema: undefined,
+  initialize({ linuxUser }) {
+    assertSafeShellIdent('linuxUser', linuxUser);
+    return {
+      domains: [...DOCKER_DOMAINS],
+      policies: [],
+      commands: [],
+      bootstrapScript: dockerBootstrapScript(linuxUser),
+    };
+  },
+};

@@ -1,12 +1,10 @@
 import { z } from 'zod';
 
 /**
- * Docker plugin. Installs Docker Engine pre-lockdown and adds the default
- * user to the `docker` group. Contributes proxy domains for the apt repo
- * and Docker Hub so post-lockdown `docker pull` works.
+ * Docker plugin project config. The plugin currently exposes no
+ * project-level options — `{ "docker": {} }` is enough to activate it.
  */
-export const dockerPluginSchema = z.object({
-  type: z.literal('docker'),
-});
+export const dockerProjectConfigSchema = z.object({});
 
-export type DockerPlugin = z.infer<typeof dockerPluginSchema>;
+/** Docker plugin project config — see {@link dockerProjectConfigSchema}. */
+export type DockerProjectConfig = z.infer<typeof dockerProjectConfigSchema>;

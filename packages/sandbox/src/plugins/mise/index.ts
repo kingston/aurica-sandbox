@@ -1,7 +1,7 @@
 import { assertSafeShellIdent } from '#src/utils/shell-safety.js';
 
-import type { ExpandedPlugin, PluginExpansionContext } from '../types.js';
-import type { MisePlugin } from './schema.js';
+import type { SandboxPlugin } from '../types.js';
+import { miseProjectConfigSchema } from './schema.js';
 
 /**
  * Hosts mise reaches both for its own install and for `mise install <tool>`
@@ -75,19 +75,24 @@ MISE_SHIM_EOF`;
 }
 
 /**
- * Expand a mise plugin. Contributes proxy domains for mise itself and
- * common language CDNs, plus a pre-lockdown bootstrap snippet that installs
- * mise. No post-lockdown commands or proxy actions.
+ * mise plugin. Contributes proxy domains for mise itself and common
+ * language CDNs, plus a pre-lockdown bootstrap snippet that installs mise.
+ * No post-lockdown commands or proxy actions.
  */
-export function expandMise(
-  _plugin: MisePlugin,
-  ctx: PluginExpansionContext,
-): ExpandedPlugin {
-  assertSafeShellIdent('user', ctx.user);
-  return {
-    domains: [...MISE_DOMAINS],
-    policies: [],
-    commands: [],
-    bootstrapScript: miseBootstrapScript(ctx.user),
-  };
-}
+export const misePlugin: SandboxPlugin<
+  undefined,
+  typeof miseProjectConfigSchema
+> = {
+  name: 'mise',
+  projectConfigSchema: miseProjectConfigSchema,
+  userConfigSchema: undefined,
+  initialize({ linuxUser }) {
+    assertSafeShellIdent('linuxUser', linuxUser);
+    return {
+      domains: [...MISE_DOMAINS],
+      policies: [],
+      commands: [],
+      bootstrapScript: miseBootstrapScript(linuxUser),
+    };
+  },
+};

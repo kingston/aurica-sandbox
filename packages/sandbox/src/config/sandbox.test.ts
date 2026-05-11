@@ -38,15 +38,14 @@ describe('loadSandboxConfig — cross-field invariants', () => {
   it('rejects tokenSource: gh-token combined with api: true', async () => {
     const dir = await writeFixture({
       name: 'test',
-      plugins: [
-        {
-          type: 'github',
+      plugins: {
+        github: {
           username: 'u',
           repositories: [{ name: 'a/b' }],
           tokenSource: 'gh-token',
           api: true,
         },
-      ],
+      },
     });
     tmpDirs.push(dir);
 
@@ -58,20 +57,18 @@ describe('loadSandboxConfig — cross-field invariants', () => {
   it('accepts tokenSource: gh-token without api', async () => {
     const dir = await writeFixture({
       name: 'test',
-      plugins: [
-        {
-          type: 'github',
+      plugins: {
+        github: {
           username: 'u',
           repositories: [{ name: 'a/b' }],
           tokenSource: 'gh-token',
         },
-      ],
+      },
     });
     tmpDirs.push(dir);
 
     const config = await loadSandboxConfig(dir);
-    expect(config.plugins[0]).toMatchObject({
-      type: 'github',
+    expect(config.plugins.github).toMatchObject({
       tokenSource: 'gh-token',
     });
   });
@@ -79,21 +76,19 @@ describe('loadSandboxConfig — cross-field invariants', () => {
   it('accepts tokenSource: env:VAR combined with api: true', async () => {
     const dir = await writeFixture({
       name: 'test',
-      plugins: [
-        {
-          type: 'github',
+      plugins: {
+        github: {
           username: 'u',
           repositories: [{ name: 'a/b' }],
           tokenSource: 'env:GITHUB_TOKEN',
           api: true,
         },
-      ],
+      },
     });
     tmpDirs.push(dir);
 
     const config = await loadSandboxConfig(dir);
-    expect(config.plugins[0]).toMatchObject({
-      type: 'github',
+    expect(config.plugins.github).toMatchObject({
       tokenSource: 'env:GITHUB_TOKEN',
       api: true,
     });
@@ -102,14 +97,13 @@ describe('loadSandboxConfig — cross-field invariants', () => {
   it('rejects tokenSource that is not a parseable credential source', async () => {
     const dir = await writeFixture({
       name: 'test',
-      plugins: [
-        {
-          type: 'github',
+      plugins: {
+        github: {
           username: 'u',
           repositories: [{ name: 'a/b' }],
           tokenSource: ':not-valid',
         },
-      ],
+      },
     });
     tmpDirs.push(dir);
 

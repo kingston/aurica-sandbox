@@ -2,19 +2,17 @@ import { describe, expect, it } from 'vitest';
 
 import type { ProxyPolicy } from '#src/config/index.js';
 
-import { expandPlugins } from '../index.js';
-import type { Plugin } from '../schema.js';
+import {
+  expandPlugins,
+  type ProjectPlugins,
+  type UserPlugins,
+} from '../index.js';
 
 const PLACEHOLDER_RE = /^__AURICA_TOKEN_[0-9A-F]{16}__$/;
 
-const ctx = { user: 'sandbox' };
+const ctx = { linuxUser: 'sandbox' };
+const emptyUser: UserPlugins = {};
 
-/**
- * Pull the placeholder string a github plugin's policies use. Every github
- * allow policy carries `replace-header` mutations on `Authorization`; their
- * `from` is the deterministic placeholder, their `to` is the credential
- * source.
- */
 function placeholderOf(policy: ProxyPolicy): string {
   if (policy.action.type !== 'allow' || !policy.action.mutations) {
     throw new Error('expected allow action with mutations');
@@ -26,7 +24,6 @@ function placeholderOf(policy: ProxyPolicy): string {
   return mut.from;
 }
 
-/** Filter to the policies that actually inject credentials (skip block/no-op). */
 function allowPolicies(policies: readonly ProxyPolicy[]): ProxyPolicy[] {
   return policies.filter((p) => p.action.type === 'allow');
 }
@@ -37,13 +34,14 @@ function blockPolicies(policies: readonly ProxyPolicy[]): ProxyPolicy[] {
 
 describe('expandPlugins — github', () => {
   it('emits domains, default fetch+push policies, and commands for one github plugin', () => {
-    const plugin: Plugin = {
-      type: 'github',
-      username: 'x-access-token',
-      repositories: [{ name: 'foo/bar' }],
-      tokenSource: 'env:GITHUB_TOKEN',
+    const project: ProjectPlugins = {
+      github: {
+        username: 'x-access-token',
+        repositories: [{ name: 'foo/bar' }],
+        tokenSource: 'env:GITHUB_TOKEN',
+      },
     };
-    const expanded = expandPlugins([plugin], ctx);
+    const expanded = expandPlugins(project, emptyUser, ctx);
 
     expect(new Set(expanded.domains)).toEqual(
       new Set([
@@ -54,18 +52,11 @@ describe('expandPlugins — github', () => {
         'cli.github.com',
       ]),
     );
-    // 2 per-repo allow (github.com + codeload.github.com) + 1
-    // unauthenticated api.github.com passthrough. No catch-all blocks —
-    // unmatched requests fall through to the host allowlist, and
-    // `credential.useHttpPath = true` keeps the placeholder from ever
-    // accompanying a request outside the configured repo paths.
     expect(expanded.policies).toHaveLength(3);
     const allows = allowPolicies(expanded.policies);
     const blocks = blockPolicies(expanded.policies);
     expect(allows).toHaveLength(3);
     expect(blocks).toHaveLength(0);
-    // The api.github.com passthrough has no mutations — drop it before
-    // pulling the placeholder.
     const repoAllows = allows.filter(
       (p) => p.id !== 'github:api:passthrough:api.github.com',
     );
@@ -90,8 +81,6 @@ describe('expandPlugins — github', () => {
     expect(allowByDomain['codeload.github.com']?.matchers).toEqual([
       { prefix: '/foo/bar', methods: ['GET'] },
     ]);
-    // api.github.com is now an unauthenticated passthrough when `api` is
-    // false — no token mutations, no path matchers.
     const apiPassthrough = allowByDomain['api.github.com'];
     if (!apiPassthrough) {
       throw new Error('expected api.github.com passthrough policy');
@@ -104,8 +93,6 @@ describe('expandPlugins — github', () => {
       expect(policy.id).toBe(`github:foo/bar:${policy.domain}`);
       if (policy.action.type !== 'allow') throw new Error('expected allow');
       const muts = policy.action.mutations ?? [];
-      // Two mutations on Authorization: one for git Basic (with base64
-      // transform), one for gh's plaintext `token <X>` form.
       expect(muts).toHaveLength(2);
       expect(muts[0]).toEqual({
         kind: 'replace-header',
@@ -121,11 +108,6 @@ describe('expandPlugins — github', () => {
         to: 'env:GITHUB_TOKEN',
       });
     }
-    // helper(1) + useHttpPath(2) + git-credentials(3) + clone(4) +
-    // /etc/environment(5) — 5 commands for a single repo with no
-    // plugin.user. hosts.yml is omitted because `api` defaults to false:
-    // writing the placeholder there would leak it to GitHub since the
-    // api.github.com passthrough policy carries no token mutations.
     expect(expanded.commands).toEqual([
       {
         user: 'default',
@@ -177,8 +159,6 @@ describe('expandPlugins — github', () => {
     expect(expanded.bootstrapScript).toMatch(
       /apt-get install -y --no-install-recommends gh/,
     );
-    // Custom credential helper installed alongside gh CLI; `store` and
-    // `erase` are no-ops so failed auth can't wipe ~/.git-credentials.
     expect(expanded.bootstrapScript).toMatch(
       /cat > \/usr\/local\/bin\/aurica-git-credential/,
     );
@@ -189,17 +169,15 @@ describe('expandPlugins — github', () => {
   });
 
   it('expands multiple repos into per-repo allow policies and one credentials write', () => {
-    const plugin: Plugin = {
-      type: 'github',
-      username: 'x-access-token',
-      repositories: [{ name: 'a/b' }, { name: 'c/d' }],
-      tokenSource: 'env:GITHUB_TOKEN',
+    const project: ProjectPlugins = {
+      github: {
+        username: 'x-access-token',
+        repositories: [{ name: 'a/b' }, { name: 'c/d' }],
+        tokenSource: 'env:GITHUB_TOKEN',
+      },
     };
-    const expanded = expandPlugins([plugin], ctx);
+    const expanded = expandPlugins(project, emptyUser, ctx);
 
-    // 2 repos × 2 allow policies (github.com + codeload) = 4; +1
-    // api.github.com passthrough = 5. No block policies — see the
-    // single-repo test for rationale.
     expect(expanded.policies).toHaveLength(5);
     expect(allowPolicies(expanded.policies)).toHaveLength(5);
     expect(blockPolicies(expanded.policies)).toHaveLength(0);
@@ -213,9 +191,6 @@ describe('expandPlugins — github', () => {
       'github:c/d:codeload.github.com',
       'github:c/d:github.com',
     ]);
-    // helper(1) + useHttpPath(2) + creds(3) + 2 clones +
-    // /etc/environment(6) = 6 commands for two repos with no plugin.user.
-    // hosts.yml is omitted because `api` defaults to false.
     expect(expanded.commands).toHaveLength(6);
     const credsWrite = expanded.commands[2];
     expect(credsWrite?.argv[0]).toBe('sh');
@@ -233,19 +208,17 @@ describe('expandPlugins — github', () => {
     ]);
   });
 
-  it('mirrors plugin.user into the VM as `git config --global user.{name,email}`', () => {
-    const plugin: Plugin = {
-      type: 'github',
-      username: 'x-access-token',
-      user: { name: 'Ada Lovelace', email: 'ada@example.com' },
-      repositories: [{ name: 'foo/bar' }],
-      tokenSource: 'env:GITHUB_TOKEN',
+  it('mirrors project.user into the VM as `git config --global user.{name,email}`', () => {
+    const project: ProjectPlugins = {
+      github: {
+        username: 'x-access-token',
+        user: { name: 'Ada Lovelace', email: 'ada@example.com' },
+        repositories: [{ name: 'foo/bar' }],
+        tokenSource: 'env:GITHUB_TOKEN',
+      },
     };
-    const expanded = expandPlugins([plugin], ctx);
+    const expanded = expandPlugins(project, emptyUser, ctx);
 
-    // helper(1) + useHttpPath(2) + creds(3) + user.name(4) + user.email(5)
-    // + clone(6) + /etc/environment(7) = 7 commands. hosts.yml omitted
-    // because `api` defaults to false.
     expect(expanded.commands).toHaveLength(7);
     const nameCmd = expanded.commands.find((c) => c.argv.includes('user.name'));
     const emailCmd = expanded.commands.find((c) =>
@@ -261,14 +234,33 @@ describe('expandPlugins — github', () => {
     });
   });
 
-  it('emits no user-identity commands when plugin.user is omitted', () => {
-    const plugin: Plugin = {
-      type: 'github',
-      username: 'x-access-token',
-      repositories: [{ name: 'foo/bar' }],
-      tokenSource: 'env:GITHUB_TOKEN',
+  it('falls back to user-level defaultUser when project omits user', () => {
+    const project: ProjectPlugins = {
+      github: {
+        username: 'x-access-token',
+        repositories: [{ name: 'foo/bar' }],
+        tokenSource: 'env:GITHUB_TOKEN',
+      },
     };
-    const expanded = expandPlugins([plugin], ctx);
+    const user: UserPlugins = {
+      github: {
+        defaultUser: { name: 'Grace Hopper', email: 'grace@example.com' },
+      },
+    };
+    const expanded = expandPlugins(project, user, ctx);
+    const nameCmd = expanded.commands.find((c) => c.argv.includes('user.name'));
+    expect(nameCmd?.argv).toContain('Grace Hopper');
+  });
+
+  it('emits no user-identity commands when neither layer provides user', () => {
+    const project: ProjectPlugins = {
+      github: {
+        username: 'x-access-token',
+        repositories: [{ name: 'foo/bar' }],
+        tokenSource: 'env:GITHUB_TOKEN',
+      },
+    };
+    const expanded = expandPlugins(project, emptyUser, ctx);
     const argvs = expanded.commands.map((c) => c.argv);
     expect(
       argvs.some(
@@ -278,26 +270,28 @@ describe('expandPlugins — github', () => {
   });
 
   it('emits no block policies — unmatched paths fall through to the host allowlist', () => {
-    const plugin: Plugin = {
-      type: 'github',
-      username: 'x-access-token',
-      repositories: [{ name: 'foo/bar' }],
-      tokenSource: 'env:GITHUB_TOKEN',
+    const project: ProjectPlugins = {
+      github: {
+        username: 'x-access-token',
+        repositories: [{ name: 'foo/bar' }],
+        tokenSource: 'env:GITHUB_TOKEN',
+      },
     };
-    const expanded = expandPlugins([plugin], ctx);
+    const expanded = expandPlugins(project, emptyUser, ctx);
     expect(blockPolicies(expanded.policies)).toHaveLength(0);
   });
 });
 
 describe('expandPlugins — github readOnly', () => {
   it('drops git-receive-pack from the github.com matchers when readOnly is true', () => {
-    const plugin: Plugin = {
-      type: 'github',
-      username: 'x-access-token',
-      repositories: [{ name: 'foo/bar', readOnly: true }],
-      tokenSource: 'env:GITHUB_TOKEN',
+    const project: ProjectPlugins = {
+      github: {
+        username: 'x-access-token',
+        repositories: [{ name: 'foo/bar', readOnly: true }],
+        tokenSource: 'env:GITHUB_TOKEN',
+      },
     };
-    const expanded = expandPlugins([plugin], ctx);
+    const expanded = expandPlugins(project, emptyUser, ctx);
 
     const githubCom = allowPolicies(expanded.policies).find(
       (p) => p.domain === 'github.com',
@@ -309,7 +303,6 @@ describe('expandPlugins — github readOnly', () => {
       { exact: '/foo/bar/git-upload-pack', methods: ['POST'] },
       { exact: '/foo/bar.git/git-upload-pack', methods: ['POST'] },
     ]);
-    // Codeload policy is unchanged — it's GET-only regardless.
     const codeload = allowPolicies(expanded.policies).find(
       (p) => p.domain === 'codeload.github.com',
     );
@@ -319,13 +312,14 @@ describe('expandPlugins — github readOnly', () => {
   });
 
   it('keeps git-receive-pack when readOnly is false (the default)', () => {
-    const plugin: Plugin = {
-      type: 'github',
-      username: 'x-access-token',
-      repositories: [{ name: 'foo/bar', readOnly: false }],
-      tokenSource: 'env:GITHUB_TOKEN',
+    const project: ProjectPlugins = {
+      github: {
+        username: 'x-access-token',
+        repositories: [{ name: 'foo/bar', readOnly: false }],
+        tokenSource: 'env:GITHUB_TOKEN',
+      },
     };
-    const expanded = expandPlugins([plugin], ctx);
+    const expanded = expandPlugins(project, emptyUser, ctx);
     const githubCom = allowPolicies(expanded.policies).find(
       (p) => p.domain === 'github.com',
     );
@@ -342,33 +336,26 @@ describe('expandPlugins — github readOnly', () => {
 
 describe('expandPlugins — github api', () => {
   it('emits a broad api.github.com allow policy when api is true', () => {
-    const plugin: Plugin = {
-      type: 'github',
-      username: 'x-access-token',
-      repositories: [{ name: 'foo/bar' }],
-      tokenSource: 'env:GITHUB_TOKEN',
-      api: true,
+    const project: ProjectPlugins = {
+      github: {
+        username: 'x-access-token',
+        repositories: [{ name: 'foo/bar' }],
+        tokenSource: 'env:GITHUB_TOKEN',
+        api: true,
+      },
     };
-    const expanded = expandPlugins([plugin], ctx);
+    const expanded = expandPlugins(project, emptyUser, ctx);
 
     const allows = allowPolicies(expanded.policies);
-    // 2 per-repo (github.com + codeload) + 1 api.github.com bypass = 3.
     expect(allows).toHaveLength(3);
     const apiPolicy = allows.find((p) => p.domain === 'api.github.com');
     if (!apiPolicy) throw new Error('expected api.github.com allow policy');
     expect(apiPolicy.id).toBe('github:api:api.github.com');
-    // No matchers — broad allow covers /graphql and every REST path.
     expect(apiPolicy.matchers).toBeUndefined();
     if (apiPolicy.action.type !== 'allow') throw new Error('expected allow');
     expect(apiPolicy.action.mutations).toHaveLength(2);
-    // No block policies — unmatched paths fall through to the host
-    // allowlist; placeholder leakage is prevented by
-    // `credential.useHttpPath = true`.
     expect(blockPolicies(expanded.policies)).toHaveLength(0);
 
-    // hosts.yml is written so the gh CLI is pre-authenticated. The
-    // api.github.com policy carries token mutations, so the placeholder is
-    // substituted on the wire.
     const hostsYamlCmd = expanded.commands.find((c) =>
       c.argv.some(
         (s) => typeof s === 'string' && s.includes('.config/gh/hosts.yml'),
@@ -379,33 +366,32 @@ describe('expandPlugins — github api', () => {
   });
 
   it('emits an unauthenticated api.github.com passthrough when api is false (the default)', () => {
-    const plugin: Plugin = {
-      type: 'github',
-      username: 'x-access-token',
-      repositories: [{ name: 'foo/bar' }],
-      tokenSource: 'env:GITHUB_TOKEN',
+    const project: ProjectPlugins = {
+      github: {
+        username: 'x-access-token',
+        repositories: [{ name: 'foo/bar' }],
+        tokenSource: 'env:GITHUB_TOKEN',
+      },
     };
-    const expanded = expandPlugins([plugin], ctx);
+    const expanded = expandPlugins(project, emptyUser, ctx);
     const apiAllow = allowPolicies(expanded.policies).find(
       (p) => p.domain === 'api.github.com',
     );
     if (!apiAllow) throw new Error('expected api.github.com passthrough');
     expect(apiAllow.id).toBe('github:api:passthrough:api.github.com');
     expect(apiAllow.matchers).toBeUndefined();
-    // No token attached — anonymous passthrough only.
     expect(apiAllow.action).toEqual({ type: 'allow' });
   });
 
   it('does NOT write ~/.config/gh/hosts.yml when api is false (the default)', () => {
-    // Without an api.github.com mutation, writing the placeholder into
-    // hosts.yml would leak it verbatim on any gh CLI call.
-    const plugin: Plugin = {
-      type: 'github',
-      username: 'x-access-token',
-      repositories: [{ name: 'foo/bar' }],
-      tokenSource: 'env:GITHUB_TOKEN',
+    const project: ProjectPlugins = {
+      github: {
+        username: 'x-access-token',
+        repositories: [{ name: 'foo/bar' }],
+        tokenSource: 'env:GITHUB_TOKEN',
+      },
     };
-    const expanded = expandPlugins([plugin], ctx);
+    const expanded = expandPlugins(project, emptyUser, ctx);
     const hostsYamlCmd = expanded.commands.find((c) =>
       c.argv.some(
         (s) => typeof s === 'string' && s.includes('.config/gh/hosts.yml'),

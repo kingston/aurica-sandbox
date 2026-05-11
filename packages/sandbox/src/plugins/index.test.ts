@@ -2,10 +2,15 @@ import { describe, expect, it } from 'vitest';
 
 import type { ProxyPolicy } from '#src/config/index.js';
 
-import { expandPlugins, pluginDomainsForGitCoverage } from './index.js';
-import type { Plugin } from './schema.js';
+import {
+  expandPlugins,
+  githubDomainsForGitCoverage,
+  type ProjectPlugins,
+  type UserPlugins,
+} from './index.js';
 
-const ctx = { user: 'sandbox' };
+const ctx = { linuxUser: 'sandbox' };
+const emptyUser: UserPlugins = {};
 
 /**
  * Pull the placeholder string a github plugin's policies use. Every github
@@ -30,24 +35,23 @@ function allowPolicies(policies: readonly ProxyPolicy[]): ProxyPolicy[] {
 }
 
 describe('expandPlugins', () => {
-  it('derives a unique placeholder per plugin', () => {
-    // Two distinct plugin configs must produce different placeholders.
-    // Expanded separately because at most one github plugin per sandbox
-    // may contribute a project-init cwd.
-    const i1: Plugin = {
-      type: 'github',
-      username: 'x-access-token',
-      repositories: [{ name: 'foo/bar' }],
-      tokenSource: 'env:GITHUB_TOKEN_1',
+  it('derives a unique placeholder per plugin config', () => {
+    const p1: ProjectPlugins = {
+      github: {
+        username: 'x-access-token',
+        repositories: [{ name: 'foo/bar' }],
+        tokenSource: 'env:GITHUB_TOKEN_1',
+      },
     };
-    const i2: Plugin = {
-      type: 'github',
-      username: 'x-access-token',
-      repositories: [{ name: 'foo/bar' }],
-      tokenSource: 'env:GITHUB_TOKEN_2',
+    const p2: ProjectPlugins = {
+      github: {
+        username: 'x-access-token',
+        repositories: [{ name: 'foo/bar' }],
+        tokenSource: 'env:GITHUB_TOKEN_2',
+      },
     };
-    const a = expandPlugins([i1], ctx);
-    const b = expandPlugins([i2], ctx);
+    const a = expandPlugins(p1, emptyUser, ctx);
+    const b = expandPlugins(p2, emptyUser, ctx);
     const aFirst = allowPolicies(a.policies)[0];
     const bFirst = allowPolicies(b.policies)[0];
     if (!aFirst || !bFirst) throw new Error('expected allow policies');
@@ -55,51 +59,43 @@ describe('expandPlugins', () => {
   });
 
   it('derives the same placeholder across calls for identical plugin config', () => {
-    const plugin: Plugin = {
-      type: 'github',
-      username: 'x-access-token',
-      repositories: [{ name: 'foo/bar' }],
-      tokenSource: 'env:GITHUB_TOKEN',
+    const plugins: ProjectPlugins = {
+      github: {
+        username: 'x-access-token',
+        repositories: [{ name: 'foo/bar' }],
+        tokenSource: 'env:GITHUB_TOKEN',
+      },
     };
-    const a = expandPlugins([plugin], ctx);
-    const b = expandPlugins([plugin], ctx);
+    const a = expandPlugins(plugins, emptyUser, ctx);
+    const b = expandPlugins(plugins, emptyUser, ctx);
     const aFirst = allowPolicies(a.policies)[0];
     const bFirst = allowPolicies(b.policies)[0];
     if (!aFirst || !bFirst) throw new Error('expected allow policies');
     expect(placeholderOf(aFirst)).toBe(placeholderOf(bFirst));
   });
 
-  it('returns empty result when no plugins are provided', () => {
-    const expanded = expandPlugins([], ctx);
+  it('returns empty result when no plugins are opted into', () => {
+    const expanded = expandPlugins({}, emptyUser, ctx);
     expect(expanded.domains).toEqual([]);
     expect(expanded.policies).toEqual([]);
     expect(expanded.commands).toEqual([]);
     expect(expanded.bootstrapScript).toBe('');
   });
 
-  it('concatenates bootstrap snippets in declared order', () => {
-    const plugins: Plugin[] = [{ type: 'docker' }, { type: 'mise' }];
-    const expanded = expandPlugins(plugins, ctx);
+  it('concatenates bootstrap snippets in registry order regardless of config-file key order', () => {
+    // The registry orders github -> docker -> mise -> claude-code -> cursor;
+    // expansion follows that order even if the project config lists keys in
+    // a different sequence.
+    const expanded = expandPlugins({ mise: {}, docker: {} }, emptyUser, ctx);
     const dockerIdx = expanded.bootstrapScript.indexOf('docker plugin');
     const miseIdx = expanded.bootstrapScript.indexOf('mise plugin');
     expect(dockerIdx).toBeGreaterThan(-1);
     expect(miseIdx).toBeGreaterThan(-1);
     expect(dockerIdx).toBeLessThan(miseIdx);
-
-    const reversed = expandPlugins([{ type: 'mise' }, { type: 'docker' }], ctx);
-    expect(reversed.bootstrapScript.indexOf('mise plugin')).toBeLessThan(
-      reversed.bootstrapScript.indexOf('docker plugin'),
-    );
-  });
-
-  it('dedupes domains across plugins', () => {
-    const plugins: Plugin[] = [{ type: 'docker' }, { type: 'docker' }];
-    const expanded = expandPlugins(plugins, ctx);
-    expect(new Set(expanded.domains).size).toBe(expanded.domains.length);
   });
 
   it('docker plugin contributes the apt repo and Docker Hub domains', () => {
-    const expanded = expandPlugins([{ type: 'docker' }], ctx);
+    const expanded = expandPlugins({ docker: {} }, emptyUser, ctx);
     expect(expanded.domains).toEqual(
       expect.arrayContaining([
         'download.docker.com',
@@ -113,7 +109,7 @@ describe('expandPlugins', () => {
   });
 
   it('mise plugin contributes the apt repo + language CDN domains', () => {
-    const expanded = expandPlugins([{ type: 'mise' }], ctx);
+    const expanded = expandPlugins({ mise: {} }, emptyUser, ctx);
     expect(expanded.domains).toEqual(
       expect.arrayContaining([
         'mise.en.dev',
@@ -122,15 +118,10 @@ describe('expandPlugins', () => {
         'pypi.org',
       ]),
     );
-    // Install path: official apt repo (signed-by the mise GPG key), not the
-    // curl-piped installer. Putting the binary at /usr/bin/mise means every
-    // shell finds it on PATH regardless of login state.
     expect(expanded.bootstrapScript).toMatch(/mise.en.dev\/gpg-key\.pub/);
     expect(expanded.bootstrapScript).toMatch(
       /apt-get install -y --no-install-recommends mise/,
     );
-    // Activation shim is appended idempotently for bash, zsh, and fish so
-    // interactive shells inside the VM pick up mise-managed tools.
     expect(expanded.bootstrapScript).toMatch(/mise activate bash/);
     expect(expanded.bootstrapScript).toMatch(/mise activate zsh/);
     expect(expanded.bootstrapScript).toMatch(/mise activate fish/);
@@ -139,23 +130,126 @@ describe('expandPlugins', () => {
 
   it('rejects unsafe usernames at expansion time', () => {
     expect(() =>
-      expandPlugins([{ type: 'docker' }], { user: 'bad; rm -rf /' }),
-    ).toThrow(/user/);
+      expandPlugins({ docker: {} }, emptyUser, { linuxUser: 'bad; rm -rf /' }),
+    ).toThrow(/linuxUser/);
     expect(() =>
-      expandPlugins([{ type: 'mise' }], { user: '$(whoami)' }),
-    ).toThrow(/user/);
+      expandPlugins({ mise: {} }, emptyUser, { linuxUser: '$(whoami)' }),
+    ).toThrow(/linuxUser/);
+  });
+});
+
+describe('expandPlugins — github user-config fallback', () => {
+  it('uses user-level defaultTokenSource when project omits tokenSource', () => {
+    const project: ProjectPlugins = {
+      github: {
+        username: 'x-access-token',
+        repositories: [{ name: 'a/b' }],
+      },
+    };
+    const user: UserPlugins = {
+      github: { defaultTokenSource: 'env:USER_TOKEN' },
+    };
+    const expanded = expandPlugins(project, user, ctx);
+    const allowed = allowPolicies(expanded.policies)[0];
+    if (allowed?.action.type !== 'allow') {
+      throw new Error('expected allow policy');
+    }
+    const mut = allowed.action.mutations?.[0];
+    if (mut?.kind !== 'replace-header') {
+      throw new Error('expected replace-header mutation');
+    }
+    expect(mut.to).toBe('env:USER_TOKEN');
+  });
+
+  it('uses user-level defaultUsername when project omits username', () => {
+    const project: ProjectPlugins = {
+      github: {
+        repositories: [{ name: 'a/b' }],
+        tokenSource: 'env:GH_TOKEN',
+      },
+    };
+    const user: UserPlugins = {
+      github: { defaultUsername: 'x-access-token' },
+    };
+    const expanded = expandPlugins(project, user, ctx);
+    // The credential URL embeds the resolved username, so writing the
+    // credentials file is a clean place to assert it.
+    const credsCmd = expanded.commands.find((c) =>
+      c.argv.some((a) => a.includes('.git-credentials')),
+    );
+    expect(
+      credsCmd?.argv.some((a) => a.startsWith('https://x-access-token:')),
+    ).toBe(true);
+  });
+
+  it('project overrides user-level default', () => {
+    const project: ProjectPlugins = {
+      github: {
+        username: 'project-user',
+        repositories: [{ name: 'a/b' }],
+        tokenSource: 'env:PROJECT_TOKEN',
+      },
+    };
+    const user: UserPlugins = {
+      github: {
+        defaultUsername: 'user-default',
+        defaultTokenSource: 'env:USER_TOKEN',
+      },
+    };
+    const expanded = expandPlugins(project, user, ctx);
+    const allowed = allowPolicies(expanded.policies)[0];
+    if (allowed?.action.type !== 'allow') {
+      throw new Error('expected allow policy');
+    }
+    const mut = allowed.action.mutations?.[0];
+    if (mut?.kind !== 'replace-header') {
+      throw new Error('expected replace-header mutation');
+    }
+    expect(mut.to).toBe('env:PROJECT_TOKEN');
+  });
+
+  it('throws when neither project nor user provides tokenSource', () => {
+    const project: ProjectPlugins = {
+      github: {
+        username: 'x-access-token',
+        repositories: [{ name: 'a/b' }],
+      },
+    };
+    expect(() => expandPlugins(project, emptyUser, ctx)).toThrow(/tokenSource/);
+  });
+
+  it('throws when neither project nor user provides username', () => {
+    const project: ProjectPlugins = {
+      github: {
+        repositories: [{ name: 'a/b' }],
+        tokenSource: 'env:GH_TOKEN',
+      },
+    };
+    expect(() => expandPlugins(project, emptyUser, ctx)).toThrow(/username/);
+  });
+
+  it('user-level github defaults do NOT activate the plugin when the project omits it', () => {
+    const project: ProjectPlugins = {};
+    const user: UserPlugins = {
+      github: { defaultTokenSource: 'env:USER_TOKEN' },
+    };
+    const expanded = expandPlugins(project, user, ctx);
+    expect(expanded.domains).toEqual([]);
+    expect(expanded.policies).toEqual([]);
+    expect(expanded.commands).toEqual([]);
   });
 });
 
 describe('expandPlugins — github checkout / projectInitCwdOverride', () => {
   it('clones every listed repo to /workspaces/<repo>, writes AURICA_PROJECT_DIR to /etc/environment, and sets projectInitCwdOverride to the first repo', () => {
-    const plugin: Plugin = {
-      type: 'github',
-      username: 'x-access-token',
-      repositories: [{ name: 'foo/bar' }],
-      tokenSource: 'env:GITHUB_TOKEN',
+    const project: ProjectPlugins = {
+      github: {
+        username: 'x-access-token',
+        repositories: [{ name: 'foo/bar' }],
+        tokenSource: 'env:GITHUB_TOKEN',
+      },
     };
-    const expanded = expandPlugins([plugin], ctx);
+    const expanded = expandPlugins(project, emptyUser, ctx);
 
     const cloneCmd = expanded.commands.find((c) =>
       c.argv.some((a) => a.includes('git clone')),
@@ -182,17 +276,18 @@ describe('expandPlugins — github checkout / projectInitCwdOverride', () => {
   });
 
   it('clones all repositories in order and picks the first entry as the primary', () => {
-    const plugin: Plugin = {
-      type: 'github',
-      username: 'x-access-token',
-      repositories: [
-        { name: 'a/primary' },
-        { name: 'a/secondary' },
-        { name: 'a/tertiary' },
-      ],
-      tokenSource: 'env:GITHUB_TOKEN',
+    const project: ProjectPlugins = {
+      github: {
+        username: 'x-access-token',
+        repositories: [
+          { name: 'a/primary' },
+          { name: 'a/secondary' },
+          { name: 'a/tertiary' },
+        ],
+        tokenSource: 'env:GITHUB_TOKEN',
+      },
     };
-    const expanded = expandPlugins([plugin], ctx);
+    const expanded = expandPlugins(project, emptyUser, ctx);
 
     const cloneDests = expanded.commands
       .filter((c) => c.argv.some((a) => a.includes('git clone')))
@@ -204,44 +299,24 @@ describe('expandPlugins — github checkout / projectInitCwdOverride', () => {
     ]);
     expect(expanded.projectInitCwdOverride).toBe('/workspaces/primary');
   });
-
-  it('throws when two github plugins both contribute a projectInitCwdOverride', () => {
-    const a: Plugin = {
-      type: 'github',
-      username: 'x-access-token',
-      repositories: [{ name: 'org-a/repo' }],
-      tokenSource: 'env:TOKEN_A',
-    };
-    const b: Plugin = {
-      type: 'github',
-      username: 'x-access-token',
-      repositories: [{ name: 'org-b/repo' }],
-      tokenSource: 'env:TOKEN_B',
-    };
-    expect(() => expandPlugins([a, b], ctx)).toThrow(/projectInitCwdOverride/);
-  });
 });
 
-describe('pluginDomainsForGitCoverage', () => {
-  it('returns github hosts only for github plugins', () => {
+describe('githubDomainsForGitCoverage', () => {
+  it('returns github hosts when github is enabled', () => {
     expect(
-      pluginDomainsForGitCoverage({
-        type: 'github',
-        username: 'x-access-token',
-        repositories: [{ name: 'a/b' }],
-        tokenSource: 'env:T',
+      githubDomainsForGitCoverage({
+        github: {
+          username: 'x-access-token',
+          repositories: [{ name: 'a/b' }],
+          tokenSource: 'env:T',
+        },
       }),
     ).toEqual(['github.com', 'api.github.com', 'codeload.github.com']);
   });
 
-  it('returns nothing for docker / mise / claude-code plugins', () => {
-    expect(pluginDomainsForGitCoverage({ type: 'docker' })).toEqual([]);
-    expect(pluginDomainsForGitCoverage({ type: 'mise' })).toEqual([]);
-    expect(
-      pluginDomainsForGitCoverage({
-        type: 'claude-code',
-        authMode: 'api-key',
-      }),
-    ).toEqual([]);
+  it('returns nothing when github is not enabled', () => {
+    expect(githubDomainsForGitCoverage({})).toEqual([]);
+    expect(githubDomainsForGitCoverage({ docker: {} })).toEqual([]);
+    expect(githubDomainsForGitCoverage({ mise: {} })).toEqual([]);
   });
 });

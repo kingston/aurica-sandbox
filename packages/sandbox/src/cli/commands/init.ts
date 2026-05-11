@@ -24,16 +24,15 @@ export async function runInit(projectDir: string): Promise<void> {
   await fs.mkdir(path.dirname(configPath), { recursive: true });
   const sample = {
     ...defaultSandboxConfig(path.basename(projectDir)),
-    plugins: [
-      {
-        type: 'github' as const,
+    plugins: {
+      github: {
         repositories: [{ name: 'owner/repo' }],
       },
-    ],
+    },
   };
   await fs.writeFile(configPath, `${JSON.stringify(sample, null, 2)}\n`);
   logger.info(`Wrote ${configPath}`);
   logger.info(
-    `Set github plugin defaults (username, tokenSource, user) at ${userConfigPath()} — see docs for the schema.`,
+    `Set github plugin defaults (defaultUsername, defaultTokenSource, defaultUser) at ${userConfigPath()} — see docs for the schema.`,
   );
 }

@@ -51,7 +51,9 @@ export function deriveFromConfig(
   config: SandboxConfig,
   ctx: DerivationContext,
 ): FullDerivation {
-  const expanded = expandPlugins(config.plugins, { user: ctx.user });
+  const expanded = expandPlugins(config.plugins, config.userPlugins, {
+    linuxUser: ctx.user,
+  });
 
   const domains = [...config.proxy.domains, ...expanded.domains];
   const policies: ProxyPolicy[] = [

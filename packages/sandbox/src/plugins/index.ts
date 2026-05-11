@@ -2,65 +2,60 @@ import { createHash } from 'node:crypto';
 
 import type { ProxyPolicy } from '#src/config/proxy-policy.js';
 
-import { expandClaudeCode } from './claude-code/index.js';
-import { expandDocker } from './docker/index.js';
-import { expandGithub } from './github/index.js';
-import { expandMise } from './mise/index.js';
-import type { Plugin } from './schema.js';
-import type {
-  ExpandedPlugin,
-  PluginCommand,
-  PluginExpansionContext,
-} from './types.js';
+import { PLUGINS } from './registry.js';
+import type { ProjectPlugins, UserPlugins } from './schema.js';
+import type { PluginCommand } from './types.js';
 
-export {
-  claudeCodePluginSchema,
-  dockerPluginSchema,
-  githubPluginSchema,
-  misePluginSchema,
-  pluginSchema,
+export { PLUGINS } from './registry.js';
+export { projectPluginsSchema, userPluginsSchema } from './schema.js';
+export type {
+  ClaudeCodeProjectConfig,
+  CursorProjectConfig,
+  DockerProjectConfig,
+  GithubProjectConfig,
+  GithubUserConfig,
+  MiseProjectConfig,
+  ProjectPlugins,
+  UserPlugins,
 } from './schema.js';
 export type {
-  ClaudeCodePlugin,
-  DockerPlugin,
-  GithubPlugin,
-  MisePlugin,
-  Plugin,
-} from './schema.js';
-export type {
-  ExpandedPlugin,
+  InitializedPlugin,
   PluginCommand,
-  PluginExpansionContext,
+  PluginInitContext,
+  SandboxPlugin,
 } from './types.js';
 
 /**
- * Domains contributed by a single plugin for the purpose of the
- * `git.url` host-coverage validator. Only `github` plugins contribute here —
- * docker/mise hosts have no relationship to git URLs and would falsely
- * "cover" a github URL otherwise.
+ * Hostname prefixes contributed by an active github plugin for the purpose
+ * of the `git.url` host-coverage validator. Returns an empty array when
+ * github isn't enabled.
  */
-export function pluginDomainsForGitCoverage(plugin: Plugin): string[] {
-  if (plugin.type !== 'github') return [];
+export function githubDomainsForGitCoverage(plugins: ProjectPlugins): string[] {
+  if (!plugins.github) return [];
   return ['github.com', 'api.github.com', 'codeload.github.com'];
 }
 
 /**
- * Derive a placeholder string from a plugin's config. The proxy uses
- * `(host, header, placeholder)` to dispatch substitutions, so colliding
- * placeholders across plugins would cause one resolver to clobber another.
+ * Derive a placeholder string from a plugin's name + config. The proxy
+ * uses `(host, header, placeholder)` to dispatch substitutions, so
+ * colliding placeholders across plugins would cause one resolver to
+ * clobber another.
  *
- * The placeholder MUST be deterministic: the value is baked into the VM at
- * create-time (e.g. `git config http.<url>.extraHeader`), and the proxy
- * re-derives rules from `.aurica/sandbox.json` on every reload. A random
- * placeholder would diverge between the two and break credential
+ * The placeholder MUST be deterministic: the value is baked into the VM
+ * at create-time (e.g. `git config http.<url>.extraHeader`), and the
+ * proxy re-derives rules from `.aurica/sandbox.json` on every reload. A
+ * random placeholder would diverge between the two and break credential
  * substitution after the first reload.
  *
- * 16 hex chars (64 bits of SHA-256) is enough collision resistance for the
- * tiny set of plugins in any one sandbox.
+ * Hashing `{ name, config }` keeps placeholders unique across plugins
+ * even when two plugins have empty configs (`{}`).
+ *
+ * 16 hex chars (64 bits of SHA-256) is enough collision resistance for
+ * the tiny set of plugins in any one sandbox.
  */
-function placeholderFor(plugin: Plugin): string {
+function placeholderFor(name: string, config: unknown): string {
   const digest = createHash('sha256')
-    .update(JSON.stringify(plugin))
+    .update(JSON.stringify({ name, config }))
     .digest('hex')
     .slice(0, 16)
     .toUpperCase();
@@ -68,18 +63,16 @@ function placeholderFor(plugin: Plugin): string {
 }
 
 /**
- * Result of expanding the full plugin list.
+ * Result of expanding the full plugin set.
  *
  * `bootstrapScript` is the concatenation of each contributing plugin's
- * snippet in config-declared order, with a blank-line separator. Empty
- * string when no plugin contributed one.
+ * snippet in **registry-declared** order (not config-file key order),
+ * with a blank-line separator. Empty string when no plugin contributed.
  *
  * `projectInitCwdOverride` is the working directory for the project-level
- * init hook (`setup-project.sh`) contributed by a plugin (today: github,
- * when at least one repo opts into `checkout: true`). At most one plugin
- * may contribute one — `expandPlugins` throws on conflict, because "the
- * project we're working on" is conceptually singular and a merge would
- * mask a real configuration error.
+ * init hook (`setup-project.sh`) contributed by a plugin (today: github).
+ * At most one plugin may contribute one — `expandPlugins` throws on
+ * conflict.
  */
 export interface ExpandedPlugins {
   domains: string[];
@@ -89,23 +82,27 @@ export interface ExpandedPlugins {
   projectInitCwdOverride?: string;
 }
 
+/** Context passed to `expandPlugins` and threaded into each plugin's init. */
+export interface ExpandContext {
+  linuxUser: string;
+}
+
 /**
- * Expand all plugins to the merged set of proxy domains, proxy actions,
- * post-lockdown commands, and pre-lockdown bootstrap script. Domains are
- * deduped; actions, commands, and bootstrap snippets are concatenated in
- * input order.
+ * Walk the registry in declared order; for each plugin that the project
+ * config opted into, look up its user-config block, build the per-plugin
+ * init context, and call `initialize`. Merge domains (deduped), policies,
+ * commands, and bootstrap snippets across all activated plugins.
  *
- * Each plugin gets its own freshly-minted placeholder, so multiple plugins
- * targeting the same host can coexist without colliding on the
- * `(host, header, placeholder)` tuple.
+ * The project layer is the opt-in: a user-level default never activates a
+ * plugin the project did not declare under `plugins.<name>`.
  *
  * Throws when more than one plugin contributes a `projectInitCwdOverride`
- * — the project layer is singular by design, so a conflict is a
- * configuration error the user should resolve in `sandbox.json`.
+ * — the project layer is singular by design.
  */
 export function expandPlugins(
-  plugins: readonly Plugin[],
-  ctx: PluginExpansionContext,
+  projectPlugins: ProjectPlugins,
+  userPlugins: UserPlugins,
+  ctx: ExpandContext,
 ): ExpandedPlugins {
   const domains = new Set<string>();
   const policies: ProxyPolicy[] = [];
@@ -113,22 +110,39 @@ export function expandPlugins(
   const bootstrapSnippets: string[] = [];
   let projectInitCwdOverride: string | undefined;
 
-  for (const plugin of plugins) {
-    const placeholder = placeholderFor(plugin);
-    const expanded = expandPlugin(plugin, placeholder, ctx);
-    for (const d of expanded.domains) domains.add(d);
-    policies.push(...expanded.policies);
-    commands.push(...expanded.commands);
-    if (expanded.bootstrapScript) {
-      bootstrapSnippets.push(expanded.bootstrapScript);
+  for (const plugin of PLUGINS) {
+    const projectConfig = (projectPlugins as Record<string, unknown>)[
+      plugin.name
+    ];
+    if (projectConfig === undefined) continue;
+
+    const userConfig = (userPlugins as Record<string, unknown>)[plugin.name];
+    const placeholder = placeholderFor(plugin.name, projectConfig);
+
+    const initialized = plugin.initialize({
+      // The framework has already validated both blocks against the
+      // plugin's schemas via `projectPluginsSchema` / `userPluginsSchema`,
+      // so the casts here are sound — the plugin's `initialize` signature
+      // is already correctly typed against its declared schemas.
+      project: projectConfig as never,
+      user: userConfig as never,
+      placeholder,
+      linuxUser: ctx.linuxUser,
+    });
+
+    for (const d of initialized.domains) domains.add(d);
+    policies.push(...initialized.policies);
+    commands.push(...initialized.commands);
+    if (initialized.bootstrapScript) {
+      bootstrapSnippets.push(initialized.bootstrapScript);
     }
-    if (expanded.projectInitCwdOverride !== undefined) {
+    if (initialized.projectInitCwdOverride !== undefined) {
       if (projectInitCwdOverride !== undefined) {
         throw new Error(
-          `multiple plugins contributed a projectInitCwdOverride (existing=${projectInitCwdOverride}, new=${expanded.projectInitCwdOverride}). At most one plugin may define the project-level init cwd per sandbox.`,
+          `multiple plugins contributed a projectInitCwdOverride (existing=${projectInitCwdOverride}, new=${initialized.projectInitCwdOverride}). At most one plugin may define the project-level init cwd per sandbox.`,
         );
       }
-      projectInitCwdOverride = expanded.projectInitCwdOverride;
+      projectInitCwdOverride = initialized.projectInitCwdOverride;
     }
   }
 
@@ -139,25 +153,4 @@ export function expandPlugins(
     bootstrapScript: bootstrapSnippets.join('\n\n'),
     ...(projectInitCwdOverride !== undefined ? { projectInitCwdOverride } : {}),
   };
-}
-
-function expandPlugin(
-  plugin: Plugin,
-  placeholder: string,
-  ctx: PluginExpansionContext,
-): ExpandedPlugin {
-  switch (plugin.type) {
-    case 'github': {
-      return expandGithub(plugin, placeholder, ctx);
-    }
-    case 'docker': {
-      return expandDocker(plugin, ctx);
-    }
-    case 'mise': {
-      return expandMise(plugin, ctx);
-    }
-    case 'claude-code': {
-      return expandClaudeCode(plugin, placeholder, ctx);
-    }
-  }
 }

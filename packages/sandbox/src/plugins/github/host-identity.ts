@@ -1,6 +1,6 @@
 import { execa } from 'execa';
 
-import type { GithubUser } from './schema.js';
+import type { GithubUserIdentity } from './schema.js';
 
 /**
  * Read the host machine's git identity from `~/.gitconfig`. Used at
@@ -16,7 +16,7 @@ import type { GithubUser } from './schema.js';
  * git itself isn't available — partial identity is worse than none, so
  * the caller should treat the field as unset and let the user fill it in.
  */
-export async function readHostGitIdentity(): Promise<GithubUser | null> {
+export async function readHostGitIdentity(): Promise<GithubUserIdentity | null> {
   try {
     const [{ stdout: name }, { stdout: email }] = await Promise.all([
       execa('git', ['config', '--global', '--get', 'user.name']),

@@ -1,8 +1,11 @@
 import type { ProxyPolicy } from '#src/config/proxy-policy.js';
 import { assertSafeShellIdent } from '#src/utils/shell-safety.js';
 
-import type { ExpandedPlugin, PluginExpansionContext } from '../types.js';
-import type { ClaudeCodePlugin } from './schema.js';
+import type { SandboxPlugin } from '../types.js';
+import {
+  type ClaudeCodeProjectConfig,
+  claudeCodeProjectConfigSchema,
+} from './schema.js';
 
 /**
  * Hosts Claude Code reaches once installed. The first two are the official
@@ -42,7 +45,7 @@ const CLAUDE_CODE_DOMAINS = [
  *                    when `tokenSource` isn't set explicitly.
  */
 const AUTH_MODE: Record<
-  ClaudeCodePlugin['authMode'],
+  ClaudeCodeProjectConfig['authMode'],
   { keepHeader: string; dropHeader: string; defaultEnv: string }
 > = {
   'api-key': {
@@ -72,7 +75,7 @@ sudo -iu ${user} bash -lc 'curl -fsSL https://claude.ai/install.sh | bash'`;
 }
 
 /**
- * Expand a claude-code plugin. Contributes:
+ * Claude Code plugin. Contributes:
  *
  * 1. Proxy domains for the installer + inference API.
  * 2. A single allow policy on `api.anthropic.com` whose mutations
@@ -100,50 +103,54 @@ sudo -iu ${user} bash -lc 'curl -fsSL https://claude.ai/install.sh | bash'`;
  * surprise hits to update or telemetry hosts). Auto-updates would also
  * fail under the iptables lockdown if attempted post-init.
  */
-export function expandClaudeCode(
-  plugin: ClaudeCodePlugin,
-  placeholder: string,
-  ctx: PluginExpansionContext,
-): ExpandedPlugin {
-  assertSafeShellIdent('user', ctx.user);
+export const claudeCodePlugin: SandboxPlugin<
+  undefined,
+  typeof claudeCodeProjectConfigSchema
+> = {
+  name: 'claude-code',
+  projectConfigSchema: claudeCodeProjectConfigSchema,
+  userConfigSchema: undefined,
+  initialize({ project, placeholder, linuxUser }) {
+    assertSafeShellIdent('linuxUser', linuxUser);
 
-  const { keepHeader, dropHeader, defaultEnv } = AUTH_MODE[plugin.authMode];
-  const tokenSource = plugin.tokenSource ?? `env:${defaultEnv}`;
+    const { keepHeader, dropHeader, defaultEnv } = AUTH_MODE[project.authMode];
+    const tokenSource = project.tokenSource ?? `env:${defaultEnv}`;
 
-  const policies: ProxyPolicy[] = [
-    {
-      id: 'claude-code:api',
-      description: `Inject Claude Code ${plugin.authMode} credential into ${keepHeader} and strip ${dropHeader}`,
-      domain: 'api.anthropic.com',
-      action: {
-        type: 'allow',
-        mutations: [
-          {
-            kind: 'replace-header',
-            header: keepHeader,
-            // Substring match — the placeholder appears verbatim in the
-            // header value (Claude Code's apiKeyHelper emits it as-is).
-            // For `Authorization: Bearer <placeholder>`, replacing just
-            // `<placeholder>` leaves the `Bearer ` prefix untouched.
-            from: placeholder,
-            to: tokenSource,
-          },
-          {
-            kind: 'remove-header',
-            header: dropHeader,
-          },
-        ],
+    const policies: ProxyPolicy[] = [
+      {
+        id: 'claude-code:api',
+        description: `Inject Claude Code ${project.authMode} credential into ${keepHeader} and strip ${dropHeader}`,
+        domain: 'api.anthropic.com',
+        action: {
+          type: 'allow',
+          mutations: [
+            {
+              kind: 'replace-header',
+              header: keepHeader,
+              // Substring match — the placeholder appears verbatim in the
+              // header value (Claude Code's apiKeyHelper emits it as-is).
+              // For `Authorization: Bearer <placeholder>`, replacing just
+              // `<placeholder>` leaves the `Bearer ` prefix untouched.
+              from: placeholder,
+              to: tokenSource,
+            },
+            {
+              kind: 'remove-header',
+              header: dropHeader,
+            },
+          ],
+        },
       },
-    },
-  ];
+    ];
 
-  return {
-    domains: [...CLAUDE_CODE_DOMAINS],
-    policies,
-    commands: [settingsJsonCommand(placeholder)],
-    bootstrapScript: claudeCodeBootstrapScript(ctx.user),
-  };
-}
+    return {
+      domains: [...CLAUDE_CODE_DOMAINS],
+      policies,
+      commands: [settingsJsonCommand(placeholder)],
+      bootstrapScript: claudeCodeBootstrapScript(linuxUser),
+    };
+  },
+};
 
 /**
  * Write `~/.claude/settings.json` as the default user with `apiKeyHelper`

@@ -1,12 +1,7 @@
 import { z } from 'zod';
 
 /**
- * Claude Code plugin. Installs the official Claude Code CLI pre-lockdown via
- * `curl -fsSL https://claude.ai/install.sh | bash` and pre-authenticates it
- * post-lockdown by writing a placeholder into `~/.claude/settings.json`'s
- * `apiKeyHelper`. Claude Code emits the placeholder as the auth token; the
- * host proxy substitutes the real credential into the outgoing request, so
- * the real token never lands inside the VM.
+ * Claude Code plugin project config.
  *
  * `authMode` selects which header Claude Code uses and which env var the
  * default `tokenSource` resolves from:
@@ -26,11 +21,12 @@ import { z } from 'zod';
  * `tokenSource` overrides the default. It's a credential-source string
  * parseable by `parseCredentialSource` (e.g. `env:MY_VAR`).
  */
-export const claudeCodePluginSchema = z.object({
-  type: z.literal('claude-code'),
+export const claudeCodeProjectConfigSchema = z.object({
   authMode: z.enum(['api-key', 'oauth-token']),
   tokenSource: z.string().min(1).optional(),
 });
 
-/** Claude Code plugin config — see {@link claudeCodePluginSchema}. */
-export type ClaudeCodePlugin = z.infer<typeof claudeCodePluginSchema>;
+/** Claude Code project config — see {@link claudeCodeProjectConfigSchema}. */
+export type ClaudeCodeProjectConfig = z.infer<
+  typeof claudeCodeProjectConfigSchema
+>;
