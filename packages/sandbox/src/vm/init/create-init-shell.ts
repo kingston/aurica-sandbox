@@ -154,6 +154,10 @@ update-ca-certificates >/dev/null
 #    use a faster forward-proxy path; apps that ignore them are still
 #    routed through the proxy by the DNAT rules in step 5 (mockttp peeks
 #    SNI / Host header to recover the hostname for the allowlist).
+#    NODE_EXTRA_CA_CERTS makes Node.js (and pkg-bundled binaries like
+#    pnpm) trust the proxy CA in addition to its built-in roots, so
+#    https registry fetches don't fail with "self-signed certificate in
+#    certificate chain".
 cat > /etc/environment <<EOF
 HTTP_PROXY=http://${proxyHost}:${proxyPort}
 HTTPS_PROXY=http://${proxyHost}:${proxyPort}
@@ -161,6 +165,7 @@ http_proxy=http://${proxyHost}:${proxyPort}
 https_proxy=http://${proxyHost}:${proxyPort}
 NO_PROXY=localhost,127.0.0.1,${proxyHost}
 no_proxy=localhost,127.0.0.1,${proxyHost}
+NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/aurica-sandbox.crt
 EOF
 
 # 5. iptables: default DROP on OUTPUT for both IPv4 and IPv6, allow loopback,
