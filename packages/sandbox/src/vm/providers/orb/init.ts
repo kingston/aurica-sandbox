@@ -96,10 +96,11 @@ export function createOrbExec(vmName: string, defaultUser: string): VMExec {
       await Promise.all([tarExit, orb]);
     },
 
-    async run({ user, argv }): Promise<void> {
+    async run({ user, argv, cwd }): Promise<void> {
       await ensureBooted();
       const orbArgv = ['run', '-m', vmName];
       if (user === 'root') orbArgv.push('-u', 'root');
+      if (cwd !== undefined) orbArgv.push('-w', cwd);
       orbArgv.push(...argv);
       await execa('orbctl', orbArgv, { stdio: 'inherit' });
     },

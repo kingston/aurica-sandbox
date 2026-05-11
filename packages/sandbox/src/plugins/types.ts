@@ -20,19 +20,30 @@ export interface PluginCommand {
 /**
  * Result of expanding a single plugin into low-level rules. `domains` and
  * `policies` shape the proxy allowlist; `commands` run post-lockdown;
- * `bootstrapScript` is concatenated into the pre-lockdown init script.
+ * `bootstrapScript` is concatenated into the pre-lockdown init script;
+ * `projectInitCwdOverride` is the working directory the project-level init
+ * hook (`setup-project.sh`) runs from.
+ *
+ * Environment variables for the project (e.g. `AURICA_PROJECT_DIR`) are
+ * not passed here — plugins emit a root `PluginCommand` to write them into
+ * `/etc/environment`, which makes them visible to every PAM-launched shell
+ * (init hooks included) instead of being scoped to a single invocation.
  *
  * `bootstrapScript`, when set, is a shell snippet that runs as root with the
  * network open (before the iptables lockdown). It's trusted code shipped in
  * the sandbox tool's source, so plugin authors own its safety — but inputs
  * interpolated into it (e.g. the linux user name) must be validated first
  * via {@link assertSafeShellIdent} or equivalent.
+ *
+ * At most one plugin per sandbox may set `projectInitCwdOverride` — the
+ * project concept is singular and `expandPlugins` throws on conflict.
  */
 export interface ExpandedPlugin {
   domains: string[];
   policies: ProxyPolicy[];
   commands: PluginCommand[];
   bootstrapScript?: string;
+  projectInitCwdOverride?: string;
 }
 
 /**

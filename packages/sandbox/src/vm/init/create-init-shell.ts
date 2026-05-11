@@ -130,6 +130,13 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y --no-install-recommends \\
   git iptables iptables-persistent ca-certificates curl sudo gnupg
+
+# Standard project workspace. Plugins that check out repos (today: github,
+# when a repo has \`checkout: true\`) clone into \`/workspaces/<repo>\` as the
+# default user, so the directory must exist and be writable before
+# post-lockdown plugin commands fire. Idempotent: \`-p\` no-ops if the dir
+# already exists, and re-chowning is harmless.
+install -d -o ${opts.user} -g ${opts.user} -m 0755 /workspaces
 ${pluginSection}
 # 3. Install the proxy CA so MITM'd HTTPS validates inside the VM. mockttp
 #    intercepts every HTTPS request to apply the per-sandbox allowlist and

@@ -22,9 +22,15 @@ export interface VMExec {
 
   /**
    * Run a command inside the VM. `user: 'root'` switches to root; `'default'`
-   * uses the VM's default Linux user.
+   * uses the VM's default Linux user. When `cwd` is set, the command runs
+   * with that path as its working directory — callers should rely on this
+   * rather than wrapping `argv` in `bash -c 'cd …'`.
    */
-  run(args: { user: 'root' | 'default'; argv: string[] }): Promise<void>;
+  run(args: {
+    user: 'root' | 'default';
+    argv: string[];
+    cwd?: string;
+  }): Promise<void>;
 }
 
 export interface CreateVMOptions {

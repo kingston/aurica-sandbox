@@ -73,12 +73,20 @@ function placeholderFor(plugin: Plugin): string {
  * `bootstrapScript` is the concatenation of each contributing plugin's
  * snippet in config-declared order, with a blank-line separator. Empty
  * string when no plugin contributed one.
+ *
+ * `projectInitCwdOverride` is the working directory for the project-level
+ * init hook (`setup-project.sh`) contributed by a plugin (today: github,
+ * when at least one repo opts into `checkout: true`). At most one plugin
+ * may contribute one — `expandPlugins` throws on conflict, because "the
+ * project we're working on" is conceptually singular and a merge would
+ * mask a real configuration error.
  */
 export interface ExpandedPlugins {
   domains: string[];
   policies: ProxyPolicy[];
   commands: PluginCommand[];
   bootstrapScript: string;
+  projectInitCwdOverride?: string;
 }
 
 /**
@@ -90,6 +98,10 @@ export interface ExpandedPlugins {
  * Each plugin gets its own freshly-minted placeholder, so multiple plugins
  * targeting the same host can coexist without colliding on the
  * `(host, header, placeholder)` tuple.
+ *
+ * Throws when more than one plugin contributes a `projectInitCwdOverride`
+ * — the project layer is singular by design, so a conflict is a
+ * configuration error the user should resolve in `sandbox.json`.
  */
 export function expandPlugins(
   plugins: readonly Plugin[],
@@ -99,6 +111,7 @@ export function expandPlugins(
   const policies: ProxyPolicy[] = [];
   const commands: PluginCommand[] = [];
   const bootstrapSnippets: string[] = [];
+  let projectInitCwdOverride: string | undefined;
 
   for (const plugin of plugins) {
     const placeholder = placeholderFor(plugin);
@@ -109,6 +122,14 @@ export function expandPlugins(
     if (expanded.bootstrapScript) {
       bootstrapSnippets.push(expanded.bootstrapScript);
     }
+    if (expanded.projectInitCwdOverride !== undefined) {
+      if (projectInitCwdOverride !== undefined) {
+        throw new Error(
+          `multiple plugins contributed a projectInitCwdOverride (existing=${projectInitCwdOverride}, new=${expanded.projectInitCwdOverride}). At most one plugin may define the project-level init cwd per sandbox.`,
+        );
+      }
+      projectInitCwdOverride = expanded.projectInitCwdOverride;
+    }
   }
 
   return {
@@ -116,6 +137,7 @@ export function expandPlugins(
     policies,
     commands,
     bootstrapScript: bootstrapSnippets.join('\n\n'),
+    ...(projectInitCwdOverride !== undefined ? { projectInitCwdOverride } : {}),
   };
 }
 
@@ -126,7 +148,7 @@ function expandPlugin(
 ): ExpandedPlugin {
   switch (plugin.type) {
     case 'github': {
-      return expandGithub(plugin, placeholder);
+      return expandGithub(plugin, placeholder, ctx);
     }
     case 'docker': {
       return expandDocker(plugin, ctx);

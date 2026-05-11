@@ -30,7 +30,21 @@ export interface InitPipelineOptions {
    * wire.
    */
   pluginCommands?: { user: 'root' | 'default'; argv: string[] }[];
+  /**
+   * Override for the working directory the project-level init hook
+   * (`setup-project.sh`) runs from. Defaults to `/workspaces` (created by
+   * the built-in init script). Plugins like `github` set this to the
+   * primary checkout path so `setup-project.sh` lands inside the repo.
+   *
+   * Project-related environment variables (e.g. `AURICA_PROJECT_DIR`) are
+   * not passed here. Plugins write them into `/etc/environment` via a
+   * root post-lockdown command so every PAM-launched shell — including
+   * this hook — sees them.
+   */
+  projectInitCwdOverride?: string;
 }
+
+const DEFAULT_PROJECT_INIT_CWD = '/workspaces';
 
 async function withTempDir<T>(
   prefix: string,
@@ -60,9 +74,14 @@ async function fileExistsIn(dir: string, name: string): Promise<boolean> {
  * Order is fixed:
  *  1. built-in (base packages + plugin bootstrap + iptables lockdown) — run as root
  *  2. plugin commands (post-lockdown) — argv-only, each picks its own user
- *  3. user-level setup-root.sh / setup-user.sh (each only if present)
- *  4. project-level setup-root.sh / setup-user.sh (each only if present)
+ *  3. user-level setup-root.sh / setup-user.sh / setup-project.sh
+ *  4. project-level setup-root.sh / setup-user.sh / setup-project.sh
  *  5. cleanup of the staging directory
+ *
+ * Each script within a layer is run only if it exists. `setup-project.sh`
+ * additionally requires `projectInitContext` to be set — the script only
+ * makes sense in the context of a checked-out project (today: the github
+ * plugin's primary repo).
  *
  * Aborts on the first non-zero exit. The caller is expected to record
  * `status: 'failed-init'` and rethrow.
@@ -72,6 +91,7 @@ export async function runInitPipeline(
   opts: InitPipelineOptions,
 ): Promise<void> {
   const stagingHome = `/home/${opts.user}/${STAGING_DIR}`;
+  const projectCwd = opts.projectInitCwdOverride ?? DEFAULT_PROJECT_INIT_CWD;
 
   // 1. Built-in bootstrap.
   await withTempDir('aurica-init-builtin-', async (dir) => {
@@ -91,8 +111,14 @@ export async function runInitPipeline(
   }
 
   // 3 & 4. User and project hooks.
-  await runHookLayer(exec, opts.user, 'user', opts.userInitDir);
-  await runHookLayer(exec, opts.user, 'project', opts.projectInitDir);
+  await runHookLayer(exec, opts.user, 'user', opts.userInitDir, projectCwd);
+  await runHookLayer(
+    exec,
+    opts.user,
+    'project',
+    opts.projectInitDir,
+    projectCwd,
+  );
 
   // 5. Cleanup staging dir. Best-effort: a failure here doesn't change the
   //    correctness of the bootstrap, so we don't gate success on it.
@@ -111,24 +137,43 @@ async function runHookLayer(
   vmUser: string,
   layer: 'user' | 'project',
   dir: string | null,
+  projectCwd: string,
 ): Promise<void> {
   if (!dir) return;
   const hasRoot = await fileExistsIn(dir, 'setup-root.sh');
   const hasUser = await fileExistsIn(dir, 'setup-user.sh');
-  if (!hasRoot && !hasUser) return;
+  const hasProject = await fileExistsIn(dir, 'setup-project.sh');
+  if (!hasRoot && !hasUser && !hasProject) return;
 
   await exec.pushDir(dir, `${STAGING_DIR}/${layer}`);
   const stagingPath = `/home/${vmUser}/${STAGING_DIR}/${layer}`;
   if (hasRoot) {
+    // System packages and root configuration. No project cwd — root hooks
+    // aren't tied to any project.
     await exec.run({
       user: 'root',
       argv: ['bash', `${stagingPath}/setup-root.sh`],
     });
   }
   if (hasUser) {
+    // User-global config (dotfiles, shell setup, etc.) that should apply
+    // regardless of whether a project is checked out. Runs from the
+    // default user's $HOME.
     await exec.run({
       user: 'default',
       argv: ['bash', `${stagingPath}/setup-user.sh`],
+    });
+  }
+  if (hasProject) {
+    // Project-specific setup (dependency install, project-local tools).
+    // Runs with cwd = projectCwd via the provider's `run.cwd` option —
+    // defaults to `/workspaces` when no plugin overrides it. Project env
+    // vars (e.g. `AURICA_PROJECT_DIR`) reach this hook via
+    // `/etc/environment`, not via an `env` prefix here.
+    await exec.run({
+      user: 'default',
+      cwd: projectCwd,
+      argv: ['bash', `${stagingPath}/setup-project.sh`],
     });
   }
 }

@@ -207,6 +207,9 @@ export async function runCreate(
       userInitDir,
       projectInitDir,
       pluginCommands: expanded.commands,
+      ...(expanded.projectInitCwdOverride !== undefined
+        ? { projectInitCwdOverride: expanded.projectInitCwdOverride }
+        : {}),
     });
   } catch (err) {
     await withState((state) => {

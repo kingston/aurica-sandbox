@@ -113,11 +113,25 @@ export async function runProxyProcess(
   // Visibility: mockttp emits structured events for every request lifecycle.
   // Registered via setEventSubscriber so the listeners get re-attached after
   // every rule rebuild — mockttp's reset() drops both rules and listeners.
+  //
+  // We log on response (not request) so each line carries the outcome — the
+  // status code makes success vs. failure obvious at a glance. Method + URL
+  // aren't on the response event, so we track them by request id and consume
+  // the entry on response/abort.
+  const inflight = new Map<string, string>();
   await proxy.setEventSubscriber(async (server) => {
     await server.on('request', (req) => {
-      log.info(`-> ${req.method} ${req.url}`);
+      inflight.set(req.id, `${req.method} ${req.url}`);
+    });
+    await server.on('response', (res) => {
+      const label = inflight.get(res.id) ?? `? ${res.id}`;
+      inflight.delete(res.id);
+      const line = `${res.statusCode} ${label}`;
+      if (res.statusCode >= 400) log.error(line.trimEnd());
+      else log.info(line.trimEnd());
     });
     await server.on('abort', (req) => {
+      inflight.delete(req.id);
       log.error(`aborted ${req.method} ${req.url}`);
     });
     await server.on('tls-client-error', (err) => {

@@ -91,13 +91,27 @@ export const GH_TOKEN_API_INCOMPATIBLE_MESSAGE =
  * Each repo defaults to allowing fetch + push over git smart-HTTP; setting
  * `readOnly: true` drops `git-receive-pack` so push is denied at the proxy.
  *
- * `api` (plugin-level, default `false`) opens all of `api.github.com`,
- * including `/graphql`. This is a deliberate bypass of repo scoping for the
- * API surface — GraphQL POSTs encode repo identity in the request body
- * rather than the URL, so the proxy can't constrain them per-repo. With
- * `api: true`, repo scoping for API traffic is delegated entirely to the
- * configured token. Disallowed in combination with `tokenSource: gh-token`,
- * since the gh CLI's token typically lacks the scopes that make this useful.
+ * Every listed repository is cloned into `/workspaces/<repo>` inside the
+ * VM during init. The first entry in `repositories[]` is treated as the
+ * **primary** repo: the project-level init hook (`setup-project.sh`) runs
+ * with its cwd set to the primary repo path, and `AURICA_PROJECT_DIR` is
+ * written into `/etc/environment` so every PAM-launched shell sees it.
+ *
+ * `api` (plugin-level, default `false`) controls whether the configured
+ * token is attached to `api.github.com` traffic. `api.github.com` is always
+ * reachable through the proxy — the flag only governs authentication:
+ *
+ * - `api: true` attaches the token to every request, opening the
+ *   token-scoped API surface (including `/graphql`). This is a deliberate
+ *   bypass of repo scoping for the API — GraphQL POSTs encode repo identity
+ *   in the request body rather than the URL, so the proxy can't constrain
+ *   them per-repo; the token is trusted to enforce that. Disallowed in
+ *   combination with `tokenSource: gh-token`, since the gh CLI's token
+ *   typically lacks the scopes that make this useful.
+ * - `api: false` (the default) lets requests through unauthenticated, so
+ *   tools that only need public endpoints (e.g. mise resolving release
+ *   versions) keep working without granting the token broad API scope.
+ *   Subject to GitHub's anonymous rate limit (60/hr/IP).
  *
  * `username` is the credential username embedded in `~/.git-credentials`
  * URLs (`https://<username>:<token>@github.com/...`). For GitHub PATs and

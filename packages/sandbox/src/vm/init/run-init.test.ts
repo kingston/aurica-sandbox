@@ -11,7 +11,9 @@ interface RecordedCall {
   /** push: localDir; run: argv joined */
   arg: string;
   /** run only */
-  user?: 'root' | 'default';
+  user?: 'root' | 'default' | undefined;
+  /** run only */
+  cwd?: string | undefined;
 }
 
 function makeFakeExec(): {
@@ -24,8 +26,8 @@ function makeFakeExec(): {
       calls.push({ kind: 'push', arg: `${localDir} -> ${dest}` });
       return Promise.resolve();
     },
-    run: ({ user, argv }) => {
-      calls.push({ kind: 'run', arg: argv.join(' '), user });
+    run: ({ user, argv, cwd }) => {
+      calls.push({ kind: 'run', arg: argv.join(' '), user, cwd });
       return Promise.resolve();
     },
   };
@@ -176,6 +178,95 @@ describe('runInitPipeline', () => {
     const aptCmd = runs.find((c) => c.arg === 'apt-get install -y jq');
     expect(headerCmd?.user).toBe('default');
     expect(aptCmd?.user).toBe('root');
+  });
+
+  it('runs setup-user.sh as a bare bash invocation regardless of projectInitCwdOverride', async () => {
+    const dir = path.join(workdir, 'init-user-bare');
+    await fs.mkdir(dir);
+    await fs.writeFile(path.join(dir, 'setup-user.sh'), '#!/bin/bash\n:');
+
+    const { exec, calls } = makeFakeExec();
+    await runInitPipeline(exec, {
+      user: 'sandbox',
+      builtinScript: '#!/bin/bash\n:',
+      userInitDir: dir,
+      projectInitDir: null,
+      // Set even though there is no setup-project.sh — must not affect
+      // setup-user.sh, which stays at the default $HOME cwd.
+      projectInitCwdOverride: '/workspaces/bar',
+    });
+
+    const runs = calls.filter((c) => c.kind === 'run');
+    const userHook = runs.find((c) => c.arg.includes('setup-user.sh'));
+    expect(userHook?.user).toBe('default');
+    expect(userHook?.arg).toBe(
+      'bash /home/sandbox/.aurica-init-staging/user/setup-user.sh',
+    );
+  });
+
+  it('runs setup-project.sh in the project cwd when projectInitCwdOverride is provided', async () => {
+    const dir = path.join(workdir, 'init-project-hook');
+    await fs.mkdir(dir);
+    await fs.writeFile(path.join(dir, 'setup-project.sh'), '#!/bin/bash\n:');
+    await fs.writeFile(path.join(dir, 'setup-user.sh'), '#!/bin/bash\n:');
+    await fs.writeFile(path.join(dir, 'setup-root.sh'), '#!/bin/bash\n:');
+
+    const { exec, calls } = makeFakeExec();
+    await runInitPipeline(exec, {
+      user: 'sandbox',
+      builtinScript: '#!/bin/bash\n:',
+      userInitDir: dir,
+      projectInitDir: null,
+      projectInitCwdOverride: '/workspaces/bar',
+    });
+
+    const runs = calls.filter((c) => c.kind === 'run');
+    const projectHook = runs.find((c) => c.arg.includes('setup-project.sh'));
+    if (!projectHook) throw new Error('expected setup-project.sh run');
+    expect(projectHook.user).toBe('default');
+    // Provider runs the script directly with cwd set via the `run.cwd`
+    // option (orbctl `-w`). No `bash -c` wrapper and no `env` prefix —
+    // project env vars come from /etc/environment.
+    expect(projectHook.cwd).toBe('/workspaces/bar');
+    expect(projectHook.arg).toBe(
+      'bash /home/sandbox/.aurica-init-staging/user/setup-project.sh',
+    );
+
+    // setup-root.sh / setup-user.sh are unchanged by the project context.
+    const rootHook = runs.find((c) => c.arg.includes('setup-root.sh'));
+    expect(rootHook?.user).toBe('root');
+    expect(rootHook?.arg).toBe(
+      'bash /home/sandbox/.aurica-init-staging/user/setup-root.sh',
+    );
+    const userHook = runs.find((c) => c.arg.includes('setup-user.sh'));
+    expect(userHook?.arg).toBe(
+      'bash /home/sandbox/.aurica-init-staging/user/setup-user.sh',
+    );
+  });
+
+  it('runs setup-project.sh in /workspaces when no projectInitCwdOverride is provided', async () => {
+    const dir = path.join(workdir, 'init-project-default-cwd');
+    await fs.mkdir(dir);
+    await fs.writeFile(path.join(dir, 'setup-project.sh'), '#!/bin/bash\n:');
+    await fs.writeFile(path.join(dir, 'setup-user.sh'), '#!/bin/bash\n:');
+
+    const { exec, calls } = makeFakeExec();
+    await runInitPipeline(exec, {
+      user: 'sandbox',
+      builtinScript: '#!/bin/bash\n:',
+      userInitDir: dir,
+      projectInitDir: null,
+    });
+
+    const runs = calls.filter((c) => c.kind === 'run');
+    const projectHook = runs.find((c) => c.arg.includes('setup-project.sh'));
+    if (!projectHook) throw new Error('expected setup-project.sh run');
+    expect(projectHook.user).toBe('default');
+    expect(projectHook.cwd).toBe('/workspaces');
+    expect(projectHook.arg).toBe(
+      'bash /home/sandbox/.aurica-init-staging/user/setup-project.sh',
+    );
+    expect(runs.some((c) => c.arg.includes('setup-user.sh'))).toBe(true);
   });
 
   it('aborts on first non-zero exit', async () => {

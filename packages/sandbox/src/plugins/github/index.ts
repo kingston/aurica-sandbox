@@ -4,8 +4,13 @@ import type {
   ProxyPolicy,
   ProxyPolicyTransform,
 } from '#src/config/index.js';
+import { assertSafeShellIdent } from '#src/utils/shell-safety.js';
 
-import type { ExpandedPlugin, PluginCommand } from '../types.js';
+import type {
+  ExpandedPlugin,
+  PluginCommand,
+  PluginExpansionContext,
+} from '../types.js';
 import type { GithubPlugin, GithubUser } from './schema.js';
 
 /**
@@ -25,14 +30,6 @@ const GITHUB_DOMAINS = [
   '*.githubusercontent.com',
   'cli.github.com',
 ] as const;
-
-/** Auth hosts that get a per-host catch-all block policy when not allowed. */
-type GithubAuthHost = 'github.com' | 'api.github.com' | 'codeload.github.com';
-const GITHUB_AUTH_HOSTS: readonly GithubAuthHost[] = [
-  'github.com',
-  'api.github.com',
-  'codeload.github.com',
-];
 
 /**
  * Absolute path to the custom git credential helper installed by this
@@ -92,12 +89,18 @@ chmod 0755 ${CREDENTIAL_HELPER_PATH}`;
 /**
  * Expand a single github plugin into proxy domains, per-repo allow policies
  * for git smart-HTTP (one fetch matcher set per repo on `github.com` and
- * `codeload.github.com`, plus a push matcher unless `readOnly: true`), an
- * optional broad allow on `api.github.com` when plugin-level `api: true`, a
- * per-host catch-all `block` policy so requests outside the allowlist fail
- * fast at the proxy with 403 (instead of leaking the placeholder to GitHub),
- * and in-VM init commands that wire git credentials, gh CLI auth, and the
- * host machine's git identity.
+ * `codeload.github.com`, plus a push matcher unless `readOnly: true`), a
+ * broad allow on `api.github.com` (token-bearing when plugin-level `api:
+ * true`, anonymous passthrough otherwise), and in-VM init commands that
+ * wire git credentials, gh CLI auth, and the host machine's git identity.
+ *
+ * No catch-all block policies are emitted. Requests to allowlisted hosts
+ * that don't match a per-repo allow pass through unmodified (see
+ * `applyPolicies`); placeholder leakage is prevented upstream by
+ * `credential.useHttpPath = true`, which makes git only send credentials
+ * when the request path matches a stored credential URL's path — so a
+ * request to a non-configured repo arrives unauthenticated rather than
+ * carrying the placeholder.
  *
  * Per-repo capability filtering at the proxy was removed: the GitHub token
  * itself (fine-grained PAT or App installation token) is the source of
@@ -105,8 +108,10 @@ chmod 0755 ${CREDENTIAL_HELPER_PATH}`;
  * that at the proxy added complexity and broke gh's GraphQL-backed
  * commands, which post to `/graphql` with the repo identity in the body
  * where path matchers can't see it. With `api: true` the `/graphql`
- * surface (and the rest of `api.github.com`) is opened wholesale; the
- * token is trusted to enforce per-repo scope on API traffic.
+ * surface (and the rest of `api.github.com`) is opened wholesale and the
+ * token is attached; with `api: false` the same surface is reachable but
+ * unauthenticated, so anonymous tooling (e.g. mise's release-version
+ * probes) works without granting the token broad API scope.
  *
  * Credentials are written to `~/.git-credentials` so other tools in the VM
  * (gh CLI, custom scripts) can read them, with a custom credential helper
@@ -121,9 +126,16 @@ chmod 0755 ${CREDENTIAL_HELPER_PATH}`;
  * for git, one without for gh — so both schemes substitute correctly at
  * request time.
  *
- * The `gh` CLI is pre-authenticated by writing `~/.config/gh/hosts.yml`
- * with the placeholder as `oauth_token`. Same proxy substitution rules
- * apply on the wire.
+ * When `api: true`, the `gh` CLI is pre-authenticated by writing
+ * `~/.config/gh/hosts.yml` with the placeholder as `oauth_token`; the
+ * `api.github.com` allow policy carries the same `replace-header`
+ * mutations as the git-host policies, so the placeholder is substituted
+ * for the real token on the wire. When `api: false`, the hosts.yml file
+ * is intentionally NOT written: the `api.github.com` policy is an
+ * unauthenticated passthrough with no mutations, so writing the
+ * placeholder there would leak it verbatim to GitHub on any `gh` call.
+ * The user opted out of API auth, so leaving `gh` unauthenticated inside
+ * the VM is the honest behavior.
  *
  * If the plugin's optional `user` field is set, two additional commands
  * mirror its `name` / `email` into the VM's global git config so commits
@@ -142,7 +154,14 @@ chmod 0755 ${CREDENTIAL_HELPER_PATH}`;
 export function expandGithub(
   plugin: GithubPlugin,
   placeholder: string,
+  ctx: PluginExpansionContext,
 ): ExpandedPlugin {
+  // The clone destination paths are interpolated as argv (not shell), so
+  // they are not vulnerable to shell metacharacters, but we still validate
+  // the linux user for consistency with the other plugins and to keep the
+  // home-directory path predictable.
+  assertSafeShellIdent('user', ctx.user);
+
   const policies: ProxyPolicy[] = [];
   const credentialUrls: string[] = [];
 
@@ -168,8 +187,15 @@ export function expandGithub(
       codeloadPolicyFor(repo.name, owner, name, mutations),
     );
 
+    // Write both URL forms (bare and `.git`-suffixed). With
+    // `credential.useHttpPath = true`, git credential-store matches the
+    // stored URL's path against the request's path exactly — so a clone of
+    // `<owner>/<repo>.git` won't find an entry stored under
+    // `<owner>/<repo>`. Our checkout uses the `.git` form, but user scripts
+    // inside the VM may clone with either, so we store both.
     credentialUrls.push(
       `https://${plugin.username}:${placeholder}@github.com/${repo.name}`,
+      `https://${plugin.username}:${placeholder}@github.com/${repo.name}.git`,
     );
   }
 
@@ -183,21 +209,30 @@ export function expandGithub(
       domain: 'api.github.com',
       action: { type: 'allow', mutations },
     });
-  }
-
-  // Catch-all block per auth host. Appended after all allow policies so
-  // first-match-wins preserves the allows. Anything that reaches a
-  // catch-all gets a clean 403 from the proxy instead of leaking the
-  // placeholder to GitHub. The api.github.com block is shadowed by the
-  // broad allow above when `api: true`, but is still emitted for symmetry.
-  for (const host of GITHUB_AUTH_HOSTS) {
+  } else {
+    // No token attached, but let requests through — tools like mise hit
+    // `api.github.com/repos/<owner>/<repo>/releases` for version
+    // resolution and only need anonymous access (subject to GitHub's
+    // 60/hr/IP unauthenticated rate limit).
     policies.push({
-      id: `github:block:${host}`,
-      description: `Default-deny for ${host} — paths not in any repo's allowlist`,
-      domain: host,
-      action: { type: 'block' },
+      id: 'github:api:passthrough:api.github.com',
+      description: 'GitHub API anonymous passthrough (no token attached)',
+      domain: 'api.github.com',
+      action: { type: 'allow' },
     });
   }
+
+  // Every listed repo is cloned. The first entry is the primary repo —
+  // `setup-project.sh` runs inside its directory and `AURICA_PROJECT_DIR`
+  // points at it via `/etc/environment`. The schema requires at least one
+  // repository, so `primary` is always defined; guard for the type system.
+  const primary = plugin.repositories[0];
+  if (!primary) {
+    throw new Error('github plugin: repositories[] must be non-empty');
+  }
+  // Schema regex guarantees `<owner>/<repo>` shape.
+  const [, primaryName] = primary.name.split('/') as [string, string];
+  const projectDir = `/workspaces/${primaryName}`;
 
   const commands: PluginCommand[] = [
     {
@@ -227,8 +262,12 @@ export function expandGithub(
         ...credentialUrls,
       ],
     },
-    ghHostsYamlCommand(plugin.username, placeholder),
+    ...(plugin.api === true
+      ? [ghHostsYamlCommand(plugin.username, placeholder)]
+      : []),
     ...userIdentityCommands(plugin.user),
+    ...checkoutCommands(plugin.repositories),
+    etcEnvironmentProjectDirCommand(projectDir),
   ];
 
   return {
@@ -236,6 +275,7 @@ export function expandGithub(
     policies,
     commands,
     bootstrapScript: GH_CLI_BOOTSTRAP_SCRIPT,
+    projectInitCwdOverride: projectDir,
   };
 }
 
@@ -243,6 +283,12 @@ export function expandGithub(
  * Allow policy for git smart-HTTP on `github.com` covering fetch
  * (`info/refs` GET + `git-upload-pack` POST). Push (`git-receive-pack`
  * POST) is added unless `readOnly` is set.
+ *
+ * Each request path is matched in both its bare (`/<owner>/<repo>/...`) and
+ * `.git`-suffixed (`/<owner>/<repo>.git/...`) form. GitHub accepts either
+ * shape on the wire, and the suffix is preserved verbatim from the clone
+ * URL — our own checkout uses `<owner>/<repo>.git`, so without the
+ * suffixed variant the catch-all block fires before any fetch can happen.
  */
 function gitHostPolicyFor(
   repoName: string,
@@ -253,13 +299,21 @@ function gitHostPolicyFor(
 ): ProxyPolicy {
   const matchers: MatcherEntry[] = [
     { exact: `/${owner}/${name}/info/refs`, methods: ['GET'] },
+    { exact: `/${owner}/${name}.git/info/refs`, methods: ['GET'] },
     { exact: `/${owner}/${name}/git-upload-pack`, methods: ['POST'] },
+    { exact: `/${owner}/${name}.git/git-upload-pack`, methods: ['POST'] },
   ];
   if (!readOnly) {
-    matchers.push({
-      exact: `/${owner}/${name}/git-receive-pack`,
-      methods: ['POST'],
-    });
+    matchers.push(
+      {
+        exact: `/${owner}/${name}/git-receive-pack`,
+        methods: ['POST'],
+      },
+      {
+        exact: `/${owner}/${name}.git/git-receive-pack`,
+        methods: ['POST'],
+      },
+    );
   }
   return {
     id: `github:${repoName}:github.com`,
@@ -324,6 +378,9 @@ function authMutations(
  * placeholder as `oauth_token`. Run as the default user so the file lands
  * in their home with correct ownership.
  *
+ * Only called when the plugin's `api: true` — see {@link expandGithub} for
+ * why writing this file with `api: false` would leak the placeholder.
+ *
  * The YAML body is passed through `printf "%s\n" "$@"` so the placeholder
  * never gets interpolated by the wrapping shell.
  */
@@ -348,6 +405,76 @@ function ghHostsYamlCommand(
       String.raw`mkdir -p "$HOME/.config/gh" && umask 077 && printf "%s\n" "$@" > "$HOME/.config/gh/hosts.yml"`,
       'sh',
       ...lines,
+    ],
+  };
+}
+
+/**
+ * One `git clone` command per repository in the plugin's `repositories[]`.
+ * Each command runs as the default user post-lockdown, cloning to
+ * `/workspaces/<repo>` over the existing per-repo proxy allow policies.
+ * The URL is the bare `https://github.com/<owner>/<repo>.git` — auth
+ * comes from the credential helper + `~/.git-credentials` that init has
+ * already written, so `.git/config`'s `remote.origin.url` never carries
+ * the placeholder.
+ *
+ * The `/workspaces` parent is created (and chowned to the default user)
+ * by the built-in init script before iptables lockdown — see
+ * `createInitShell`. These commands run as the default user and assume
+ * the parent is already writable.
+ *
+ * Idempotent: `test -d "<dest>/.git" || git clone …` short-circuits when
+ * the repo is already present, so re-running `aurica-sandbox init` is a
+ * no-op for already-checked-out repos.
+ */
+function checkoutCommands(
+  repos: readonly GithubPlugin['repositories'][number][],
+): PluginCommand[] {
+  return repos.map((repo) => {
+    // Schema regex guarantees `<owner>/<repo>` shape.
+    const [, repoName] = repo.name.split('/') as [string, string];
+    const url = `https://github.com/${repo.name}.git`;
+    const dest = `/workspaces/${repoName}`;
+    return {
+      user: 'default',
+      argv: [
+        'sh',
+        '-c',
+        // URL and dest passed as positional args ($1, $2) so neither lands
+        // in the script body. /workspaces itself is created by the
+        // built-in init; we don't need to mkdir its parent.
+        'test -d "$2/.git" || git clone "$1" "$2"',
+        'sh',
+        url,
+        dest,
+      ],
+    };
+  });
+}
+
+/**
+ * Append `AURICA_PROJECT_DIR=<path>` to `/etc/environment` so interactive
+ * shells (including future `orb -m <name>` logins) see the variable via
+ * PAM. Runs as root post-lockdown — `/etc/environment` was created by the
+ * built-in init script in step 4 with the proxy env vars; we add one line
+ * to it.
+ *
+ * Idempotent across init re-runs: removes any prior `AURICA_PROJECT_DIR=`
+ * line before appending the new one. The path is passed as `$1` so it's
+ * never interpolated into the script body.
+ */
+function etcEnvironmentProjectDirCommand(projectDir: string): PluginCommand {
+  return {
+    user: 'root',
+    argv: [
+      'sh',
+      '-c',
+      [
+        'sed -i "/^AURICA_PROJECT_DIR=/d" /etc/environment',
+        String.raw`printf "AURICA_PROJECT_DIR=%s\n" "$1" >> /etc/environment`,
+      ].join(' && '),
+      'sh',
+      projectDir,
     ],
   };
 }

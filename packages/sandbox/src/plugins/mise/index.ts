@@ -14,6 +14,7 @@ import type { MisePlugin } from './schema.js';
 const MISE_DOMAINS = [
   'mise.run',
   'mise.jdx.dev',
+  'mise-versions.jdx.dev',
   'nodejs.org',
   'registry.npmjs.org',
   'pypi.org',
