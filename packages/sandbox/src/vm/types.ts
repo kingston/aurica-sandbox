@@ -35,7 +35,7 @@ export interface VMExec {
 
 export interface CreateVMOptions {
   name: string;
-  distro?: 'ubuntu' | 'debian' | 'nixos';
+  distro?: 'ubuntu' | 'debian';
   arch?: 'amd64' | 'arm64';
 }
 

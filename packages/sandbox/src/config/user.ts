@@ -22,7 +22,7 @@ export type UserPlugin = z.infer<typeof userPluginSchema>;
 const userConfigSchema = z.object({
   vm: z.object({
     provider: z.literal('orb'),
-    distro: z.enum(['ubuntu', 'debian', 'nixos']).default('ubuntu'),
+    distro: z.enum(['ubuntu', 'debian']).default('ubuntu'),
   }),
   credentialProviders: z
     .array(

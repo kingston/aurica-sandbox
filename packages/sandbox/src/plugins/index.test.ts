@@ -112,19 +112,29 @@ describe('expandPlugins', () => {
     expect(expanded.policies).toEqual([]);
   });
 
-  it('mise plugin contributes mise + language CDN domains', () => {
+  it('mise plugin contributes the apt repo + language CDN domains', () => {
     const expanded = expandPlugins([{ type: 'mise' }], ctx);
     expect(expanded.domains).toEqual(
       expect.arrayContaining([
-        'mise.run',
+        'mise.en.dev',
         'mise.jdx.dev',
         'nodejs.org',
         'pypi.org',
       ]),
     );
+    // Install path: official apt repo (signed-by the mise GPG key), not the
+    // curl-piped installer. Putting the binary at /usr/bin/mise means every
+    // shell finds it on PATH regardless of login state.
+    expect(expanded.bootstrapScript).toMatch(/mise.en.dev\/gpg-key\.pub/);
     expect(expanded.bootstrapScript).toMatch(
-      /sudo -iu sandbox bash -lc 'curl -fsSL https:\/\/mise\.run \| sh'/,
+      /apt-get install -y --no-install-recommends mise/,
     );
+    // Activation shim is appended idempotently for bash, zsh, and fish so
+    // interactive shells inside the VM pick up mise-managed tools.
+    expect(expanded.bootstrapScript).toMatch(/mise activate bash/);
+    expect(expanded.bootstrapScript).toMatch(/mise activate zsh/);
+    expect(expanded.bootstrapScript).toMatch(/mise activate fish/);
+    expect(expanded.bootstrapScript).toMatch(/grep -qxF/);
   });
 
   it('rejects unsafe usernames at expansion time', () => {
