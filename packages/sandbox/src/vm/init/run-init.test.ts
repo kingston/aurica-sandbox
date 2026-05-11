@@ -112,7 +112,7 @@ describe('runInitPipeline', () => {
     expect(layerRuns).toHaveLength(1);
     expect(layerRuns[0]?.user).toBe('root');
     expect(layerRuns[0]?.arg).toBe(
-      'bash /home/sandbox/.aurica-init-staging/user/setup-root.sh',
+      'bash -l /home/sandbox/.aurica-init-staging/user/setup-root.sh',
     );
   });
 
@@ -142,8 +142,8 @@ describe('runInitPipeline', () => {
 
     expect(order).toEqual([
       'bash /home/sandbox/.aurica-init-staging/builtin/builtin.sh',
-      'bash /home/sandbox/.aurica-init-staging/user/setup-user.sh',
-      'bash /home/sandbox/.aurica-init-staging/project/setup-root.sh',
+      'bash -l /home/sandbox/.aurica-init-staging/user/setup-user.sh',
+      'bash -l /home/sandbox/.aurica-init-staging/project/setup-root.sh',
     ]);
   });
 
@@ -180,7 +180,7 @@ describe('runInitPipeline', () => {
     expect(aptCmd?.user).toBe('root');
   });
 
-  it('runs setup-user.sh as a bare bash invocation regardless of projectInitCwdOverride', async () => {
+  it('runs setup-user.sh as a login bash invocation regardless of projectInitCwdOverride', async () => {
     const dir = path.join(workdir, 'init-user-bare');
     await fs.mkdir(dir);
     await fs.writeFile(path.join(dir, 'setup-user.sh'), '#!/bin/bash\n:');
@@ -200,7 +200,7 @@ describe('runInitPipeline', () => {
     const userHook = runs.find((c) => c.arg.includes('setup-user.sh'));
     expect(userHook?.user).toBe('default');
     expect(userHook?.arg).toBe(
-      'bash /home/sandbox/.aurica-init-staging/user/setup-user.sh',
+      'bash -l /home/sandbox/.aurica-init-staging/user/setup-user.sh',
     );
   });
 
@@ -228,19 +228,22 @@ describe('runInitPipeline', () => {
     // option (orbctl `-w`). No `bash -c` wrapper and no `env` prefix —
     // project env vars come from /etc/environment.
     expect(projectHook.cwd).toBe('/workspaces/bar');
+    // `bash -l` (login shell) so /etc/profile + ~/.profile chain in,
+    // sourcing ~/.bashrc and the mise activate snippet — hooks see
+    // mise-managed tools on PATH.
     expect(projectHook.arg).toBe(
-      'bash /home/sandbox/.aurica-init-staging/user/setup-project.sh',
+      'bash -l /home/sandbox/.aurica-init-staging/user/setup-project.sh',
     );
 
     // setup-root.sh / setup-user.sh are unchanged by the project context.
     const rootHook = runs.find((c) => c.arg.includes('setup-root.sh'));
     expect(rootHook?.user).toBe('root');
     expect(rootHook?.arg).toBe(
-      'bash /home/sandbox/.aurica-init-staging/user/setup-root.sh',
+      'bash -l /home/sandbox/.aurica-init-staging/user/setup-root.sh',
     );
     const userHook = runs.find((c) => c.arg.includes('setup-user.sh'));
     expect(userHook?.arg).toBe(
-      'bash /home/sandbox/.aurica-init-staging/user/setup-user.sh',
+      'bash -l /home/sandbox/.aurica-init-staging/user/setup-user.sh',
     );
   });
 
@@ -264,7 +267,7 @@ describe('runInitPipeline', () => {
     expect(projectHook.user).toBe('default');
     expect(projectHook.cwd).toBe('/workspaces');
     expect(projectHook.arg).toBe(
-      'bash /home/sandbox/.aurica-init-staging/user/setup-project.sh',
+      'bash -l /home/sandbox/.aurica-init-staging/user/setup-project.sh',
     );
     expect(runs.some((c) => c.arg.includes('setup-user.sh'))).toBe(true);
   });

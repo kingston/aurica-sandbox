@@ -147,12 +147,19 @@ async function runHookLayer(
 
   await exec.pushDir(dir, `${STAGING_DIR}/${layer}`);
   const stagingPath = `/home/${vmUser}/${STAGING_DIR}/${layer}`;
+  // All hooks run under `bash -l` (login shell). Login mode sources
+  // `/etc/profile` + `~/.profile`, which on Ubuntu/Debian chain into
+  // `~/.bashrc` — so plugin-installed shell integrations like
+  // `eval "$(mise activate bash)"` fire, putting mise-managed tools
+  // (`pnpm`, `node`, …) on PATH for the hook script. Without `-l`, hooks
+  // run as plain non-interactive non-login shells and only see the
+  // skeletal PATH inherited from the orchestrator.
   if (hasRoot) {
     // System packages and root configuration. No project cwd — root hooks
     // aren't tied to any project.
     await exec.run({
       user: 'root',
-      argv: ['bash', `${stagingPath}/setup-root.sh`],
+      argv: ['bash', '-l', `${stagingPath}/setup-root.sh`],
     });
   }
   if (hasUser) {
@@ -161,7 +168,7 @@ async function runHookLayer(
     // default user's $HOME.
     await exec.run({
       user: 'default',
-      argv: ['bash', `${stagingPath}/setup-user.sh`],
+      argv: ['bash', '-l', `${stagingPath}/setup-user.sh`],
     });
   }
   if (hasProject) {
@@ -173,7 +180,7 @@ async function runHookLayer(
     await exec.run({
       user: 'default',
       cwd: projectCwd,
-      argv: ['bash', `${stagingPath}/setup-project.sh`],
+      argv: ['bash', '-l', `${stagingPath}/setup-project.sh`],
     });
   }
 }
