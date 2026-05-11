@@ -78,7 +78,17 @@ function tryReadCommit(file: string): string | null {
     return null;
   }
   if (!parsed || typeof parsed !== 'object') return null;
-  const commit = (parsed as { commit?: unknown }).commit;
-  if (typeof commit !== 'string' || !COMMIT_RE.test(commit)) return null;
-  return commit;
+  // Cursor's product.json carries two commit fields: `realCommit` is the
+  // actual upstream commit the REH tarball is published under at
+  // downloads.cursor.com, while `commit` has its last character replaced
+  // with `commitLastCharacter` (a channel/build marker). Prefer
+  // `realCommit`; fall back to `commit` for older builds that didn't ship
+  // `realCommit`.
+  const source = parsed as { realCommit?: unknown; commit?: unknown };
+  for (const candidate of [source.realCommit, source.commit]) {
+    if (typeof candidate === 'string' && COMMIT_RE.test(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
 }

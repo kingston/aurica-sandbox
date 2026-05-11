@@ -102,4 +102,42 @@ describe('readHostCursor', () => {
     const file = fixture(JSON.stringify({ commit: VALID_COMMIT }));
     expect(readHostCursor({ candidates: [file], hostArch: 'ia32' })).toBeNull();
   });
+
+  it('prefers realCommit over commit when both are present', () => {
+    // Cursor's product.json carries `commit` with its last char replaced
+    // by `commitLastCharacter` (a channel marker), and `realCommit` with
+    // the actual upstream commit the REH tarball is published under.
+    // Picking the wrong field 403s against downloads.cursor.com.
+    const realCommit = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa6';
+    const altered = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0';
+    const file = fixture(
+      JSON.stringify({
+        commit: altered,
+        realCommit,
+        commitLastCharacter: '0',
+      }),
+    );
+    expect(readHostCursor({ candidates: [file], hostArch: 'arm64' })).toEqual({
+      commit: realCommit,
+      arch: 'arm64',
+    });
+  });
+
+  it('falls back to commit when realCommit is absent (older builds)', () => {
+    const file = fixture(JSON.stringify({ commit: VALID_COMMIT }));
+    expect(readHostCursor({ candidates: [file], hostArch: 'arm64' })).toEqual({
+      commit: VALID_COMMIT,
+      arch: 'arm64',
+    });
+  });
+
+  it('falls back to commit when realCommit is malformed', () => {
+    const file = fixture(
+      JSON.stringify({ commit: VALID_COMMIT, realCommit: 'not-a-hash' }),
+    );
+    expect(readHostCursor({ candidates: [file], hostArch: 'arm64' })).toEqual({
+      commit: VALID_COMMIT,
+      arch: 'arm64',
+    });
+  });
 });

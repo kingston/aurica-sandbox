@@ -1,6 +1,4 @@
-import { assertSafeShellIdent } from '#src/utils/shell-safety.js';
-
-import type { SandboxPlugin } from '../types.js';
+import type { PluginCommand, SandboxPlugin } from '../types.js';
 import * as hostCursor from './host-cursor.js';
 import type { HostCursor } from './host-cursor.js';
 import { cursorProjectConfigSchema } from './schema.js';
@@ -27,46 +25,56 @@ const CURSOR_DOMAINS = [
 ] as const;
 
 /**
- * Build the pre-lockdown shell snippet that pre-warms
+ * Build the post-lockdown command that pre-warms
  * `~/.cursor-server/bin/<commit>/` with the matching REH tarball so the
- * user's first remote-SSH connect skips the ~80 MB download. Skipped when
- * the directory is already populated, so re-running init on an existing VM
- * is cheap.
+ * user's first remote-SSH connect skips the ~80 MB download.
  *
- * `user` is interpolated directly — caller has already validated it via
- * {@link assertSafeShellIdent}. `commit` and `arch` come from
- * {@link readHostCursor}: `commit` is strictly validated as 40 hex chars and
- * `arch` is a closed enum, so neither needs additional shell-safety guards.
+ * Runs as the default user (the REH server lives in the user's home, not
+ * a root-owned location) and goes through the proxy — `downloads.cursor.com`
+ * is in the plugin's domain allowlist, and the VM's CA bundle already
+ * trusts the proxy. The download is skipped when the per-commit cache dir
+ * is already populated, so re-running init on an existing VM is cheap.
+ *
+ * `commit` and `arch` flow in as positional args (`$1`, `$2`), so the
+ * shell snippet never interpolates either value into its body. `commit`
+ * is strictly validated as 40 hex chars and `arch` is a closed enum, so
+ * neither is attacker-controlled in any case.
  */
-function cursorBootstrapScript(user: string, host: HostCursor): string {
-  return `# cursor plugin: pre-warm the Cursor remote-extension-host server so
-# the user's first remote-SSH connect skips the ~80 MB tarball download.
-# Best-effort — a failed download leaves the cache absent and Cursor will
-# fall back to fetching on connect.
-sudo -iu ${user} bash -ls <<'CURSOR_REH_EOF'
-set -euo pipefail
-commit="${host.commit}"
-arch="${host.arch}"
-dest="$HOME/.cursor-server/bin/$commit"
-if [ ! -x "$dest/bin/cursor-server" ]; then
-  mkdir -p "$dest"
-  tmp=$(mktemp -d)
-  trap 'rm -rf "$tmp"' EXIT
-  curl -fsSL "https://downloads.cursor.com/production/$commit/linux/$arch/cursor-reh-linux-$arch.tar.gz" \\
-    -o "$tmp/reh.tar.gz"
-  tar -xzf "$tmp/reh.tar.gz" -C "$dest" --strip-components=1
-fi
-CURSOR_REH_EOF`;
+function cursorRehPrewarmCommand(host: HostCursor): PluginCommand {
+  return {
+    user: 'default',
+    argv: [
+      'sh',
+      '-c',
+      [
+        'set -eu',
+        'commit="$1"',
+        'arch="$2"',
+        'dest="$HOME/.cursor-server/bin/$commit"',
+        // Skip when the binary's already there — re-init is idempotent.
+        'if [ -x "$dest/bin/cursor-server" ]; then exit 0; fi',
+        'mkdir -p "$dest"',
+        'tmp=$(mktemp -d)',
+        'trap \'rm -rf "$tmp"\' EXIT',
+        'curl -fsSL "https://downloads.cursor.com/production/$commit/linux/$arch/cursor-reh-linux-$arch.tar.gz" -o "$tmp/reh.tar.gz"',
+        'tar -xzf "$tmp/reh.tar.gz" -C "$dest" --strip-components=1',
+      ].join(' && '),
+      'sh',
+      host.commit,
+      host.arch,
+    ],
+  };
 }
 
 /**
- * Cursor plugin. Always contributes the Cursor remote-SSH domain allowlist.
- * When a host `Cursor.app` is detectable at sandbox-create time,
- * additionally emits a bootstrap snippet that pre-warms the matching REH
- * server inside the VM.
+ * Cursor plugin. Always contributes the Cursor remote-SSH domain
+ * allowlist. When a host `Cursor.app` is detectable at sandbox-create
+ * time, additionally emits a post-lockdown command that pre-warms the
+ * matching REH server inside the VM (running as the default user, via
+ * the proxy).
  *
- * Detection failure (no Cursor installed, unsupported host arch, etc.) is
- * not an error — remote-SSH still works on first connect via the
+ * Detection failure (no Cursor installed, unsupported host arch, etc.)
+ * is not an error — remote-SSH still works on first connect via the
  * `downloads.cursor.com` allowlist; pre-warm is a latency optimization.
  */
 export const cursorPlugin: SandboxPlugin<
@@ -76,16 +84,12 @@ export const cursorPlugin: SandboxPlugin<
   name: 'cursor',
   projectConfigSchema: cursorProjectConfigSchema,
   userConfigSchema: undefined,
-  initialize({ linuxUser }) {
-    assertSafeShellIdent('linuxUser', linuxUser);
+  initialize() {
     const host = hostCursor.readHostCursor();
     return {
       domains: [...CURSOR_DOMAINS],
       policies: [],
-      commands: [],
-      ...(host
-        ? { bootstrapScript: cursorBootstrapScript(linuxUser, host) }
-        : {}),
+      commands: host ? [cursorRehPrewarmCommand(host)] : [],
     };
   },
 };
