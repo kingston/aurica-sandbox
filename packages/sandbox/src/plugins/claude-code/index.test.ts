@@ -41,13 +41,13 @@ describe('expandPlugins — claude-code', () => {
     expect(replace.transform).toBeUndefined();
     expect(muts[1]).toEqual({ kind: 'remove-header', header: 'Authorization' });
 
-    expect(expanded.commands).toHaveLength(1);
-    const cmd = expanded.commands[0];
-    if (!cmd) throw new Error('expected one command');
-    expect(cmd.user).toBe('default');
-    expect(cmd.argv[0]).toBe('sh');
-    expect(cmd.argv[2]).toMatch(/\$HOME\/\.claude\/settings\.json/);
-    const body = cmd.argv[4] ?? '';
+    expect(expanded.commands).toHaveLength(2);
+    const settingsCmd = expanded.commands[0];
+    if (!settingsCmd) throw new Error('expected settings command');
+    expect(settingsCmd.user).toBe('default');
+    expect(settingsCmd.argv[0]).toBe('sh');
+    expect(settingsCmd.argv[2]).toMatch(/\$HOME\/\.claude\/settings\.json/);
+    const body = settingsCmd.argv[4] ?? '';
     const parsed = JSON.parse(body) as {
       apiKeyHelper: string;
       env: Record<string, string>;
@@ -57,6 +57,18 @@ describe('expandPlugins — claude-code', () => {
       DISABLE_AUTOUPDATER: '1',
       DISABLE_TELEMETRY: '1',
     });
+
+    const claudeJsonCmd = expanded.commands[1];
+    if (!claudeJsonCmd) throw new Error('expected claude.json command');
+    expect(claudeJsonCmd.user).toBe('default');
+    expect(claudeJsonCmd.argv[0]).toBe('sh');
+    const claudeJsonScript = claudeJsonCmd.argv[2] ?? '';
+    expect(claudeJsonScript).toMatch(/\$HOME\/\.claude\.json/);
+    expect(claudeJsonScript).toMatch(/AURICA_PROJECT_DIR/);
+    expect(claudeJsonScript).toMatch(/hasCompletedOnboarding/);
+    expect(claudeJsonScript).toMatch(/"theme": "auto"/);
+    expect(claudeJsonScript).toMatch(/hasTrustDialogAccepted/);
+    expect(claudeJsonScript).toMatch(/chmod 600/);
 
     expect(expanded.bootstrapScript).toMatch(
       /sudo -iu sandbox bash -lc 'curl -fsSL https:\/\/claude\.ai\/install\.sh \| bash'/,

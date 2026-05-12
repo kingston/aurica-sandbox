@@ -1,7 +1,7 @@
 import type { ProxyPolicy } from '#src/config/proxy-policy.js';
 import { assertSafeShellIdent } from '#src/utils/shell-safety.js';
 
-import type { SandboxPlugin } from '../types.js';
+import type { PluginCommand, SandboxPlugin } from '../types.js';
 import {
   type ClaudeCodeProjectConfig,
   claudeCodeProjectConfigSchema,
@@ -146,7 +146,7 @@ export const claudeCodePlugin: SandboxPlugin<
     return {
       domains: [...CLAUDE_CODE_DOMAINS],
       policies,
-      commands: [settingsJsonCommand(placeholder)],
+      commands: [settingsJsonCommand(placeholder), claudeJsonCommand()],
       bootstrapScript: claudeCodeBootstrapScript(linuxUser),
     };
   },
@@ -170,6 +170,79 @@ export const claudeCodePlugin: SandboxPlugin<
  * on the credential-bearing file. Truncating on each init keeps re-runs
  * idempotent.
  */
+/**
+ * Pre-seed `~/.claude.json` so Claude Code's first launch skips the theme
+ * picker, the onboarding wizard, and the per-project "Do you trust the
+ * files in this folder?" prompt.
+ *
+ * Three keys do the work, all observed in a running Claude Code 2.x state
+ * file:
+ *
+ * - `hasCompletedOnboarding: true` — top-level flag the binary checks to
+ *   bypass the welcome flow.
+ * - `theme: "auto"` — top-level theme preference; `auto` detects the
+ *   terminal background and follows light/dark accordingly.
+ * - `projects.<absolute-path>.hasTrustDialogAccepted: true` — per-project
+ *   trust flag keyed by the **exact** absolute cwd Claude Code is launched
+ *   from. There is no global `trustedFolders` setting; the binary keys
+ *   trust by the project path.
+ *
+ * The trust path is sourced from `AURICA_PROJECT_DIR` in
+ * `/etc/environment` (written by the github plugin earlier in the command
+ * list). When that variable isn't set — e.g. no github plugin configured,
+ * or `/etc/environment` missing — we still write the theme and onboarding
+ * flags and just skip the `projects.*` entry; the next `claude` invocation
+ * will prompt for trust once and persist the answer itself.
+ *
+ * The file is opened with `umask 077` and `mode 600` because it carries
+ * OAuth session state on real installs; we match that posture here so a
+ * later `claude /login` doesn't downgrade the perms.
+ */
+function claudeJsonCommand(): PluginCommand {
+  // Embedded Python keeps JSON-escaping correct for paths containing
+  // characters that would otherwise need shell quoting (quotes,
+  // backslashes, spaces). `python3` is preinstalled on Ubuntu/Debian, the
+  // two distros the sandbox supports.
+  const script = String.raw`
+set -eu
+project_dir=""
+if [ -r /etc/environment ]; then
+  # Sourcing /etc/environment would execute it; read the value directly so
+  # a malformed line cannot run code.
+  project_dir=$(sed -n 's/^AURICA_PROJECT_DIR=//p' /etc/environment | tail -n1)
+fi
+umask 077
+python3 - "$project_dir" <<'PY' > "$HOME/.claude.json"
+import json, sys
+project_dir = sys.argv[1]
+state = {
+    "hasCompletedOnboarding": True,
+    "theme": "auto",
+}
+if project_dir:
+    state["projects"] = {
+        project_dir: {
+            "hasTrustDialogAccepted": True,
+            "allowedTools": [],
+            "mcpServers": {},
+            "enabledMcpjsonServers": [],
+            "disabledMcpjsonServers": [],
+            "enableAllProjectMcpServers": False,
+            "ignorePatterns": [],
+            "dontCrawlDirectory": False,
+            "mcpContextUris": [],
+        }
+    }
+json.dump(state, sys.stdout, indent=2)
+PY
+chmod 600 "$HOME/.claude.json"
+`;
+  return {
+    user: 'default',
+    argv: ['sh', '-c', script],
+  };
+}
+
 function settingsJsonCommand(placeholder: string): {
   user: 'default';
   argv: string[];

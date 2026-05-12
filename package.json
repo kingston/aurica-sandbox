@@ -1,20 +1,23 @@
 {
   "name": "@aurica/sandbox-root",
   "version": "1.0.0",
+  "private": true,
   "description": "Root package for Aurica Sandbox",
   "keywords": [],
   "license": "MIT",
   "author": "Kingston Tam",
   "type": "module",
   "scripts": {
-    "start": "tsx --conditions=@aurica/source packages/sandbox/src/bin/aurica-sandbox.ts",
-    "dev": "tsx watch --conditions=@aurica/source packages/sandbox/src/bin/aurica-sandbox.ts",
     "build": "turbo build",
-    "typecheck": "turbo typecheck",
-    "check": "pnpm lint:fix && pnpm format",
+    "check": "turbo run lint format:check test",
+    "check:fix": "turbo run lint:fix format test",
+    "dev": "tsx watch --conditions=@aurica/source packages/sandbox/src/bin/aurica-sandbox.ts",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
-    "format": "oxfmt"
+    "start": "tsx --conditions=@aurica/source packages/sandbox/src/bin/aurica-sandbox.ts",
+    "test": "turbo test"
   },
   "devDependencies": {
     "@tsconfig/node24": "24.0.4",
@@ -27,6 +30,10 @@
     "tsx": "4.21.0",
     "turbo": "2.9.6",
     "typescript": "^6.0.3"
+  },
+  "engines": {
+    "node": ">=22",
+    "pnpm": ">=10"
   },
   "packageManager": "pnpm@10.33.2"
 }
