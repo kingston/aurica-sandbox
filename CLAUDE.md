@@ -17,3 +17,5 @@
 - Use Consola when logging to the console unless it shoudl be formatted differently e.g. with JSON.
 - When writing comments/JSDoc, avoid providing historical justification for the code but keeping it concise and to the point.
   (rewrite if it starts to become too verbose)
+- Do not put logic in `index.ts`. Keep it as a barrel that only re-exports from sibling files.
+  Put the implementation in a descriptively-named sibling (e.g. `github.plugin.ts`, `foo.service.ts`).

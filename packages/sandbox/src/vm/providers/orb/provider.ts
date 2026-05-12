@@ -83,7 +83,7 @@ export const orbProvider: SandboxVMProvider = {
    * Throws if a machine with the same `name` already exists.
    */
   async createVM({ name, distro, arch }: CreateVMOptions): Promise<SandboxVM> {
-    const args: string[] = ['create', '--isolated'];
+    const args: string[] = ['create', '--isolated', '--isolate-network'];
     if (arch) args.push('-a', arch);
     args.push(distro ?? 'ubuntu', name);
     await orbctlText(...args);

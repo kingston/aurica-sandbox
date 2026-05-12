@@ -1,8 +1,8 @@
-import { claudeCodePlugin } from './claude-code/index.js';
-import { cursorPlugin } from './cursor/index.js';
-import { dockerPlugin } from './docker/index.js';
-import { githubPlugin } from './github/index.js';
-import { misePlugin } from './mise/index.js';
+import { claudeCodePlugin } from './claude-code/claude-code.plugin.js';
+import { cursorPlugin } from './cursor/cursor.plugin.js';
+import { dockerPlugin } from './docker/docker.plugin.js';
+import { githubPlugin } from './github/github.plugin.js';
+import { misePlugin } from './mise/mise.plugin.js';
 import type { SandboxPlugin } from './types.js';
 
 /**
