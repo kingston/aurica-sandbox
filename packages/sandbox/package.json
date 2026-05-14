@@ -21,6 +21,10 @@
       "default": "./dist/index.js"
     }
   },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "start": "tsx --conditions=@aurica/source src/bin/aurica-sandbox.ts",

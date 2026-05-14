@@ -5,12 +5,12 @@ import { readState, signalProxyReload, withState } from '#src/state/index.js';
 import { defaultProvider } from '#src/vm/index.js';
 
 /**
- * Pause a running sandbox VM. Calls `orbctl stop` so the underlying
- * machine actually halts (preserving its disk for a later `start`),
- * then flips the state entry to `'stopped'` and clears its IP since
- * OrbStack releases the address when a VM is stopped. The proxy is
- * signalled to reload so its allowlist no longer matches the now-gone
- * IP.
+ * Pause a running sandbox VM via the active provider's `stopVM` so the
+ * underlying machine actually halts (preserving its disk for a later
+ * `start`), then flips the state entry to `'stopped'` and clears its IP
+ * — providers typically release the address on stop, so the cached IP
+ * would be stale on the next start. The proxy is signalled to reload so
+ * its allowlist no longer matches the now-gone IP.
  *
  * Throws if no sandbox with this name is registered. No-ops with an
  * info log if the sandbox is already stopped.

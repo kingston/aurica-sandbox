@@ -16,10 +16,12 @@
     "format:check": "oxfmt --check",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
+    "release": "turbo run build && changeset publish",
     "start": "tsx --conditions=@aurica/source packages/sandbox/src/bin/aurica-sandbox.ts",
     "test": "turbo test"
   },
   "devDependencies": {
+    "@changesets/cli": "2.31.0",
     "@tsconfig/node24": "24.0.4",
     "@tsconfig/vite-react": "7.0.2",
     "@types/node": "^24.12.0",

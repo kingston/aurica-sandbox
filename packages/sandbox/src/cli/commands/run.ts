@@ -1,6 +1,5 @@
-import { execa } from 'execa';
-
 import { readState, requireRunningProxy } from '#src/state/index.js';
+import { defaultProvider } from '#src/vm/index.js';
 
 /**
  * Execute `argv` inside the sandbox VM with `HTTP_PROXY` / `HTTPS_PROXY`
@@ -10,24 +9,14 @@ import { readState, requireRunningProxy } from '#src/state/index.js';
 export async function runRun(name: string, argv: string[]): Promise<number> {
   if (argv.length === 0) throw new Error('run requires a command after `--`');
 
-  const proxy = await requireRunningProxy();
+  await requireRunningProxy();
   const state = await readState();
   if (!state.sandboxes[name]) {
     throw new Error(`Sandbox ${name} not found`);
   }
 
-  const proxyUrl = `http://${proxy.host}:${proxy.port}`;
-  const envArgs = [
-    '-e',
-    `HTTP_PROXY=${proxyUrl}`,
-    '-e',
-    `HTTPS_PROXY=${proxyUrl}`,
-  ];
-
-  const result = await execa(
-    'orbctl',
-    ['run', '-m', name, ...envArgs, '--', ...argv],
-    { reject: false, stdio: 'inherit' },
-  );
-  return result.exitCode ?? 1;
+  return defaultProvider.runOneShot({
+    name,
+    argv,
+  });
 }

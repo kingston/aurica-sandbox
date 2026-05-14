@@ -6,7 +6,7 @@ on:
       - main
 
 env:
-  NPM_SCOPE: "@aurica"
+  NPM_SCOPE: '@aurica'
 
 concurrency: ${{ github.workflow }}-${{ github.ref }}
 
@@ -28,8 +28,8 @@ jobs:
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version-file: package.json
-          cache: "pnpm"
-          registry-url: "https://registry.npmjs.org"
+          cache: 'pnpm'
+          registry-url: 'https://registry.npmjs.org'
           scope: ${{ env.NPM_SCOPE }}
 
       - name: Install Dependencies
@@ -40,4 +40,4 @@ jobs:
         uses: changesets/action@6a0a831ff30acef54f2c6aa1cbbc1096b066edaf # v1.7.0
         with:
           publish: pnpm release
-          title: "chore: Version Packages"
+          title: 'chore: Version Packages'

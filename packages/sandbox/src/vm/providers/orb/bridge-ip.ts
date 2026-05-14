@@ -106,7 +106,10 @@ async function firstRunningVmIpV4(deps: OrbBridgeDeps): Promise<string | null> {
   try {
     const vms = await deps.listVMs();
     names = vms.map((vm) => vm.name);
-  } catch {
+  } catch (err) {
+    logger.debug(
+      `bridge-ip: listVMs failed, falling back to interface heuristic: ${err instanceof Error ? err.message : String(err)}`,
+    );
     return null;
   }
   for (const name of names) {
@@ -114,8 +117,10 @@ async function firstRunningVmIpV4(deps: OrbBridgeDeps): Promise<string | null> {
       const info = await deps.infoVM(name);
       const ip = info.networkInfo?.ipV4;
       if (ip !== undefined && ip !== '') return ip;
-    } catch {
-      /* skip VMs we can't inspect */
+    } catch (err) {
+      logger.debug(
+        `bridge-ip: infoVM(${name}) failed, skipping: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
   return null;

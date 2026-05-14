@@ -27,6 +27,8 @@ export async function readHostGitIdentity(): Promise<GithubUserIdentity | null> 
     if (!trimmedName || !trimmedEmail) return null;
     return { name: trimmedName, email: trimmedEmail };
   } catch {
+    // git not installed, no global config, or key unset — caller treats null
+    // as "ask the user to fill it in", which is the correct UX for init.
     return null;
   }
 }

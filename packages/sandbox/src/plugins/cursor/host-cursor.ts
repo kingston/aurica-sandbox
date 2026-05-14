@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import { logger } from '#src/logger.js';
+
 /**
  * Linux REH architectures Cursor publishes. Maps from Node's `process.arch`
  * (host-side) to the path segment used in
@@ -68,13 +70,21 @@ function tryReadCommit(file: string): string | null {
   let raw: string;
   try {
     raw = fs.readFileSync(file, 'utf8');
-  } catch {
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      logger.debug(
+        `host-cursor: failed to read ${file}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     return null;
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
-  } catch {
+  } catch (err) {
+    logger.debug(
+      `host-cursor: ${file} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+    );
     return null;
   }
   if (!parsed || typeof parsed !== 'object') return null;

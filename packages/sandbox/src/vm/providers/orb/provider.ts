@@ -161,4 +161,29 @@ export const orbProvider: SandboxVMProvider = {
   createExec(name: string, defaultUser: string): VMExec {
     return createOrbExec(name, defaultUser);
   },
+
+  /**
+   * Forward `argv` into an OrbStack VM via `orbctl run -m <name> -e K=V …`
+   * with stdio inherited. Resolves with the child's exit code; never
+   * rejects on a non-zero exit. Throws if `orbctl` itself fails to launch.
+   */
+  async runOneShot({
+    name,
+    argv,
+    env,
+  }: {
+    name: string;
+    argv: string[];
+    env?: Record<string, string>;
+  }): Promise<number> {
+    const envArgs = env
+      ? Object.entries(env).flatMap(([k, v]) => ['-e', `${k}=${v}`])
+      : [];
+    const result = await execa(
+      'orbctl',
+      ['run', '-m', name, ...envArgs, '--', ...argv],
+      { reject: false, stdio: 'inherit' },
+    );
+    return result.exitCode ?? 1;
+  },
 };

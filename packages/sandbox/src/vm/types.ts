@@ -78,4 +78,21 @@ export interface SandboxVMProvider {
    * but the surface is provider-agnostic so command code stays generic.
    */
   createExec: (name: string, defaultUser: string) => VMExec;
+  /**
+   * Run a one-shot user-supplied command inside `name` with `env` injected
+   * and stdio inherited from the parent process. Returns the child's exit
+   * code (or `1` if the provider can't surface one). Used by
+   * `aurica-sandbox run -- <cmd>` to forward an interactive command into
+   * the VM with proxy env vars set.
+   *
+   * Does **not** reject on non-zero exit: the caller wants the exit code
+   * to flow back to its own process. Rejection should be reserved for
+   * provider-level failures (the binary is missing, the VM doesn't exist,
+   * etc).
+   */
+  runOneShot: (args: {
+    name: string;
+    argv: string[];
+    env?: Record<string, string>;
+  }) => Promise<number>;
 }

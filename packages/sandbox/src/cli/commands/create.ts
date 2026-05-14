@@ -19,6 +19,12 @@ import { createInitShell } from '#src/vm/init/create-init-shell.js';
 import { runInitPipeline } from '#src/vm/init/run-init.js';
 import { waitForIp } from '#src/vm/wait-for-ip.js';
 
+/**
+ * Default VM name when the user doesn't pass one to `create`. Joins the
+ * project directory's basename with the current git branch (slugged to
+ * `[a-zA-Z0-9_-]`), or falls back to the basename alone if the directory
+ * isn't a git repo or HEAD is detached.
+ */
 export async function defaultName(projectDir: string): Promise<string> {
   const folder = path.basename(projectDir);
   try {

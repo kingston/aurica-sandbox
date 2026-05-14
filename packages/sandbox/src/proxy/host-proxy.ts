@@ -2,6 +2,7 @@ import { getLocal } from 'mockttp';
 import type { CompletedRequest, Mockttp } from 'mockttp';
 
 import type { ProxyPolicy } from '#src/config/index.js';
+import { logger } from '#src/logger.js';
 
 import { ensureCA } from './ca.js';
 import { applyPolicies, matchDomain } from './substitution.js';
@@ -237,7 +238,11 @@ function hostAndPathFromRequest(
       path: url.pathname,
       method: req.method,
     };
-  } catch {
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    logger.debug(
+      `host-proxy: dropping request with unparseable URL ${JSON.stringify(req.url)}: ${reason}`,
+    );
     return null;
   }
 }
