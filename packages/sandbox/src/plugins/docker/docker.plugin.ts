@@ -8,14 +8,21 @@ import { dockerProjectConfigSchema } from './schema.js';
  * (`download.docker.com`) is needed even though installation happens
  * pre-lockdown, because the proxy allowlist also gates that bootstrap step
  * — proxy env vars are exported into `/etc/environment` before the install
- * runs, so apt goes through the proxy. The Docker Hub triple lets
- * post-lockdown `docker pull` from the default registry succeed.
+ * runs, so apt goes through the proxy.
+ *
+ * The remaining hosts let post-lockdown `docker pull` from Docker Hub work:
+ * registry+auth endpoints, the legacy Cloudflare blob CDN, and Docker's R2
+ * bucket where image layers actually live today (the registry returns a
+ * presigned R2 URL with an account-hash subdomain). The wildcard is scoped
+ * to Docker's published R2 account hash so it doesn't open up arbitrary
+ * Cloudflare buckets. See https://docs.docker.com/desktop/setup/allow-list/.
  */
 const DOCKER_DOMAINS = [
   'download.docker.com',
   'registry-1.docker.io',
   'auth.docker.io',
   'production.cloudflare.docker.com',
+  '*.6aa30f8b08e16409b46e0173d6de2f56.r2.cloudflarestorage.com',
 ] as const;
 
 /**
