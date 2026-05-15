@@ -103,8 +103,29 @@ describe('expandPlugins', () => {
         'auth.docker.io',
       ]),
     );
-    expect(expanded.bootstrapScript).toMatch(/usermod -aG docker sandbox/);
-    expect(expanded.commands).toEqual([]);
+    // Rootless install: setuptool runs as the sandbox user, linger is
+    // enabled, and the rootful service is masked.
+    expect(expanded.bootstrapScript).toMatch(/docker-ce-rootless-extras/);
+    expect(expanded.bootstrapScript).toMatch(
+      /dockerd-rootless-setuptool\.sh install/,
+    );
+    expect(expanded.bootstrapScript).toMatch(/loginctl enable-linger sandbox/);
+    expect(expanded.bootstrapScript).toMatch(
+      /systemctl mask docker\.service docker\.socket/,
+    );
+    // Post-lockdown: write DOCKER_HOST into /etc/environment.
+    expect(expanded.commands).toEqual([
+      {
+        user: 'root',
+        argv: [
+          'sh',
+          '-c',
+          String.raw`sed -i "/^DOCKER_HOST=/d" /etc/environment && printf "DOCKER_HOST=unix:///run/user/%s/docker.sock\n" "$(id -u "$1")" >> /etc/environment`,
+          'sh',
+          'sandbox',
+        ],
+      },
+    ]);
     expect(expanded.policies).toEqual([]);
   });
 
