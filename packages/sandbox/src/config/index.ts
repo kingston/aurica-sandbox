@@ -1,4 +1,5 @@
 export {
+  credentialsFilePath,
   sandboxConfigPath,
   stateDir,
   stateFilePath,

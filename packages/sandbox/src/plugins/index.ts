@@ -18,8 +18,12 @@ export {
   type UserPlugins,
 } from './schema.js';
 export type {
+  CliCommandContext,
   InitializedPlugin,
   PluginCommand,
   PluginInitContext,
+  ProxySidecar,
   SandboxPlugin,
+  SandboxRegistrationStream,
+  SidecarContext,
 } from './types.js';

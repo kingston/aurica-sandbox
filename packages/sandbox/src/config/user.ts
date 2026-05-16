@@ -12,10 +12,12 @@ import { userConfigPath } from './paths.js';
  * `userConfigSchema`. Plugins without a user schema may not appear here.
  */
 const userConfigSchema = z.object({
-  vm: z.object({
-    provider: z.literal('orb'),
-    distro: z.enum(['ubuntu', 'debian']).default('ubuntu'),
-  }),
+  vm: z
+    .object({
+      provider: z.literal('orb'),
+      distro: z.enum(['ubuntu', 'debian']).default('ubuntu'),
+    })
+    .default({ provider: 'orb', distro: 'ubuntu' }),
   credentialProviders: z
     .array(
       z.object({

@@ -15,7 +15,9 @@ import { runShell } from '#src/cli/commands/shell.js';
 import { runStart } from '#src/cli/commands/start.js';
 import { runStop } from '#src/cli/commands/stop.js';
 import { projectEnvPath } from '#src/config/paths.js';
+import { loadUserConfig } from '#src/config/user.js';
 import { logger } from '#src/logger.js';
+import { PLUGINS } from '#src/plugins/index.js';
 import { runProxyProcess } from '#src/proxy/index.js';
 
 const envPath = projectEnvPath(process.cwd());
@@ -122,6 +124,19 @@ program
     const code = await runRun(name, args);
     process.exit(code);
   });
+
+// Plugin-contributed subcommands (e.g. `aurica-sandbox mcp login`). Each
+// plugin's `cliCommands` hook is invoked once at startup, in registry
+// order, regardless of whether any project has opted into the plugin —
+// host-side management commands need to be callable without a project
+// config loaded. Hooks may be async; each one is awaited before
+// `parseAsync` so subcommands are present by the time argv runs. The
+// `loadUserConfig` thunk is injected so plugins don't have to
+// dynamic-import it themselves — bin is outside the plugin-graph init
+// cycle, so it can value-import the loader directly.
+for (const plugin of PLUGINS) {
+  await plugin.cliCommands?.(program, { loadUserConfig });
+}
 
 try {
   await program.parseAsync(process.argv);

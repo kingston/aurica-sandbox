@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -165,6 +166,12 @@ export async function runCreate(
   // rules half from disk on every reload.
   const expanded = deriveFromConfig(config, { user: linuxUser });
 
+  // Per-sandbox auth secret: the placeholder the proxy swaps into
+  // outbound headers and the value the MCP gateway validates (paired
+  // with a source-IP cross-check). 32 bytes of entropy keeps it opaque
+  // to brute force; it never leaves the host.
+  const authSecret = randomBytes(32).toString('hex');
+
   // Register the sandbox now (status: 'creating') and reload the proxy so
   // it picks up the new entry and starts watching the project's
   // sandbox.json. The proxy reads rules straight from that file, so we no
@@ -176,6 +183,7 @@ export async function runCreate(
       status: 'creating',
       ip,
       createdAt: new Date().toISOString(),
+      authSecret,
     };
   });
   await signalProxyReload();

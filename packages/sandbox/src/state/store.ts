@@ -19,6 +19,17 @@ const sandboxEntrySchema = z.object({
   ]),
   ip: z.string().nullable(),
   createdAt: z.string(),
+  /**
+   * Per-sandbox auth secret. Used as the placeholder token rewritten by
+   * the proxy's `replace-header` mutation and validated by the MCP
+   * gateway (paired with a source-IP cross-check).
+   *
+   * Optional / nullable: legacy state files written before this field
+   * existed have no secret. Newly-created sandboxes always have one. A
+   * `null` value means "no MCP traffic from this sandbox can be
+   * authenticated"; that is the safe default.
+   */
+  authSecret: z.string().nullable().default(null),
 });
 
 export type SandboxEntry = z.infer<typeof sandboxEntrySchema>;
@@ -28,6 +39,15 @@ const proxyEntrySchema = z.object({
   host: z.string(),
   port: z.number().int(),
   startedAt: z.string(),
+  /**
+   * Per-plugin sidecar state, keyed by plugin name. Each sidecar owns
+   * its own slot (shape is opaque to the proxy) and is expected to
+   * populate it on start and clear it on stop. The proxy itself never
+   * reads from this bag — it exists so external tooling (e.g. `mcp
+   * list`) can discover sidecar endpoints without the proxy having to
+   * know about specific plugins.
+   */
+  sidecars: z.record(z.string(), z.unknown()).default({}),
 });
 
 export type ProxyEntry = z.infer<typeof proxyEntrySchema>;

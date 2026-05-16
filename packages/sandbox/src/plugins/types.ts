@@ -1,6 +1,10 @@
+import type { Command } from 'commander';
 import type { z } from 'zod';
 
 import type { ProxyPolicy } from '#src/config/proxy-policy.js';
+import type { SandboxConfig } from '#src/config/sandbox.js';
+import type { UserConfig } from '#src/config/user.js';
+import type { SandboxEntry, State } from '#src/state/index.js';
 
 /**
  * One command a plugin wants the orchestrator to run inside the VM after the
@@ -116,4 +120,99 @@ export interface SandboxPlugin<
    */
   userConfigSchema: U;
   initialize(ctx: PluginInitContext<U, P>): InitializedPlugin;
+
+  /**
+   * Register CLI subcommands. Called once at CLI startup, regardless of
+   * whether any project has opted into the plugin — host-side commands
+   * like `aurica-sandbox mcp login <server>` must work without a project
+   * config loaded.
+   *
+   * The hook may be async so plugins can dynamic-import their command
+   * modules to avoid registry-load cycles. Each hook is awaited before
+   * the CLI parses `process.argv`, so subcommands are guaranteed to be
+   * registered by the time the user's command runs.
+   *
+   * Plugins that don't contribute CLI commands omit this. Order of
+   * invocation follows the registry's declared order.
+   */
+  cliCommands?(program: Command, ctx: CliCommandContext): void | Promise<void>;
+
+  /**
+   * Return a long-running sidecar handle to be colocated with the proxy
+   * daemon. Invoked once at proxy boot, after `HostProxy` is listening.
+   * The handle's `stop()` is awaited during proxy shutdown.
+   *
+   * Plugins without a sidecar omit this. Returning `null` (e.g. because
+   * the user has not configured the plugin) is a valid way to opt out at
+   * runtime without throwing.
+   */
+  proxySidecar?(ctx: SidecarContext): Promise<ProxySidecar | null>;
+}
+
+/**
+ * Context passed to `plugin.cliCommands`. The framework injects loaders
+ * that plugins would otherwise have to dynamic-import to dodge the
+ * plugin-registry init cycle (plugin files are loaded *during*
+ * registry init, but `config/user.ts` reads back into the registry
+ * via `userPluginsSchema`). The CLI entry point lives outside the
+ * cycle and can value-import these loaders freely; passing them
+ * through context lets plugins use plain top-level imports for
+ * everything else.
+ *
+ * Loaders are thunks (not pre-loaded values) so they only run when
+ * the active subcommand actually needs them — `mcp --help` shouldn't
+ * touch disk.
+ */
+export interface CliCommandContext {
+  loadUserConfig: () => Promise<UserConfig>;
+}
+
+/**
+ * Context passed to `plugin.proxySidecar`. Carries a live view of the
+ * sandbox registration set plus framework-side loaders/mutators the
+ * sidecar needs at runtime — injected for the same cycle-avoidance
+ * reason described on {@link CliCommandContext}.
+ *
+ * `loadSandboxConfig` is a per-projectDir loader because the sidecar
+ * re-reads each sandbox's `.aurica/sandbox.json` whenever the
+ * registration set changes; bundling a static map would race the
+ * watcher.
+ */
+export interface SidecarContext {
+  loadUserConfig: () => Promise<UserConfig>;
+  loadSandboxConfig: (projectDir: string) => Promise<SandboxConfig>;
+  withState: <T>(
+    mutator: (state: State) => T | Promise<T>,
+  ) => Promise<{ state: State; result: T }>;
+  sandboxes: SandboxRegistrationStream;
+}
+
+/**
+ * Long-running sidecar handle returned by `plugin.proxySidecar`.
+ * `runProxyProcess` retains the handle and awaits `stop()` on shutdown
+ * (SIGINT/SIGTERM or programmatic stop).
+ */
+export interface ProxySidecar {
+  stop(): Promise<void>;
+}
+
+/**
+ * Live view of the proxy's sandbox registration set delivered to sidecars.
+ * Subscribers receive the current snapshot synchronously when they call
+ * `subscribe`, then a fresh snapshot on every change.
+ *
+ * The snapshot is a plain array (rather than the live state object) so
+ * sidecars cannot accidentally mutate the proxy's bookkeeping.
+ */
+export interface SandboxRegistrationStream {
+  /**
+   * Returns the current snapshot of registered sandboxes.
+   */
+  snapshot(): readonly SandboxEntry[];
+  /**
+   * Subscribe to changes. The listener fires once immediately with the
+   * current snapshot, then on every subsequent change. Returns an
+   * `unsubscribe` function.
+   */
+  subscribe(listener: (snapshot: readonly SandboxEntry[]) => void): () => void;
 }
