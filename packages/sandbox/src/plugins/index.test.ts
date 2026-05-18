@@ -9,7 +9,11 @@ import {
   type UserPlugins,
 } from './index.js';
 
-const ctx = { linuxUser: 'sandbox' };
+const ctx = {
+  linuxUser: 'sandbox',
+  sandboxName: 'sb-test',
+  authSecret: 'test-secret',
+};
 const emptyUser: UserPlugins = {};
 
 /**
@@ -35,30 +39,29 @@ function allowPolicies(policies: readonly ProxyPolicy[]): ProxyPolicy[] {
 }
 
 describe('expandPlugins', () => {
-  it('derives a unique placeholder per plugin config', () => {
-    const p1: ProjectPlugins = {
+  it('derives a unique placeholder per sandbox (authSecret-scoped)', () => {
+    const plugins: ProjectPlugins = {
       github: {
         username: 'x-access-token',
         repositories: [{ name: 'foo/bar' }],
-        tokenSource: 'env:GITHUB_TOKEN_1',
+        tokenSource: 'env:GITHUB_TOKEN',
       },
     };
-    const p2: ProjectPlugins = {
-      github: {
-        username: 'x-access-token',
-        repositories: [{ name: 'foo/bar' }],
-        tokenSource: 'env:GITHUB_TOKEN_2',
-      },
-    };
-    const a = expandPlugins(p1, emptyUser, ctx);
-    const b = expandPlugins(p2, emptyUser, ctx);
+    const a = expandPlugins(plugins, emptyUser, {
+      ...ctx,
+      authSecret: 'secret-a',
+    });
+    const b = expandPlugins(plugins, emptyUser, {
+      ...ctx,
+      authSecret: 'secret-b',
+    });
     const aFirst = allowPolicies(a.policies)[0];
     const bFirst = allowPolicies(b.policies)[0];
     if (!aFirst || !bFirst) throw new Error('expected allow policies');
     expect(placeholderOf(aFirst)).not.toBe(placeholderOf(bFirst));
   });
 
-  it('derives the same placeholder across calls for identical plugin config', () => {
+  it('derives the same placeholder across calls for the same sandbox', () => {
     const plugins: ProjectPlugins = {
       github: {
         username: 'x-access-token',
@@ -151,10 +154,16 @@ describe('expandPlugins', () => {
 
   it('rejects unsafe usernames at expansion time', () => {
     expect(() =>
-      expandPlugins({ docker: {} }, emptyUser, { linuxUser: 'bad; rm -rf /' }),
+      expandPlugins({ docker: {} }, emptyUser, {
+        ...ctx,
+        linuxUser: 'bad; rm -rf /',
+      }),
     ).toThrow(/linuxUser/);
     expect(() =>
-      expandPlugins({ mise: {} }, emptyUser, { linuxUser: '$(whoami)' }),
+      expandPlugins({ mise: {} }, emptyUser, {
+        ...ctx,
+        linuxUser: '$(whoami)',
+      }),
     ).toThrow(/linuxUser/);
   });
 });

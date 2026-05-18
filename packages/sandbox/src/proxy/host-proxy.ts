@@ -192,6 +192,7 @@ export class HostProxy {
             parts.method,
             headers,
             this.resolver,
+            parts.pathWithQuery,
           );
           if (result.outcome === 'block') {
             return {
@@ -202,6 +203,16 @@ export class HostProxy {
                 body: `aurica-sandbox: blocked by policy ${result.blockedBy}\n`,
               },
             };
+          }
+          if (result.outcome === 'rewrite') {
+            // Inject X-Forwarded-For so the rewritten target can still
+            // identify the originating sandbox by IP — the loopback hop
+            // would otherwise erase `req.remoteIpAddress`. Strip any
+            // case-variant the guest might have sent first so the value
+            // isn't guest-controllable.
+            const headers = stripHeader(result.headers, 'x-forwarded-for');
+            headers['X-Forwarded-For'] = remoteIp;
+            return { url: result.url, headers };
           }
           return { headers: result.headers };
         },
@@ -225,9 +236,12 @@ export class HostProxy {
   }
 }
 
-function hostAndPathFromRequest(
-  req: CompletedRequest,
-): { host: string; path: string; method: string } | null {
+function hostAndPathFromRequest(req: CompletedRequest): {
+  host: string;
+  path: string;
+  pathWithQuery: string;
+  method: string;
+} | null {
   try {
     const url = new URL(req.url);
     return {
@@ -236,6 +250,10 @@ function hostAndPathFromRequest(
       // slash and any query string-stripped path; matcher prefix evaluation
       // is segment-boundary aware (see substitution.ts).
       path: url.pathname,
+      // `pathWithQuery` is what `rewrite-url` targets substitute into the
+      // `{path}` template; preserves the original query string so the
+      // upstream sees the same path the guest requested.
+      pathWithQuery: `${url.pathname}${url.search}`,
       method: req.method,
     };
   } catch (err) {
@@ -245,6 +263,24 @@ function hostAndPathFromRequest(
     );
     return null;
   }
+}
+
+/**
+ * Return a shallow clone of `headers` with every case-variant of `name`
+ * removed. Used before setting a controlled header so a guest-supplied
+ * value can't shadow it under a different casing.
+ */
+function stripHeader(
+  headers: Record<string, string | string[] | undefined>,
+  name: string,
+): Record<string, string | string[] | undefined> {
+  const target = name.toLowerCase();
+  const out: Record<string, string | string[] | undefined> = {};
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() === target) continue;
+    out[k] = v;
+  }
+  return out;
 }
 
 /**

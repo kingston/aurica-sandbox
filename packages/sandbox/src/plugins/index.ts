@@ -1,6 +1,7 @@
 export {
   expandPlugins,
   githubDomainsForGitCoverage,
+  makeGeneratePlaceholder,
   type ExpandContext,
   type ExpandedPlugins,
 } from './expand.js';

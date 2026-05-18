@@ -20,7 +20,7 @@ function sampleSandbox(overrides: Partial<SandboxEntry> = {}): SandboxEntry {
 
 const tenant: TenantEntry = {
   name: 'sb-1',
-  authSecret: 'secret-1',
+  bearer: 'secret-1',
   sourceIp: '127.0.0.1',
   enabledServers: ['github'],
 };
@@ -33,7 +33,7 @@ describe('McpGateway.identify', () => {
     gateway.setTenants([tenant]);
   });
 
-  it('accepts a well-formed path + bearer + matching IP', () => {
+  it('accepts a well-formed path + bearer + matching forwarded ip', () => {
     const r = gateway.identify('/github/mcp', 'Bearer secret-1', '127.0.0.1');
     expect(r).toEqual({ ok: true, tenant, server: 'github' });
   });
@@ -62,23 +62,28 @@ describe('McpGateway.identify', () => {
     expect(r).toEqual({ ok: false, reason: 'unauthenticated' });
   });
 
-  it('rejects mismatched source IP', () => {
-    const r = gateway.identify('/github/mcp', 'Bearer secret-1', '10.0.0.5');
-    expect(r).toEqual({ ok: false, reason: 'wrong-ip' });
-  });
-
-  it('normalizes IPv6-mapped IPv4 addresses', () => {
-    const r = gateway.identify(
-      '/github/mcp',
-      'Bearer secret-1',
-      '::ffff:127.0.0.1',
-    );
-    expect(r.ok).toBe(true);
-  });
-
   it('rejects a server not in the tenant enabled list', () => {
     const r = gateway.identify('/linear/mcp', 'Bearer secret-1', '127.0.0.1');
     expect(r).toEqual({ ok: false, reason: 'server-not-enabled' });
+  });
+
+  it('rejects missing X-Forwarded-For as source-ip-mismatch', () => {
+    const r = gateway.identify('/github/mcp', 'Bearer secret-1', undefined);
+    expect(r).toEqual({ ok: false, reason: 'source-ip-mismatch' });
+  });
+
+  it('rejects an X-Forwarded-For that does not match the tenant', () => {
+    const r = gateway.identify('/github/mcp', 'Bearer secret-1', '10.0.0.99');
+    expect(r).toEqual({ ok: false, reason: 'source-ip-mismatch' });
+  });
+
+  it('uses the leftmost entry of a comma-separated X-Forwarded-For', () => {
+    const r = gateway.identify(
+      '/github/mcp',
+      'Bearer secret-1',
+      '127.0.0.1, 10.0.0.99',
+    );
+    expect(r.ok).toBe(true);
   });
 });
 
@@ -87,14 +92,7 @@ describe('McpGateway.buildTenants', () => {
     const tenants = McpGateway.buildTenants(
       [sampleSandbox({ ip: null })],
       () => ['github'],
-    );
-    expect(tenants).toEqual([]);
-  });
-
-  it('skips sandboxes without an authSecret (legacy state entries)', () => {
-    const tenants = McpGateway.buildTenants(
-      [sampleSandbox({ authSecret: null })],
-      () => ['github'],
+      (sb) => `bearer-${sb.name}`,
     );
     expect(tenants).toEqual([]);
   });
@@ -106,17 +104,18 @@ describe('McpGateway.buildTenants', () => {
         sampleSandbox({ name: 'b', authSecret: 's-b', ip: '10.0.0.2' }),
       ],
       (sb) => [sb.name === 'a' ? 'github' : 'linear'],
+      (sb) => `bearer-${sb.name}`,
     );
     expect(tenants).toEqual([
       {
         name: 'a',
-        authSecret: 's-a',
+        bearer: 'bearer-a',
         sourceIp: '10.0.0.1',
         enabledServers: ['github'],
       },
       {
         name: 'b',
-        authSecret: 's-b',
+        bearer: 'bearer-b',
         sourceIp: '10.0.0.2',
         enabledServers: ['linear'],
       },
@@ -152,11 +151,15 @@ describe('McpGateway listener', () => {
     expect(status).toBe(404);
   });
 
-  it('returns 501 once auth+routing pass (upstream relay lands in Phase 2)', async () => {
+  it('returns 503 once auth+routing pass but no relay is attached', async () => {
+    // Construction default omits the relay, so a successfully-identified
+    // request short-circuits with the structured "relay not configured"
+    // error rather than hanging or 500'ing.
     const status = await fetchStatus(`/github/mcp`, bound.port, {
       Authorization: 'Bearer secret-1',
+      'X-Forwarded-For': '127.0.0.1',
     });
-    expect(status).toBe(501);
+    expect(status).toBe(503);
   });
 
   it('refusing to listen twice', async () => {

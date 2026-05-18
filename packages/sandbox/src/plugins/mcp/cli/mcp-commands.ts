@@ -11,6 +11,7 @@ import type { Command } from 'commander';
 import open from 'open';
 
 import { logger } from '#src/logger.js';
+import { signalProxyReload } from '#src/state/signal.js';
 
 import type { CliCommandContext } from '../../types.js';
 import {
@@ -213,11 +214,17 @@ export async function runMcpLogin(
       await launchedUrl.promise;
       const code = await collectAuthCode(callback);
       await first.transport.finishAuth(code);
-      await client.connect(newTransport(upstreamConfig.url, provider).asTransport);
+      await client.connect(
+        newTransport(upstreamConfig.url, provider).asTransport,
+      );
     }
 
     await client.close();
     logger.info(`MCP upstream "${upstream}": login successful`);
+    // Nudge the running proxy so the gateway's relay catalog picks up the
+    // freshly-authenticated upstream without waiting for the next sandbox
+    // registry event. No-ops if no proxy is running.
+    await signalProxyReload();
   } finally {
     callback.close();
   }
@@ -228,12 +235,10 @@ export async function runMcpLogin(
  * its credential status. Useful as a smoke test ("did login persist?")
  * and as input to a future `mcp doctor`.
  */
-export async function runMcpList(
-  options: {
-    loadUserConfig: CliCommandContext['loadUserConfig'];
-    credentialsPath?: string;
-  },
-): Promise<void> {
+export async function runMcpList(options: {
+  loadUserConfig: CliCommandContext['loadUserConfig'];
+  credentialsPath?: string;
+}): Promise<void> {
   const userConfig = await options.loadUserConfig();
   const mcp = readMcpUserConfig(userConfig);
   const upstreams = Object.entries(mcp.upstreams);
@@ -267,6 +272,9 @@ export async function runMcpLogout(
   const existed = await deleteUpstreamSlot(upstream, options.credentialsPath);
   if (existed) {
     logger.info(`MCP upstream "${upstream}": credentials cleared`);
+    // Nudge the running proxy so the relay drops any in-memory tokens it
+    // was still serving requests with. No-ops if no proxy is running.
+    await signalProxyReload();
   } else {
     logger.info(`MCP upstream "${upstream}": no cached credentials`);
   }

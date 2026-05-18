@@ -80,6 +80,17 @@ if [ -z "$PROXY_IPS" ]; then
   exit 1
 fi
 
+# Expose the proxy's IPv4 to plugin and user init scripts via
+# /etc/environment. Plugins that need to address the host (e.g. the MCP
+# plugin's /etc/hosts entry for aurica.mcp.internal) read $AURICA_HOST_IP
+# instead of re-resolving the proxy hostname themselves. Skipped on
+# v6-only environments — the transparent NAT below is IPv4-only, so a
+# v6-only host has no usable address from inside the VM.
+PROXY_IPV4=$(printf '%s\\n' "$PROXY_IPS" | awk '!/:/ { print; exit }')
+if [ -n "$PROXY_IPV4" ]; then
+  echo "AURICA_HOST_IP=$PROXY_IPV4" >> /etc/environment
+fi
+
 # Apply the same skeleton (flush, lo, established, DNS) on both stacks.
 for ipt in iptables ip6tables; do
   $ipt -F OUTPUT
@@ -214,6 +225,17 @@ if [ -z "$PROXY_IPS" ]; then
   exit 1
 fi
 
+# Expose the proxy's IPv4 to plugin and user init scripts via
+# /etc/environment. Plugins that need to address the host (e.g. the MCP
+# plugin's /etc/hosts entry for aurica.mcp.internal) read $AURICA_HOST_IP
+# instead of re-resolving the proxy hostname themselves. Skipped on
+# v6-only environments — the transparent NAT below is IPv4-only, so a
+# v6-only host has no usable address from inside the VM.
+PROXY_IPV4=$(printf '%s\\n' "$PROXY_IPS" | awk '!/:/ { print; exit }')
+if [ -n "$PROXY_IPV4" ]; then
+  echo "AURICA_HOST_IP=$PROXY_IPV4" >> /etc/environment
+fi
+
 # Apply the same skeleton (flush, lo, established, DNS) on both stacks.
 for ipt in iptables ip6tables; do
   $ipt -F OUTPUT
@@ -338,6 +360,17 @@ PROXY_IPS=$(getent ahosts 192.168.139.3 | awk '{ print $1 }' | sort -u)
 if [ -z "$PROXY_IPS" ]; then
   echo "failed to resolve 192.168.139.3" >&2
   exit 1
+fi
+
+# Expose the proxy's IPv4 to plugin and user init scripts via
+# /etc/environment. Plugins that need to address the host (e.g. the MCP
+# plugin's /etc/hosts entry for aurica.mcp.internal) read $AURICA_HOST_IP
+# instead of re-resolving the proxy hostname themselves. Skipped on
+# v6-only environments — the transparent NAT below is IPv4-only, so a
+# v6-only host has no usable address from inside the VM.
+PROXY_IPV4=$(printf '%s\\n' "$PROXY_IPS" | awk '!/:/ { print; exit }')
+if [ -n "$PROXY_IPV4" ]; then
+  echo "AURICA_HOST_IP=$PROXY_IPV4" >> /etc/environment
 fi
 
 # Apply the same skeleton (flush, lo, established, DNS) on both stacks.

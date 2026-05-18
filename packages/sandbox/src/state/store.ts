@@ -20,16 +20,12 @@ const sandboxEntrySchema = z.object({
   ip: z.string().nullable(),
   createdAt: z.string(),
   /**
-   * Per-sandbox auth secret. Used as the placeholder token rewritten by
-   * the proxy's `replace-header` mutation and validated by the MCP
-   * gateway (paired with a source-IP cross-check).
-   *
-   * Optional / nullable: legacy state files written before this field
-   * existed have no secret. Newly-created sandboxes always have one. A
-   * `null` value means "no MCP traffic from this sandbox can be
-   * authenticated"; that is the safe default.
+   * Per-sandbox auth secret. Used as the bearer the MCP gateway
+   * validates incoming guest traffic against. Required — every newly
+   * created sandbox is allocated one before its state entry is
+   * persisted, so an entry that lacks one is malformed.
    */
-  authSecret: z.string().nullable().default(null),
+  authSecret: z.string().min(1),
 });
 
 export type SandboxEntry = z.infer<typeof sandboxEntrySchema>;

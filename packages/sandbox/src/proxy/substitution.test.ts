@@ -632,3 +632,84 @@ describe('applyPolicies — set-header / remove-header mutations', () => {
     expect(headers.X).toBe('<resolved:second>');
   });
 });
+
+describe('applyPolicies — rewrite-url', () => {
+  it('returns rewrite outcome with target URL substituted from {path} template', async () => {
+    const policy: ProxyPolicy = {
+      id: 'mcp:github',
+      domain: 'aurica.mcp.internal',
+      matchers: [{ prefix: '/github' }],
+      action: {
+        type: 'rewrite-url',
+        target: 'http://127.0.0.1:51310{path}',
+      },
+    };
+    const result = await applyPolicies(
+      [policy],
+      'aurica.mcp.internal',
+      '/github/mcp',
+      'POST',
+      {},
+      resolver,
+      '/github/mcp?x=1',
+    );
+    expect(result.outcome).toBe('rewrite');
+    if (result.outcome !== 'rewrite') throw new Error('unreachable');
+    expect(result.url).toBe('http://127.0.0.1:51310/github/mcp?x=1');
+  });
+
+  it('runs mutations before returning the rewrite outcome', async () => {
+    const policy: ProxyPolicy = {
+      id: 'rewrite-with-mutation',
+      domain: 'rewrite.test',
+      action: {
+        type: 'rewrite-url',
+        target: 'http://127.0.0.1:51310{path}',
+        mutations: [
+          {
+            kind: 'replace-header',
+            header: 'Authorization',
+            from: '__PLACEHOLDER__',
+            to: 'env:UPSTREAM_TOKEN',
+          },
+        ],
+      },
+    };
+    const headers: Record<string, string | string[] | undefined> = {
+      Authorization: 'Bearer __PLACEHOLDER__',
+    };
+    const result = await applyPolicies(
+      [policy],
+      'rewrite.test',
+      '/upstream',
+      'POST',
+      headers,
+      resolver,
+      '/upstream',
+    );
+    expect(result.outcome).toBe('rewrite');
+    expect(headers.Authorization).toBe('Bearer <resolved:env:UPSTREAM_TOKEN>');
+  });
+
+  it('falls back to path when pathWithQuery is omitted', async () => {
+    const policy: ProxyPolicy = {
+      id: 'mcp:linear',
+      domain: 'aurica.mcp.internal',
+      action: {
+        type: 'rewrite-url',
+        target: 'http://127.0.0.1:51310{path}',
+      },
+    };
+    const result = await applyPolicies(
+      [policy],
+      'aurica.mcp.internal',
+      '/linear/mcp',
+      'POST',
+      {},
+      resolver,
+    );
+    expect(result.outcome).toBe('rewrite');
+    if (result.outcome !== 'rewrite') throw new Error('unreachable');
+    expect(result.url).toBe('http://127.0.0.1:51310/linear/mcp');
+  });
+});

@@ -117,6 +117,12 @@ export type Mutation = z.infer<typeof mutationSchema>;
  *   `allow` policy with a single `replace-header` mutation.
  * - `block` short-circuits with a 403 response. The proxy mentions the
  *   policy id in the body for audit.
+ * - `rewrite-url` lets the request through but redirects it to a different
+ *   destination URL. `target` is a template string in which `{path}`
+ *   expands to the original request path (including query). Mutations
+ *   still run against the request headers before forwarding, so the
+ *   rewritten request can have its `Authorization` swapped to a
+ *   gateway-specific bearer.
  */
 export const policyActionSchema = z.discriminatedUnion('type', [
   z.object({
@@ -125,6 +131,11 @@ export const policyActionSchema = z.discriminatedUnion('type', [
   }),
   z.object({
     type: z.literal('block'),
+  }),
+  z.object({
+    type: z.literal('rewrite-url'),
+    target: z.string().min(1),
+    mutations: z.array(mutationSchema).optional(),
   }),
 ]);
 

@@ -161,16 +161,20 @@ export async function runCreate(
 
   const linuxUser = process.env.USER ?? 'sandbox';
 
+  // Per-sandbox auth secret: baked directly into the artifacts plugins
+  // install in the VM (e.g. the MCP gateway's bearer in `~/.claude.json`)
+  // and stored on the sandbox's state entry so the gateway can verify
+  // incoming requests. 32 bytes of entropy.
+  const authSecret = randomBytes(32).toString('hex');
+
   // Plugin expansion. The full result is needed here for the in-VM
   // bootstrap (commands + bootstrapScript); the proxy re-derives just the
   // rules half from disk on every reload.
-  const expanded = deriveFromConfig(config, { user: linuxUser });
-
-  // Per-sandbox auth secret: the placeholder the proxy swaps into
-  // outbound headers and the value the MCP gateway validates (paired
-  // with a source-IP cross-check). 32 bytes of entropy keeps it opaque
-  // to brute force; it never leaves the host.
-  const authSecret = randomBytes(32).toString('hex');
+  const expanded = deriveFromConfig(config, {
+    user: linuxUser,
+    sandboxName: name,
+    authSecret,
+  });
 
   // Register the sandbox now (status: 'creating') and reload the proxy so
   // it picks up the new entry and starts watching the project's

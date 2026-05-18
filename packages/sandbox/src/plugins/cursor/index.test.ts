@@ -7,7 +7,11 @@ import {
 } from '../index.js';
 import * as hostCursor from './host-cursor.js';
 
-const ctx = { linuxUser: 'sandbox' };
+const ctx = {
+  linuxUser: 'sandbox',
+  sandboxName: 'sb-test',
+  authSecret: 'test-secret',
+};
 const project: ProjectPlugins = { cursor: {} };
 const emptyUser: UserPlugins = {};
 

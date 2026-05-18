@@ -10,7 +10,11 @@ import {
 
 const PLACEHOLDER_RE = /^__AURICA_TOKEN_[0-9A-F]{16}__$/;
 
-const ctx = { linuxUser: 'sandbox' };
+const ctx = {
+  linuxUser: 'sandbox',
+  sandboxName: 'sb-test',
+  authSecret: 'test-secret',
+};
 const emptyUser: UserPlugins = {};
 
 function placeholderOf(policy: ProxyPolicy): string {

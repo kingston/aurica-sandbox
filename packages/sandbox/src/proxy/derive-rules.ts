@@ -15,6 +15,12 @@ export interface DerivedRules {
 /** Context required to expand plugins (e.g. the linux user inside the VM). */
 export interface DerivationContext {
   user: string;
+  sandboxName: string;
+  /**
+   * The sandbox's per-run secret. Threaded into each plugin's
+   * `PluginInitContext.authSecret`.
+   */
+  authSecret: string;
 }
 
 /**
@@ -53,6 +59,8 @@ export function deriveFromConfig(
 ): FullDerivation {
   const expanded = expandPlugins(config.plugins, config.userPlugins, {
     linuxUser: ctx.user,
+    sandboxName: ctx.sandboxName,
+    authSecret: ctx.authSecret,
   });
 
   const domains = [...config.proxy.domains, ...expanded.domains];

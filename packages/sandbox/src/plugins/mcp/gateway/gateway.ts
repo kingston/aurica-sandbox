@@ -8,15 +8,28 @@ import {
 import { logger } from '#src/logger.js';
 import type { SandboxEntry } from '#src/state/index.js';
 
+import type { UpstreamRelay } from './relay.js';
+
 /**
  * Per-sandbox tenant entry. Built from a `SandboxEntry` plus the sandbox's
  * `.aurica/sandbox.json` `plugins.mcp.servers` list, but the gateway
  * doesn't reach back into config itself — its consumer (the sidecar
  * factory) is responsible for assembling and refreshing the table.
+ *
+ * `bearer` is the deterministic per-sandbox placeholder the MCP plugin
+ * also wrote into the guest's `~/.claude.json` as the `Authorization`
+ * value — derived from the framework's
+ * `makeGeneratePlaceholder('mcp', authSecret)('bearer')`. The guest
+ * never sees the sandbox's raw `authSecret`.
  */
 export interface TenantEntry {
   name: string;
-  authSecret: string;
+  bearer: string;
+  /**
+   * Originating sandbox IP. Compared against the `X-Forwarded-For`
+   * header the host proxy stamps on every rewrite, so a bearer leaked
+   * between sandboxes can't be replayed from a different source.
+   */
   sourceIp: string;
   enabledServers: readonly string[];
 }
@@ -24,33 +37,28 @@ export interface TenantEntry {
 /**
  * Result of identifying a request's tenant. Returned by
  * {@link McpGateway.identify} so handlers can react to specific failure
- * modes (bad bearer vs. wrong IP vs. unknown server) instead of being
- * presented with a single "denied" boolean.
+ * modes (bad bearer vs. unknown server) instead of being presented with
+ * a single "denied" boolean.
+ *
+ * The gateway binds loopback-only and is fronted by the host proxy, so
+ * the only path to it is via a `rewrite-url` policy. The proxy stamps
+ * the originating sandbox IP into `X-Forwarded-For` on that rewrite;
+ * `identify` cross-checks it against the tenant's `sourceIp` as
+ * defense-in-depth against a proxy misconfiguration that would let one
+ * sandbox's bearer leak to another's network namespace.
  */
 export type IdentifyFailureReason =
   | 'bad-path'
   | 'no-bearer'
   | 'unauthenticated'
-  | 'wrong-ip'
-  | 'server-not-enabled';
+  | 'server-not-enabled'
+  | 'source-ip-mismatch';
 
 export type IdentifyResult =
   | { ok: true; tenant: TenantEntry; server: string }
   | { ok: false; reason: IdentifyFailureReason };
 
 const PATH_PATTERN = /^\/(?<server>[a-z0-9][a-z0-9-]*)\/mcp(?:\/.*)?$/i;
-
-/**
- * Strip the IPv6-mapped IPv4 prefix mockttp normalizes (`::ffff:1.2.3.4`)
- * down to the bare v4 address. Mirrors `proxy/host-proxy.ts`'s
- * `normalizeRemoteIp` for the same reason: tenant IPs in state are plain
- * v4, but Node's `req.socket.remoteAddress` on a dual-stack loopback
- * sometimes returns the mapped form.
- */
-function normalizeIp(ip: string | undefined): string | null {
-  if (!ip) return null;
-  return ip.startsWith('::ffff:') ? ip.slice('::ffff:'.length) : ip;
-}
 
 export interface McpGatewayOptions {
   /**
@@ -64,6 +72,13 @@ export interface McpGatewayOptions {
    * design and reached via the host proxy's URL-rewrite policy.
    */
   host?: string;
+  /**
+   * Optional upstream relay. When provided, identified requests are
+   * forwarded through it; when omitted (or `null`), `#dispatch` falls
+   * back to the 501 stub used in Phase 1. Tests can inject a fake
+   * relay; production wires in the real {@link UpstreamRelay}.
+   */
+  relay?: UpstreamRelay | null;
 }
 
 /**
@@ -85,12 +100,14 @@ export class McpGateway {
   readonly #server: Server;
   readonly #host: string;
   readonly #requestedPort: number | undefined;
+  readonly #relay: UpstreamRelay | null;
   #boundPort: number | null = null;
   #tenants = new Map<string, TenantEntry>();
 
   constructor(opts: McpGatewayOptions = {}) {
     this.#host = opts.host ?? '127.0.0.1';
     this.#requestedPort = opts.port;
+    this.#relay = opts.relay ?? null;
     this.#server = createServer((req, res) => {
       // Wrap in a try/catch so an exception in identify/dispatch never
       // bubbles out as an unhandled error event on the server.
@@ -174,24 +191,25 @@ export class McpGateway {
   }
 
   /**
-   * Build tenant entries from a snapshot of {@link SandboxEntry} plus a
-   * resolver that returns each sandbox's `enabledServers`. Centralized
-   * here so tests and the sidecar share one definition; the resolver
-   * lets the sidecar fetch the sandbox.json-derived list without the
-   * gateway pulling in config loaders.
+   * Build tenant entries from a snapshot of {@link SandboxEntry} plus two
+   * resolvers: one returns each sandbox's enabled server list, the other
+   * returns the per-sandbox `bearer` placeholder. Centralized here so
+   * tests and the sidecar share one definition; the resolvers let the
+   * sidecar derive these values without the gateway pulling in config
+   * loaders or the framework's placeholder hasher.
    */
   static buildTenants(
     sandboxes: readonly SandboxEntry[],
     enabledServersFor: (sandbox: SandboxEntry) => readonly string[],
+    bearerFor: (sandbox: SandboxEntry) => string,
   ): TenantEntry[] {
     const out: TenantEntry[] = [];
     for (const sandbox of sandboxes) {
-      // Sandboxes still being created (no IP yet, or no authSecret for
-      // pre-MCP state entries) can't participate.
-      if (sandbox.ip === null || sandbox.authSecret === null) continue;
+      // Sandboxes still being created (no IP yet) can't participate.
+      if (sandbox.ip === null) continue;
       out.push({
         name: sandbox.name,
-        authSecret: sandbox.authSecret,
+        bearer: bearerFor(sandbox),
         sourceIp: sandbox.ip,
         enabledServers: enabledServersFor(sandbox),
       });
@@ -200,15 +218,15 @@ export class McpGateway {
   }
 
   /**
-   * Match an incoming `(path, bearerHeader, remoteAddress)` against the
-   * tenant table. Returns the resolved tenant + server name on success,
-   * or a structured failure reason. Exposed so the handler stays focused
-   * on response shaping; tests exercise this directly.
+   * Match an incoming `(path, bearerHeader)` against the tenant table.
+   * Returns the resolved tenant + server name on success, or a structured
+   * failure reason. Exposed so the handler stays focused on response
+   * shaping; tests exercise this directly.
    */
   identify(
     pathname: string,
     bearerHeader: string | undefined,
-    remoteAddress: string | undefined,
+    forwardedFor: string | undefined,
   ): IdentifyResult {
     const m = PATH_PATTERN.exec(pathname);
     if (!m?.groups?.server) return { ok: false, reason: 'bad-path' };
@@ -217,20 +235,25 @@ export class McpGateway {
     const presented = parseBearer(bearerHeader);
     if (presented === null) return { ok: false, reason: 'no-bearer' };
 
-    const ip = normalizeIp(remoteAddress);
-    if (ip === null) return { ok: false, reason: 'unauthenticated' };
-
     let tenant: TenantEntry | undefined;
     for (const entry of this.#tenants.values()) {
-      if (entry.authSecret === presented) {
+      if (entry.bearer === presented) {
         tenant = entry;
         break;
       }
     }
     if (tenant === undefined) return { ok: false, reason: 'unauthenticated' };
-    if (tenant.sourceIp !== ip) return { ok: false, reason: 'wrong-ip' };
     if (!tenant.enabledServers.includes(server)) {
       return { ok: false, reason: 'server-not-enabled' };
+    }
+    // The host proxy stamps the originating sandbox IP into
+    // `X-Forwarded-For` on every rewrite — its absence (or a value that
+    // doesn't match the bearer-resolved tenant) means the request
+    // didn't transit the proxy or transited it on behalf of a different
+    // sandbox. Either way: refuse it.
+    const claimedIp = parseForwardedFor(forwardedFor);
+    if (claimedIp === null || claimedIp !== tenant.sourceIp) {
+      return { ok: false, reason: 'source-ip-mismatch' };
     }
     return { ok: true, tenant, server };
   }
@@ -239,25 +262,41 @@ export class McpGateway {
     const id = this.identify(
       pathname,
       pickHeader(req.headers.authorization),
-      req.socket.remoteAddress,
+      pickHeader(req.headers['x-forwarded-for']),
     );
     if (!id.ok) {
       respondError(res, id.reason);
       return;
     }
-    // Phase 2 wires this up to the per-upstream MCP `Client`. In Phase 1
-    // a successfully-identified request just gets a clear "not yet
-    // implemented" error so callers know the auth path worked.
-    res.writeHead(501, { 'content-type': 'application/json' });
-    res.end(
-      JSON.stringify({
-        error: 'not_implemented',
-        message:
-          'mcp gateway authenticated request; upstream proxying lands in Phase 2',
-        server: id.server,
-        sandbox: id.tenant.name,
-      }),
-    );
+    if (this.#relay === null) {
+      // No relay attached (e.g. a unit test exercising identify only).
+      // Surface a structured error rather than silently hanging.
+      res.writeHead(503, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          error: 'relay_not_configured',
+          server: id.server,
+          sandbox: id.tenant.name,
+        }),
+      );
+      return;
+    }
+    // Capture the relay in a local so the async closure's error handler
+    // doesn't have to re-read `this.#relay` after a possible swap.
+    const relay = this.#relay;
+    relay.forward(id.server, req, res).catch((err: unknown) => {
+      logger.error(
+        `mcp-gateway: relay for ${id.server}/${id.tenant.name} threw: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      if (!res.headersSent) {
+        res.writeHead(502, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'upstream_unavailable' }));
+      } else {
+        res.destroy(err instanceof Error ? err : new Error(String(err)));
+      }
+    });
   }
 }
 
@@ -265,6 +304,20 @@ function parseBearer(header: string | undefined): string | null {
   if (!header) return null;
   const m = /^bearer\s+(.+)$/i.exec(header.trim());
   return m?.[1]?.trim() ?? null;
+}
+
+/**
+ * Extract the originating IP from an `X-Forwarded-For` header. The
+ * host proxy emits a single-value header (no upstream chain), but we
+ * still parse the comma-separated form defensively and take the first
+ * entry — that's the leftmost (originating) client per the de-facto
+ * standard.
+ */
+function parseForwardedFor(header: string | undefined): string | null {
+  if (!header) return null;
+  const first = header.split(',')[0]?.trim();
+  if (first === undefined || first === '') return null;
+  return first;
 }
 
 function pickHeader(value: string | string[] | undefined): string | undefined {
@@ -276,8 +329,8 @@ const ERROR_STATUS: Record<IdentifyFailureReason, number> = {
   'bad-path': 404,
   'no-bearer': 401,
   unauthenticated: 401,
-  'wrong-ip': 403,
   'server-not-enabled': 403,
+  'source-ip-mismatch': 401,
 };
 
 function respondError(
