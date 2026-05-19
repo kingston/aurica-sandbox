@@ -55,17 +55,20 @@ export interface InitShellOptions {
  *
  *  1. apt-install baseline tools (git, iptables, iptables-persistent,
  *     ca-certificates, curl, sudo, gnupg)
- *  2. run the plugin bootstrap snippet (e.g. install Docker, install mise) —
+ *  2. remove `/etc/sudoers.d/orbstack` so the default user has no sudo
+ *     entry at all — there is no in-VM path to root, only the host-side
+ *     `orb -m <name> -u root` escape hatch
+ *  3. run the plugin bootstrap snippet (e.g. install Docker, install mise) —
  *     skipped cleanly when empty
- *  3. install the proxy CA into `/usr/local/share/ca-certificates/` and run
+ *  4. install the proxy CA into `/usr/local/share/ca-certificates/` and run
  *     `update-ca-certificates`, so HTTPS requests MITM'd by the proxy
  *     validate against the VM's system trust store
- *  4. write `/etc/environment` with `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`
+ *  5. write `/etc/environment` with `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`
  *     pointing at the host proxy, so post-lockdown shells (started by
  *     `orbctl run` etc.) inherit the proxy via PAM. Apps that honor these
  *     get a slightly faster forward-proxy path; apps that ignore them
- *     still go through the proxy via the DNAT in step 5.
- *  5. apply a `DROP`-by-default `OUTPUT` policy on both `iptables` (IPv4)
+ *     still go through the proxy via the DNAT in step 6.
+ *  6. apply a `DROP`-by-default `OUTPUT` policy on both `iptables` (IPv4)
  *     and `ip6tables` (IPv6) that allows only `lo`, `ESTABLISHED`/`RELATED`,
  *     DNS (udp/tcp 53), and tcp/`<proxyPort>` to `<proxyHost>`. Transparent
  *     proxying is done with two NAT OUTPUT DNAT rules — tcp/80 and tcp/443
@@ -75,9 +78,9 @@ export interface InitShellOptions {
  *     destination hostname for the per-sandbox allowlist — no in-VM SNI
  *     shim needed. A terminal `REJECT` rule with `icmp-admin-prohibited`
  *     (and the IPv6 equivalent) makes disallowed traffic fail fast with
- *     a clear `EACCES` instead of hanging until connect timeout.
- *  6. persist the rules via `iptables-save > /etc/iptables/rules.v4` and
- *     `ip6tables-save > /etc/iptables/rules.v6`
+ *     a clear `EACCES` instead of hanging until connect timeout. The
+ *     rules are persisted via `iptables-save > /etc/iptables/rules.v4`
+ *     and `ip6tables-save > /etc/iptables/rules.v6`.
  *
  * **Order is load-bearing**: installs (base packages + plugin bootstrap)
  * happen with the network open, then iptables locks the VM down.
@@ -116,7 +119,7 @@ export function createInitShell(opts: InitShellOptions): string {
   const { proxyHost, proxyPort, caCertPem, pluginBootstrap } = opts;
 
   const pluginSection = pluginBootstrap.trim()
-    ? `\n# 2. Plugin bootstrap snippets. Run with the network still open;\n#    iptables lockdown comes last.\n${pluginBootstrap}\n`
+    ? `\n# 3. Plugin bootstrap snippets. Run with the network still open;\n#    iptables lockdown comes last.\n${pluginBootstrap}\n`
     : '';
 
   return `#!/bin/bash
@@ -137,8 +140,22 @@ apt-get install -y --no-install-recommends \\
 # post-lockdown plugin commands fire. Idempotent: \`-p\` no-ops if the dir
 # already exists, and re-chowning is harmless.
 install -d -o ${opts.user} -g ${opts.user} -m 0755 /workspaces
+
+# 2. Strip OrbStack's passwordless-sudo grant for the default user.
+#    OrbStack ships /etc/sudoers.d/orbstack with a passwordless rule
+#    for the default user, which would let any process inside the
+#    sandbox escalate to root and tear down the iptables egress
+#    lockdown installed at the end of this script. We remove the rule
+#    entirely instead of requiring a password: there is no in-VM path
+#    to root at all. The host-side escape hatch (\`orb -m <name> -u root\`)
+#    is unaffected and remains the only way for an operator to act as
+#    root. Guarded on file existence so non-OrbStack providers stay
+#    correct.
+if [ -f /etc/sudoers.d/orbstack ]; then
+  rm -f /etc/sudoers.d/orbstack
+fi
 ${pluginSection}
-# 3. Install the proxy CA so MITM'd HTTPS validates inside the VM. mockttp
+# 4. Install the proxy CA so MITM'd HTTPS validates inside the VM. mockttp
 #    intercepts every HTTPS request to apply the per-sandbox allowlist and
 #    credential substitution; without trusting this CA, every HTTPS call
 #    fails with a self-signed-cert error. Single-quoted heredoc terminator
@@ -148,11 +165,11 @@ ${caCertPem}
 EOF
 update-ca-certificates >/dev/null
 
-# 4. Proxy env for post-lockdown shells. /etc/environment is read by PAM at
+# 5. Proxy env for post-lockdown shells. /etc/environment is read by PAM at
 #    login, so subsequent commands (apt, git, mise install, pnpm) pick up
 #    the proxy without any extra plumbing. Apps that honor these env vars
 #    use a faster forward-proxy path; apps that ignore them are still
-#    routed through the proxy by the DNAT rules in step 5 (mockttp peeks
+#    routed through the proxy by the DNAT rules in step 6 (mockttp peeks
 #    SNI / Host header to recover the hostname for the allowlist).
 #    NODE_EXTRA_CA_CERTS makes Node.js (and pkg-bundled binaries like
 #    pnpm) trust the proxy CA in addition to its built-in roots, so
@@ -168,7 +185,7 @@ no_proxy=localhost,127.0.0.1,${proxyHost}
 NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/aurica-sandbox.crt
 EOF
 
-# 5. iptables: default DROP on OUTPUT for both IPv4 and IPv6, allow loopback,
+# 6. iptables: default DROP on OUTPUT for both IPv4 and IPv6, allow loopback,
 #    established, DNS, and the proxy IP:port. Transparent proxying is done
 #    by DNAT'ing tcp/80 and tcp/443 to the proxy: mockttp natively handles
 #    transparent traffic by peeking the TLS ClientHello SNI (HTTPS) and

@@ -20,12 +20,26 @@ apt-get install -y --no-install-recommends \\
 # already exists, and re-chowning is harmless.
 install -d -o sandbox -g sandbox -m 0755 /workspaces
 
-# 2. Plugin bootstrap snippets. Run with the network still open;
+# 2. Strip OrbStack's passwordless-sudo grant for the default user.
+#    OrbStack ships /etc/sudoers.d/orbstack with a passwordless rule
+#    for the default user, which would let any process inside the
+#    sandbox escalate to root and tear down the iptables egress
+#    lockdown installed at the end of this script. We remove the rule
+#    entirely instead of requiring a password: there is no in-VM path
+#    to root at all. The host-side escape hatch (\`orb -m <name> -u root\`)
+#    is unaffected and remains the only way for an operator to act as
+#    root. Guarded on file existence so non-OrbStack providers stay
+#    correct.
+if [ -f /etc/sudoers.d/orbstack ]; then
+  rm -f /etc/sudoers.d/orbstack
+fi
+
+# 3. Plugin bootstrap snippets. Run with the network still open;
 #    iptables lockdown comes last.
 # fake plugin
 echo hello
 
-# 3. Install the proxy CA so MITM'd HTTPS validates inside the VM. mockttp
+# 4. Install the proxy CA so MITM'd HTTPS validates inside the VM. mockttp
 #    intercepts every HTTPS request to apply the per-sandbox allowlist and
 #    credential substitution; without trusting this CA, every HTTPS call
 #    fails with a self-signed-cert error. Single-quoted heredoc terminator
@@ -43,11 +57,11 @@ NKfP5LLxZxPyZbPYx8XR3PcPwfYFx9c5gK+sR2IpzkR7LsMI3z4JCUaT0eF1QZqp
 EOF
 update-ca-certificates >/dev/null
 
-# 4. Proxy env for post-lockdown shells. /etc/environment is read by PAM at
+# 5. Proxy env for post-lockdown shells. /etc/environment is read by PAM at
 #    login, so subsequent commands (apt, git, mise install, pnpm) pick up
 #    the proxy without any extra plumbing. Apps that honor these env vars
 #    use a faster forward-proxy path; apps that ignore them are still
-#    routed through the proxy by the DNAT rules in step 5 (mockttp peeks
+#    routed through the proxy by the DNAT rules in step 6 (mockttp peeks
 #    SNI / Host header to recover the hostname for the allowlist).
 #    NODE_EXTRA_CA_CERTS makes Node.js (and pkg-bundled binaries like
 #    pnpm) trust the proxy CA in addition to its built-in roots, so
@@ -63,7 +77,7 @@ no_proxy=localhost,127.0.0.1,192.168.139.3
 NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/aurica-sandbox.crt
 EOF
 
-# 5. iptables: default DROP on OUTPUT for both IPv4 and IPv6, allow loopback,
+# 6. iptables: default DROP on OUTPUT for both IPv4 and IPv6, allow loopback,
 #    established, DNS, and the proxy IP:port. Transparent proxying is done
 #    by DNAT'ing tcp/80 and tcp/443 to the proxy: mockttp natively handles
 #    transparent traffic by peeking the TLS ClientHello SNI (HTTPS) and
@@ -162,7 +176,21 @@ apt-get install -y --no-install-recommends \\
 # already exists, and re-chowning is harmless.
 install -d -o sandbox -g sandbox -m 0755 /workspaces
 
-# 2. Plugin bootstrap snippets. Run with the network still open;
+# 2. Strip OrbStack's passwordless-sudo grant for the default user.
+#    OrbStack ships /etc/sudoers.d/orbstack with a passwordless rule
+#    for the default user, which would let any process inside the
+#    sandbox escalate to root and tear down the iptables egress
+#    lockdown installed at the end of this script. We remove the rule
+#    entirely instead of requiring a password: there is no in-VM path
+#    to root at all. The host-side escape hatch (\`orb -m <name> -u root\`)
+#    is unaffected and remains the only way for an operator to act as
+#    root. Guarded on file existence so non-OrbStack providers stay
+#    correct.
+if [ -f /etc/sudoers.d/orbstack ]; then
+  rm -f /etc/sudoers.d/orbstack
+fi
+
+# 3. Plugin bootstrap snippets. Run with the network still open;
 #    iptables lockdown comes last.
 # fake plugin a
 echo a
@@ -170,7 +198,7 @@ echo a
 # fake plugin b
 echo b
 
-# 3. Install the proxy CA so MITM'd HTTPS validates inside the VM. mockttp
+# 4. Install the proxy CA so MITM'd HTTPS validates inside the VM. mockttp
 #    intercepts every HTTPS request to apply the per-sandbox allowlist and
 #    credential substitution; without trusting this CA, every HTTPS call
 #    fails with a self-signed-cert error. Single-quoted heredoc terminator
@@ -188,11 +216,11 @@ NKfP5LLxZxPyZbPYx8XR3PcPwfYFx9c5gK+sR2IpzkR7LsMI3z4JCUaT0eF1QZqp
 EOF
 update-ca-certificates >/dev/null
 
-# 4. Proxy env for post-lockdown shells. /etc/environment is read by PAM at
+# 5. Proxy env for post-lockdown shells. /etc/environment is read by PAM at
 #    login, so subsequent commands (apt, git, mise install, pnpm) pick up
 #    the proxy without any extra plumbing. Apps that honor these env vars
 #    use a faster forward-proxy path; apps that ignore them are still
-#    routed through the proxy by the DNAT rules in step 5 (mockttp peeks
+#    routed through the proxy by the DNAT rules in step 6 (mockttp peeks
 #    SNI / Host header to recover the hostname for the allowlist).
 #    NODE_EXTRA_CA_CERTS makes Node.js (and pkg-bundled binaries like
 #    pnpm) trust the proxy CA in addition to its built-in roots, so
@@ -208,7 +236,7 @@ no_proxy=localhost,127.0.0.1,192.168.139.3
 NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/aurica-sandbox.crt
 EOF
 
-# 5. iptables: default DROP on OUTPUT for both IPv4 and IPv6, allow loopback,
+# 6. iptables: default DROP on OUTPUT for both IPv4 and IPv6, allow loopback,
 #    established, DNS, and the proxy IP:port. Transparent proxying is done
 #    by DNAT'ing tcp/80 and tcp/443 to the proxy: mockttp natively handles
 #    transparent traffic by peeking the TLS ClientHello SNI (HTTPS) and
@@ -307,7 +335,21 @@ apt-get install -y --no-install-recommends \\
 # already exists, and re-chowning is harmless.
 install -d -o sandbox -g sandbox -m 0755 /workspaces
 
-# 3. Install the proxy CA so MITM'd HTTPS validates inside the VM. mockttp
+# 2. Strip OrbStack's passwordless-sudo grant for the default user.
+#    OrbStack ships /etc/sudoers.d/orbstack with a passwordless rule
+#    for the default user, which would let any process inside the
+#    sandbox escalate to root and tear down the iptables egress
+#    lockdown installed at the end of this script. We remove the rule
+#    entirely instead of requiring a password: there is no in-VM path
+#    to root at all. The host-side escape hatch (\`orb -m <name> -u root\`)
+#    is unaffected and remains the only way for an operator to act as
+#    root. Guarded on file existence so non-OrbStack providers stay
+#    correct.
+if [ -f /etc/sudoers.d/orbstack ]; then
+  rm -f /etc/sudoers.d/orbstack
+fi
+
+# 4. Install the proxy CA so MITM'd HTTPS validates inside the VM. mockttp
 #    intercepts every HTTPS request to apply the per-sandbox allowlist and
 #    credential substitution; without trusting this CA, every HTTPS call
 #    fails with a self-signed-cert error. Single-quoted heredoc terminator
@@ -325,11 +367,11 @@ NKfP5LLxZxPyZbPYx8XR3PcPwfYFx9c5gK+sR2IpzkR7LsMI3z4JCUaT0eF1QZqp
 EOF
 update-ca-certificates >/dev/null
 
-# 4. Proxy env for post-lockdown shells. /etc/environment is read by PAM at
+# 5. Proxy env for post-lockdown shells. /etc/environment is read by PAM at
 #    login, so subsequent commands (apt, git, mise install, pnpm) pick up
 #    the proxy without any extra plumbing. Apps that honor these env vars
 #    use a faster forward-proxy path; apps that ignore them are still
-#    routed through the proxy by the DNAT rules in step 5 (mockttp peeks
+#    routed through the proxy by the DNAT rules in step 6 (mockttp peeks
 #    SNI / Host header to recover the hostname for the allowlist).
 #    NODE_EXTRA_CA_CERTS makes Node.js (and pkg-bundled binaries like
 #    pnpm) trust the proxy CA in addition to its built-in roots, so
@@ -345,7 +387,7 @@ no_proxy=localhost,127.0.0.1,192.168.139.3
 NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/aurica-sandbox.crt
 EOF
 
-# 5. iptables: default DROP on OUTPUT for both IPv4 and IPv6, allow loopback,
+# 6. iptables: default DROP on OUTPUT for both IPv4 and IPv6, allow loopback,
 #    established, DNS, and the proxy IP:port. Transparent proxying is done
 #    by DNAT'ing tcp/80 and tcp/443 to the proxy: mockttp natively handles
 #    transparent traffic by peeking the TLS ClientHello SNI (HTTPS) and
