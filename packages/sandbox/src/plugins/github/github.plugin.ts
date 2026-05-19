@@ -3,7 +3,7 @@ import type {
   Mutation,
   ProxyPolicy,
   ProxyPolicyTransform,
-} from '#src/config/index.js';
+} from '#src/config/proxy-policy.js';
 import { assertSafeShellIdent } from '#src/utils/shell-safety.js';
 
 import type { PluginCommand, SandboxPlugin } from '../types.js';

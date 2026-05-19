@@ -13,15 +13,17 @@ import type {
   SidecarContext,
 } from '../types.js';
 import { registerMcpCommands } from './cli/mcp-commands.js';
-import { McpGateway, type TenantEntry } from './gateway/gateway.js';
 import {
-  UpstreamRelay,
+  McpForwarder,
   type UpstreamCatalog,
   type UpstreamCatalogEntry,
-} from './gateway/relay.js';
+} from './gateway/forwarder.js';
+import { McpGateway, type TenantEntry } from './gateway/gateway.js';
 import {
   mcpProjectConfigSchema,
   mcpUserConfigSchema,
+  normalizeServerEntries,
+  type CanonicalServerEntry,
   type McpProjectConfig,
   type McpUserConfig,
 } from './schema.js';
@@ -53,8 +55,9 @@ const MCP_PLUGIN_NAME = 'mcp';
 
 /**
  * MCP plugin. Exposes `aurica-sandbox mcp login|list|logout` and runs a
- * loopback HTTP gateway that authenticates guest MCP traffic and relays
- * it to user-configured upstreams.
+ * loopback MCP gateway that authenticates guest traffic and forwards
+ * `tools/list` / `tools/call` to user-configured upstreams, filtering by
+ * the per-sandbox tool ACL declared in `plugins.mcp.servers`.
  */
 export const mcpPlugin: SandboxPlugin<
   typeof mcpUserConfigSchema,
@@ -70,11 +73,11 @@ export const mcpPlugin: SandboxPlugin<
     registerMcpCommands(program, ctx);
   },
   async proxySidecar(ctx: SidecarContext): Promise<ProxySidecar> {
-    const relay = new UpstreamRelay();
+    const forwarder = new McpForwarder();
     const gateway = new McpGateway({
       host: '127.0.0.1',
       port: MCP_GATEWAY_PORT,
-      relay,
+      forwarder,
     });
     await gateway.listen();
     logger.info(`mcp-gateway http://127.0.0.1:${MCP_GATEWAY_PORT}`);
@@ -86,7 +89,7 @@ export const mcpPlugin: SandboxPlugin<
     const unsubscribe = ctx.sandboxes.subscribe((snapshot) => {
       void Promise.all([
         rebuildTenants(gateway, ctx.loadSandboxConfig, snapshot),
-        rebuildUpstreamCatalog(relay, ctx.loadUserConfig),
+        rebuildUpstreamCatalog(forwarder, ctx.loadUserConfig),
       ]);
     });
 
@@ -94,6 +97,7 @@ export const mcpPlugin: SandboxPlugin<
       async stop() {
         unsubscribe();
         await gateway.close();
+        await forwarder.close();
       },
     };
   },
@@ -125,7 +129,7 @@ function buildInitializedPlugin(
     typeof mcpProjectConfigSchema
   >,
 ): InitializedPlugin {
-  const servers = ctx.project.servers;
+  const servers = normalizeServerEntries(ctx.project.servers);
   if (servers.length === 0) {
     return { domains: [], policies: [], commands: [] };
   }
@@ -134,17 +138,18 @@ function buildInitializedPlugin(
   // catalog. Silently dropping unknown entries would leave the guest's
   // Claude Code attempting an unrouted call.
   const upstreams = ctx.user?.upstreams ?? {};
-  for (const name of servers) {
-    if (!(name in upstreams)) {
+  for (const entry of servers) {
+    if (!(entry.name in upstreams)) {
       throw new Error(
-        `mcp plugin: project lists server ${JSON.stringify(name)} but it is not declared under user-level plugins.mcp.upstreams`,
+        `mcp plugin: project lists server ${JSON.stringify(entry.name)} but it is not declared under user-level plugins.mcp.upstreams`,
       );
     }
   }
 
   const bearer = ctx.generatePlaceholder('bearer');
+  const serverNames = servers.map((s) => s.name);
 
-  const policies: ProxyPolicy[] = servers.map((server) => ({
+  const policies: ProxyPolicy[] = serverNames.map((server) => ({
     id: `mcp:${server}`,
     description: `Route guest MCP traffic for ${server} through the on-host gateway`,
     domain: MCP_INTERNAL_DOMAIN,
@@ -160,7 +165,7 @@ function buildInitializedPlugin(
     policies,
     commands: [
       registerInternalHostCommand(),
-      mergeClaudeJsonCommand(servers, bearer),
+      mergeClaudeJsonCommand(serverNames, bearer),
     ],
   };
 }
@@ -247,24 +252,27 @@ async function rebuildTenants(
   loadSandboxConfig: SidecarContext['loadSandboxConfig'],
   sandboxes: readonly SandboxEntry[],
 ): Promise<void> {
-  const enabledByName = new Map<string, readonly string[]>();
+  const serversByName = new Map<string, readonly CanonicalServerEntry[]>();
   await Promise.all(
     sandboxes.map(async (sandbox) => {
       try {
         const cfg = await loadSandboxConfig(sandbox.projectDir);
         const mcp = (cfg.plugins as { mcp?: McpProjectConfig | undefined }).mcp;
-        enabledByName.set(sandbox.name, mcp?.servers ?? []);
+        serversByName.set(
+          sandbox.name,
+          normalizeServerEntries(mcp?.servers ?? []),
+        );
       } catch (err) {
         logger.error(
           `mcp-gateway: failed to load ${sandbox.name}'s sandbox.json: ${err instanceof Error ? err.message : String(err)}`,
         );
-        enabledByName.set(sandbox.name, []);
+        serversByName.set(sandbox.name, []);
       }
     }),
   );
   const tenants: TenantEntry[] = McpGateway.buildTenants(
     sandboxes,
-    (sandbox) => enabledByName.get(sandbox.name) ?? [],
+    (sandbox) => serversByName.get(sandbox.name) ?? [],
     (sandbox) =>
       makeGeneratePlaceholder(MCP_PLUGIN_NAME, sandbox.authSecret)('bearer'),
   );
@@ -276,7 +284,7 @@ async function rebuildTenants(
  * Must match what `mcp login` registered, otherwise the SDK's `auth()`
  * helper attempts a re-registration on every refresh.
  */
-function relayClientMetadata(): UpstreamCatalogEntry['clientMetadata'] {
+function defaultClientMetadata(): UpstreamCatalogEntry['clientMetadata'] {
   return {
     client_name: 'aurica-sandbox',
     grant_types: ['authorization_code', 'refresh_token'],
@@ -287,14 +295,14 @@ function relayClientMetadata(): UpstreamCatalogEntry['clientMetadata'] {
 }
 
 /**
- * Refresh the relay's upstream catalog from the user-level
+ * Refresh the forwarder's upstream catalog from the user-level
  * `plugins.mcp.upstreams` block. On config-load failure the catalog is
  * cleared and every MCP request gets a structured "no upstream" error
  * until the config is fixed — a malformed user config must not bring
  * the gateway down.
  */
 async function rebuildUpstreamCatalog(
-  relay: UpstreamRelay,
+  forwarder: McpForwarder,
   loadUserConfig: SidecarContext['loadUserConfig'],
 ): Promise<void> {
   let userConfig: Awaited<ReturnType<SidecarContext['loadUserConfig']>>;
@@ -304,7 +312,7 @@ async function rebuildUpstreamCatalog(
     logger.error(
       `mcp-gateway: failed to load user config: ${err instanceof Error ? err.message : String(err)}`,
     );
-    relay.setCatalog(new Map());
+    forwarder.setCatalog(new Map());
     return;
   }
   // Re-parse through this plugin's schema to narrow the framework's
@@ -319,7 +327,7 @@ async function rebuildUpstreamCatalog(
     logger.error(
       `mcp-gateway: user config plugins.mcp is invalid: ${err instanceof Error ? err.message : String(err)}`,
     );
-    relay.setCatalog(new Map());
+    forwarder.setCatalog(new Map());
     return;
   }
   const catalog = new Map<string, UpstreamCatalogEntry>();
@@ -327,10 +335,10 @@ async function rebuildUpstreamCatalog(
     catalog.set(name, {
       url: def.url,
       clientMetadata: {
-        ...relayClientMetadata(),
+        ...defaultClientMetadata(),
         ...(def.clientName ? { client_name: def.clientName } : {}),
       },
     });
   }
-  relay.setCatalog(catalog satisfies UpstreamCatalog);
+  forwarder.setCatalog(catalog satisfies UpstreamCatalog);
 }

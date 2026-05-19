@@ -22,6 +22,7 @@ const tenant: TenantEntry = {
   name: 'sb-1',
   bearer: 'secret-1',
   sourceIp: '127.0.0.1',
+  servers: [{ name: 'github', tools: undefined }],
   enabledServers: ['github'],
 };
 
@@ -91,7 +92,7 @@ describe('McpGateway.buildTenants', () => {
   it('skips sandboxes without an IP', () => {
     const tenants = McpGateway.buildTenants(
       [sampleSandbox({ ip: null })],
-      () => ['github'],
+      () => [{ name: 'github', tools: undefined }],
       (sb) => `bearer-${sb.name}`,
     );
     expect(tenants).toEqual([]);
@@ -103,7 +104,10 @@ describe('McpGateway.buildTenants', () => {
         sampleSandbox({ name: 'a', authSecret: 's-a', ip: '10.0.0.1' }),
         sampleSandbox({ name: 'b', authSecret: 's-b', ip: '10.0.0.2' }),
       ],
-      (sb) => [sb.name === 'a' ? 'github' : 'linear'],
+      (sb) =>
+        sb.name === 'a'
+          ? [{ name: 'github', tools: undefined }]
+          : [{ name: 'linear', tools: ['list_issues'] }],
       (sb) => `bearer-${sb.name}`,
     );
     expect(tenants).toEqual([
@@ -111,12 +115,14 @@ describe('McpGateway.buildTenants', () => {
         name: 'a',
         bearer: 'bearer-a',
         sourceIp: '10.0.0.1',
+        servers: [{ name: 'github', tools: undefined }],
         enabledServers: ['github'],
       },
       {
         name: 'b',
         bearer: 'bearer-b',
         sourceIp: '10.0.0.2',
+        servers: [{ name: 'linear', tools: ['list_issues'] }],
         enabledServers: ['linear'],
       },
     ]);
@@ -151,10 +157,10 @@ describe('McpGateway listener', () => {
     expect(status).toBe(404);
   });
 
-  it('returns 503 once auth+routing pass but no relay is attached', async () => {
-    // Construction default omits the relay, so a successfully-identified
-    // request short-circuits with the structured "relay not configured"
-    // error rather than hanging or 500'ing.
+  it('returns 503 once auth+routing pass but no forwarder is attached', async () => {
+    // Construction default omits the forwarder, so a successfully-
+    // identified request short-circuits with the structured
+    // "forwarder not configured" error rather than hanging or 500'ing.
     const status = await fetchStatus(`/github/mcp`, bound.port, {
       Authorization: 'Bearer secret-1',
       'X-Forwarded-For': '127.0.0.1',

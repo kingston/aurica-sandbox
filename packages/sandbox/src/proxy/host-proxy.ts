@@ -205,12 +205,17 @@ export class HostProxy {
             };
           }
           if (result.outcome === 'rewrite') {
-            // Inject X-Forwarded-For so the rewritten target can still
-            // identify the originating sandbox by IP — the loopback hop
-            // would otherwise erase `req.remoteIpAddress`. Strip any
-            // case-variant the guest might have sent first so the value
-            // isn't guest-controllable.
-            const headers = stripHeader(result.headers, 'x-forwarded-for');
+            // Strip the guest's Host header so mockttp derives a fresh
+            // one from the rewritten URL. Per its docs, passing a
+            // headers object with `host` set wins over the URL — which
+            // would route us to the synthetic guest hostname instead of
+            // the loopback target and produce ENOTFOUND. Also inject
+            // X-Forwarded-For so the rewritten target can identify the
+            // originating sandbox by IP (the loopback hop erases
+            // `req.remoteIpAddress`), stripping any guest-supplied
+            // case-variant first so it isn't guest-controllable.
+            let headers = stripHeader(result.headers, 'host');
+            headers = stripHeader(headers, 'x-forwarded-for');
             headers['X-Forwarded-For'] = remoteIp;
             return { url: result.url, headers };
           }

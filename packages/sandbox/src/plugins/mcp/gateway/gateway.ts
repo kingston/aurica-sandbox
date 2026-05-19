@@ -8,7 +8,18 @@ import {
 import { logger } from '#src/logger.js';
 import type { SandboxEntry } from '#src/state/index.js';
 
-import type { UpstreamRelay } from './relay.js';
+import type { McpForwarder } from './forwarder.js';
+
+/**
+ * Per-sandbox-per-server entry. Captures both the routing key (server
+ * name) and the per-sandbox tool ACL surfaced to the forwarder's
+ * `tools/list` filter. `tools: undefined` means "all tools" (the bare
+ * string form in project config); `tools: []` means "no tools".
+ */
+export interface TenantServerEntry {
+  name: string;
+  tools: readonly string[] | undefined;
+}
 
 /**
  * Per-sandbox tenant entry. Built from a `SandboxEntry` plus the sandbox's
@@ -31,6 +42,12 @@ export interface TenantEntry {
    * between sandboxes can't be replayed from a different source.
    */
   sourceIp: string;
+  /**
+   * Servers this sandbox may reach, with per-server tool ACL.
+   * `enabledServers` (below) is derived from this for fast path-routing
+   * checks during `identify`.
+   */
+  servers: readonly TenantServerEntry[];
   enabledServers: readonly string[];
 }
 
@@ -73,12 +90,13 @@ export interface McpGatewayOptions {
    */
   host?: string;
   /**
-   * Optional upstream relay. When provided, identified requests are
-   * forwarded through it; when omitted (or `null`), `#dispatch` falls
-   * back to the 501 stub used in Phase 1. Tests can inject a fake
-   * relay; production wires in the real {@link UpstreamRelay}.
+   * Optional MCP forwarder. When provided, identified requests are
+   * handed to it for session management + upstream MCP dispatch; when
+   * omitted (or `null`), `#dispatch` short-circuits with a 503 so a
+   * unit test can exercise just the identify path without standing up
+   * the SDK plumbing.
    */
-  relay?: UpstreamRelay | null;
+  forwarder?: McpForwarder | null;
 }
 
 /**
@@ -100,14 +118,14 @@ export class McpGateway {
   readonly #server: Server;
   readonly #host: string;
   readonly #requestedPort: number | undefined;
-  readonly #relay: UpstreamRelay | null;
+  readonly #forwarder: McpForwarder | null;
   #boundPort: number | null = null;
   #tenants = new Map<string, TenantEntry>();
 
   constructor(opts: McpGatewayOptions = {}) {
     this.#host = opts.host ?? '127.0.0.1';
     this.#requestedPort = opts.port;
-    this.#relay = opts.relay ?? null;
+    this.#forwarder = opts.forwarder ?? null;
     this.#server = createServer((req, res) => {
       // Wrap in a try/catch so an exception in identify/dispatch never
       // bubbles out as an unhandled error event on the server.
@@ -117,7 +135,7 @@ export class McpGateway {
         // params (e.g. `?sessionId=...`) that would otherwise break the
         // `$`-anchored path pattern.
         const pathname = new URL(req.url ?? '/', 'http://x').pathname;
-        this.#dispatch(pathname, req, res);
+        void this.#dispatch(pathname, req, res);
       } catch (err) {
         logger.error(
           `mcp-gateway: unhandled error: ${err instanceof Error ? err.message : String(err)}`,
@@ -200,18 +218,20 @@ export class McpGateway {
    */
   static buildTenants(
     sandboxes: readonly SandboxEntry[],
-    enabledServersFor: (sandbox: SandboxEntry) => readonly string[],
+    serversFor: (sandbox: SandboxEntry) => readonly TenantServerEntry[],
     bearerFor: (sandbox: SandboxEntry) => string,
   ): TenantEntry[] {
     const out: TenantEntry[] = [];
     for (const sandbox of sandboxes) {
       // Sandboxes still being created (no IP yet) can't participate.
       if (sandbox.ip === null) continue;
+      const servers = serversFor(sandbox);
       out.push({
         name: sandbox.name,
         bearer: bearerFor(sandbox),
         sourceIp: sandbox.ip,
-        enabledServers: enabledServersFor(sandbox),
+        servers,
+        enabledServers: servers.map((s) => s.name),
       });
     }
     return out;
@@ -258,7 +278,11 @@ export class McpGateway {
     return { ok: true, tenant, server };
   }
 
-  #dispatch(pathname: string, req: IncomingMessage, res: ServerResponse): void {
+  async #dispatch(
+    pathname: string,
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<void> {
     const id = this.identify(
       pathname,
       pickHeader(req.headers.authorization),
@@ -268,25 +292,56 @@ export class McpGateway {
       respondError(res, id.reason);
       return;
     }
-    if (this.#relay === null) {
-      // No relay attached (e.g. a unit test exercising identify only).
-      // Surface a structured error rather than silently hanging.
+    if (this.#forwarder === null) {
+      // No forwarder attached (e.g. a unit test exercising identify
+      // only). Surface a structured error rather than silently hanging.
       res.writeHead(503, { 'content-type': 'application/json' });
       res.end(
         JSON.stringify({
-          error: 'relay_not_configured',
+          error: 'forwarder_not_configured',
           server: id.server,
           sandbox: id.tenant.name,
         }),
       );
       return;
     }
-    // Capture the relay in a local so the async closure's error handler
-    // doesn't have to re-read `this.#relay` after a possible swap.
-    const relay = this.#relay;
-    relay.forward(id.server, req, res).catch((err: unknown) => {
+    // Resolve the tenant's per-server tool ACL. The list-routing check
+    // above ensured the server is enabled; this lookup just fetches the
+    // tool allowlist for the forwarder. A missing entry here means
+    // someone removed it between identify() and dispatch — treat as
+    // server-not-enabled.
+    const tenantServer = id.tenant.servers.find((s) => s.name === id.server);
+    if (tenantServer === undefined) {
+      respondError(res, 'server-not-enabled');
+      return;
+    }
+    let body: unknown;
+    try {
+      body = await readJsonBody(req);
+    } catch (err) {
+      logger.warn(
+        `mcp-gateway: invalid request body for ${id.server}/${id.tenant.name}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'invalid_body' }));
+      return;
+    }
+    try {
+      await this.#forwarder.forward(
+        {
+          tenantName: id.tenant.name,
+          serverName: id.server,
+          enabledTools: tenantServer.tools,
+        },
+        req,
+        res,
+        body,
+      );
+    } catch (err) {
       logger.error(
-        `mcp-gateway: relay for ${id.server}/${id.tenant.name} threw: ${
+        `mcp-gateway: forwarder for ${id.server}/${id.tenant.name} threw: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
@@ -296,8 +351,22 @@ export class McpGateway {
       } else {
         res.destroy(err instanceof Error ? err : new Error(String(err)));
       }
-    });
+    }
   }
+}
+
+/**
+ * Drain the request body to a string and parse as JSON. Returns
+ * `undefined` for a GET / empty-body request — the SDK's
+ * `StreamableHTTPServerTransport.handleRequest` accepts `undefined`
+ * for those.
+ */
+async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+  if (req.method !== 'POST') return undefined;
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) chunks.push(chunk as Buffer);
+  if (chunks.length === 0) return undefined;
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
 function parseBearer(header: string | undefined): string | null {

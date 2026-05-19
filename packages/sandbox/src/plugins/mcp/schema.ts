@@ -35,27 +35,78 @@ export const mcpUserConfigSchema = z.object({
 export type McpUserConfig = z.infer<typeof mcpUserConfigSchema>;
 
 /**
+ * Per-server entry in a project's `plugins.mcp.servers` list. The bare
+ * string form (`"linear"`) accepts every tool the upstream exposes; the
+ * object form constrains the guest to `tools` only — anything else
+ * upstream offers is hidden from `tools/list` and refused at
+ * `tools/call`.
+ *
+ * `tools: undefined` (or the bare-string form) means "all tools";
+ * `tools: []` means "no tools" (advertising the server but allowing
+ * nothing through). The empty-list form is useful to keep a server
+ * connected (e.g. for OAuth scope) while temporarily disabling it.
+ */
+const serverEntrySchema = z.union([
+  z.string().regex(/^[a-z0-9][a-z0-9-]*$/i),
+  z.object({
+    name: z.string().regex(/^[a-z0-9][a-z0-9-]*$/i),
+    tools: z.array(z.string().min(1)).optional(),
+  }),
+]);
+
+/** See {@link mcpProjectConfigSchema}. */
+export type McpServerEntry = z.infer<typeof serverEntrySchema>;
+
+/**
+ * Canonical form of a project-declared server entry. The schema accepts
+ * a bare-string shorthand for "all tools enabled"; {@link normalizeServerEntries}
+ * folds both forms into this representation so downstream code only ever
+ * sees one shape.
+ */
+export interface CanonicalServerEntry {
+  name: string;
+  /** `undefined` means "every tool the upstream exposes". */
+  tools: readonly string[] | undefined;
+}
+
+/**
  * Project-level config for the `mcp` plugin.
  *
- * `servers` lists the names of upstream MCP servers (defined under the
- * user-level `plugins.mcp.upstreams` block) this sandbox is allowed to
- * reach. Cross-validation against the user-level catalog happens at
- * sandbox create / proxy reload time — an unknown name fails fast with
- * a clear error rather than being silently dropped.
+ * `servers` lists the upstream MCP servers (defined under the user-level
+ * `plugins.mcp.upstreams` block) this sandbox is allowed to reach.
+ * Cross-validation against the user-level catalog happens at sandbox
+ * create / proxy reload time — an unknown name fails fast with a clear
+ * error rather than being silently dropped.
  *
  * Each name must be a valid path segment (kebab-case, no slashes) so it
- * can be used verbatim in the gateway's path-based routing in Phase 2:
+ * can be used verbatim in the gateway's path-based routing:
  * `https://aurica.mcp.internal/<server>/mcp` maps one-to-one to a name
  * in this list.
  */
 export const mcpProjectConfigSchema = z.object({
   servers: z
-    .array(z.string().regex(/^[a-z0-9][a-z0-9-]*$/i))
+    .array(serverEntrySchema)
     .default([])
     .describe(
-      'Names of upstream MCP servers (declared in user config) this sandbox may reach.',
+      'Upstream MCP servers (declared in user config) this sandbox may reach.',
     ),
 });
 
 /** See {@link mcpProjectConfigSchema}. */
 export type McpProjectConfig = z.infer<typeof mcpProjectConfigSchema>;
+
+/**
+ * Normalize the heterogeneous `servers` list into uniform
+ * {@link CanonicalServerEntry} records. Call once at the boundary
+ * (plugin `initialize`, gateway tenant rebuild) so downstream code never
+ * branches on the union shape.
+ */
+export function normalizeServerEntries(
+  entries: readonly McpServerEntry[],
+): CanonicalServerEntry[] {
+  return entries.map((entry) =>
+    typeof entry === 'string'
+      ? { name: entry, tools: undefined }
+      : { name: entry.name, tools: entry.tools },
+  );
+}

@@ -4,7 +4,7 @@ import path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { z } from 'zod';
 
-import { stateFilePath } from '#src/config/index.js';
+import { stateFilePath } from '#src/config/paths.js';
 
 const sandboxEntrySchema = z.object({
   name: z.string(),
