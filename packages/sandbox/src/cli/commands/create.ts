@@ -210,6 +210,7 @@ export async function runCreate(
     proxyHost: bridge.ip,
     proxyPort: proxy.port,
     caCertPem: ca.certPem,
+    providerBootstrap: defaultProvider.bootstrapScript,
     pluginBootstrap: expanded.bootstrapScript,
   });
   const userInitDir = await statDirOrNull(

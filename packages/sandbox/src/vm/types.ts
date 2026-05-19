@@ -79,6 +79,19 @@ export interface SandboxVMProvider {
    */
   createExec: (name: string, defaultUser: string) => VMExec;
   /**
+   * Provider-specific shell snippet injected into the VM init script as
+   * step 2 (after base apt packages, before plugin bootstrap, before the
+   * iptables lockdown). Used for quirks that don't belong in the
+   * cross-provider init — e.g. OrbStack removes its passwordless-sudo
+   * grant here. Empty string when the provider has nothing to contribute.
+   *
+   * Bash, runs as root with the network still open. Must not rely on
+   * `${user}` interpolation — if a snippet needs the default user name,
+   * the provider should bake it in at construction time or expose its own
+   * factory.
+   */
+  bootstrapScript: string;
+  /**
    * Run a one-shot user-supplied command inside `name` with `env` injected
    * and stdio inherited from the parent process. Returns the child's exit
    * code (or `1` if the provider can't surface one). Used by

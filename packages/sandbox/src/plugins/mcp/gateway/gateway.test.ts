@@ -22,7 +22,7 @@ const tenant: TenantEntry = {
   name: 'sb-1',
   bearer: 'secret-1',
   sourceIp: '127.0.0.1',
-  servers: [{ name: 'github', tools: undefined }],
+  servers: [{ name: 'github', policies: [], defaultAction: 'allow' }],
   enabledServers: ['github'],
 };
 
@@ -92,7 +92,7 @@ describe('McpGateway.buildTenants', () => {
   it('skips sandboxes without an IP', () => {
     const tenants = McpGateway.buildTenants(
       [sampleSandbox({ ip: null })],
-      () => [{ name: 'github', tools: undefined }],
+      () => [{ name: 'github', policies: [], defaultAction: 'allow' }],
       (sb) => `bearer-${sb.name}`,
     );
     expect(tenants).toEqual([]);
@@ -106,8 +106,14 @@ describe('McpGateway.buildTenants', () => {
       ],
       (sb) =>
         sb.name === 'a'
-          ? [{ name: 'github', tools: undefined }]
-          : [{ name: 'linear', tools: ['list_issues'] }],
+          ? [{ name: 'github', policies: [], defaultAction: 'allow' }]
+          : [
+              {
+                name: 'linear',
+                policies: [{ tools: ['list_issues'], arguments: undefined }],
+                defaultAction: 'block',
+              },
+            ],
       (sb) => `bearer-${sb.name}`,
     );
     expect(tenants).toEqual([
@@ -115,14 +121,20 @@ describe('McpGateway.buildTenants', () => {
         name: 'a',
         bearer: 'bearer-a',
         sourceIp: '10.0.0.1',
-        servers: [{ name: 'github', tools: undefined }],
+        servers: [{ name: 'github', policies: [], defaultAction: 'allow' }],
         enabledServers: ['github'],
       },
       {
         name: 'b',
         bearer: 'bearer-b',
         sourceIp: '10.0.0.2',
-        servers: [{ name: 'linear', tools: ['list_issues'] }],
+        servers: [
+          {
+            name: 'linear',
+            policies: [{ tools: ['list_issues'], arguments: undefined }],
+            defaultAction: 'block',
+          },
+        ],
         enabledServers: ['linear'],
       },
     ]);
