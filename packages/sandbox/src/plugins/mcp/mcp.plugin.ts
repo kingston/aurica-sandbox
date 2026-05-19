@@ -23,9 +23,11 @@ import { McpGateway, type TenantEntry } from './gateway/gateway.js';
 import {
   mcpProjectConfigSchema,
   mcpUserConfigSchema,
+  mergeUpstreamCatalogs,
   normalizeServerEntries,
   readMcpUserConfig,
   sidecarOAuthClientMetadata,
+  type CanonicalMcpUpstream,
   type CanonicalServerEntry,
   type McpProjectConfig,
   type McpUserConfig,
@@ -76,7 +78,9 @@ export const mcpPlugin: SandboxPlugin<
     registerMcpCommands(program, ctx);
   },
   async proxySidecar(ctx: SidecarContext): Promise<ProxySidecar> {
-    const forwarder = new McpForwarder();
+    const forwarder = new McpForwarder({
+      bearerTokenResolver: ctx.credentialResolver,
+    });
     const gateway = new McpGateway({
       host: '127.0.0.1',
       port: MCP_GATEWAY_PORT,
@@ -96,10 +100,21 @@ export const mcpPlugin: SandboxPlugin<
     // last-fired — wins.
     const scheduleRebuild = runSerialized(async () => {
       const snapshot = ctx.sandboxes.snapshot();
-      await Promise.all([
-        rebuildTenants(gateway, ctx.loadSandboxConfig, snapshot),
-        rebuildUpstreamCatalog(forwarder, ctx.loadUserConfig),
-      ]);
+      // Tenants and catalog are coupled: project upstreams live on each
+      // sandbox's `.aurica/sandbox.json`, so the catalog must be rebuilt
+      // from the same per-sandbox configs the tenant table is built from.
+      // Serial here (rather than parallel) avoids loading each
+      // sandbox.json twice.
+      const sandboxConfigs = await loadSandboxConfigs(
+        ctx.loadSandboxConfig,
+        snapshot,
+      );
+      rebuildTenants(gateway, sandboxConfigs, snapshot);
+      await rebuildUpstreamCatalog(
+        forwarder,
+        ctx.loadUserConfig,
+        sandboxConfigs,
+      );
     });
     const unsubscribe = ctx.sandboxes.subscribe(() => {
       scheduleRebuild();
@@ -146,14 +161,16 @@ function buildInitializedPlugin(
     return { domains: [], policies: [], commands: [] };
   }
 
-  // Every project-declared server must exist in the user-level upstream
-  // catalog. Silently dropping unknown entries would leave the guest's
-  // Claude Code attempting an unrouted call.
-  const upstreams = ctx.user?.upstreams ?? {};
+  // Every project-declared server must resolve to *some* upstream
+  // definition — either user-level or the project's own
+  // `plugins.mcp.upstreams` block. Silently dropping unknown entries
+  // would leave the guest's Claude Code attempting an unrouted call.
+  const userUpstreams = ctx.user?.upstreams ?? {};
+  const projectUpstreams = ctx.project.upstreams;
   for (const entry of servers) {
-    if (!(entry.name in upstreams)) {
+    if (!(entry.name in userUpstreams) && !(entry.name in projectUpstreams)) {
       throw new Error(
-        `mcp plugin: project lists server ${JSON.stringify(entry.name)} but it is not declared under user-level plugins.mcp.upstreams`,
+        `mcp plugin: project lists server ${JSON.stringify(entry.name)} but it is not declared under plugins.mcp.upstreams (user or project)`,
       );
     }
   }
@@ -254,34 +271,50 @@ done
 }
 
 /**
- * Refresh the gateway's tenant table from a sandbox snapshot, keyed on
- * each sandbox's `plugins.mcp.servers`. A config-load failure for any
- * one sandbox is logged and that sandbox contributes no tenant entry —
- * one bad sandbox.json must not poison the whole gateway.
+ * Per-sandbox `plugins.mcp` config snapshot used by both
+ * {@link rebuildTenants} and {@link rebuildUpstreamCatalog}. `null`
+ * means the sandbox's `.aurica/sandbox.json` failed to load — the
+ * sandbox is skipped by both passes so one bad config doesn't poison
+ * the whole gateway.
  */
-async function rebuildTenants(
-  gateway: McpGateway,
+type SandboxMcpConfigs = Map<string, McpProjectConfig | null>;
+
+async function loadSandboxConfigs(
   loadSandboxConfig: SidecarContext['loadSandboxConfig'],
   sandboxes: readonly SandboxEntry[],
-): Promise<void> {
-  const serversByName = new Map<string, readonly CanonicalServerEntry[]>();
+): Promise<SandboxMcpConfigs> {
+  const out: SandboxMcpConfigs = new Map();
   await Promise.all(
     sandboxes.map(async (sandbox) => {
       try {
         const cfg = await loadSandboxConfig(sandbox.projectDir);
         const mcp = (cfg.plugins as { mcp?: McpProjectConfig | undefined }).mcp;
-        serversByName.set(
-          sandbox.name,
-          normalizeServerEntries(mcp?.servers ?? []),
-        );
+        out.set(sandbox.name, mcp ?? null);
       } catch (err) {
         logger.error(
           `mcp-gateway: failed to load ${sandbox.name}'s sandbox.json: ${errorMessage(err)}`,
         );
-        serversByName.set(sandbox.name, []);
+        out.set(sandbox.name, null);
       }
     }),
   );
+  return out;
+}
+
+/**
+ * Refresh the gateway's tenant table from a sandbox snapshot, keyed on
+ * each sandbox's `plugins.mcp.servers`.
+ */
+function rebuildTenants(
+  gateway: McpGateway,
+  sandboxConfigs: SandboxMcpConfigs,
+  sandboxes: readonly SandboxEntry[],
+): void {
+  const serversByName = new Map<string, readonly CanonicalServerEntry[]>();
+  for (const sandbox of sandboxes) {
+    const mcp = sandboxConfigs.get(sandbox.name) ?? null;
+    serversByName.set(sandbox.name, normalizeServerEntries(mcp?.servers ?? []));
+  }
   const tenants: TenantEntry[] = McpGateway.buildTenants(
     sandboxes,
     (sandbox) => serversByName.get(sandbox.name) ?? [],
@@ -293,19 +326,29 @@ async function rebuildTenants(
 
 /**
  * Refresh the forwarder's upstream catalog from the user-level
- * `plugins.mcp.upstreams` block. On config-load failure the catalog is
- * cleared and every MCP request gets a structured "no upstream" error
- * until the config is fixed — a malformed user config must not bring
- * the gateway down.
+ * `plugins.mcp.upstreams` block + every sandbox's project-level
+ * `plugins.mcp.upstreams`. On user-config load failure the catalog is
+ * cleared — a malformed user config must not bring the gateway down.
+ *
+ * Merge semantics:
+ * - user-level entries are the base catalog;
+ * - each sandbox's project-level entries are layered over them by
+ *   {@link mergeUpstreamCatalogs} (project wins field-by-field on
+ *   name collision);
+ * - if two sandboxes declare the same upstream name with **different**
+ *   definitions, the gateway logs a warning and keeps the first one
+ *   seen (later collisions are dropped). A global catalog can't hold
+ *   two different definitions of the same name.
  */
 async function rebuildUpstreamCatalog(
   forwarder: McpForwarder,
   loadUserConfig: SidecarContext['loadUserConfig'],
+  sandboxConfigs: SandboxMcpConfigs,
 ): Promise<void> {
-  let mcp: McpUserConfig;
+  let userMcp: McpUserConfig;
   try {
     const userConfig = await loadUserConfig();
-    mcp = readMcpUserConfig(userConfig);
+    userMcp = readMcpUserConfig(userConfig);
   } catch (err) {
     logger.error(
       `mcp-gateway: failed to load user config: ${errorMessage(err)}`,
@@ -313,14 +356,81 @@ async function rebuildUpstreamCatalog(
     forwarder.setCatalog(new Map());
     return;
   }
+
+  // Each sandbox sees user + its own project upstreams merged. Across
+  // sandboxes, project upstreams union into the gateway's single
+  // catalog; we resolve cross-sandbox name collisions by sticking with
+  // the first-seen definition and warning on the rest.
+  const resolved = new Map<string, CanonicalMcpUpstream>();
+  const seenFrom = new Map<string, string>();
+
+  // Seed with the user catalog (no project layered yet).
+  for (const [name, entry] of Object.entries(
+    mergeUpstreamCatalogs(userMcp.upstreams, {}),
+  )) {
+    resolved.set(name, entry);
+    seenFrom.set(name, '<user>');
+  }
+
+  for (const [sandboxName, mcp] of sandboxConfigs) {
+    const projectUpstreams = mcp?.upstreams;
+    if (projectUpstreams === undefined) continue;
+    const sandboxView = mergeUpstreamCatalogs(
+      userMcp.upstreams,
+      projectUpstreams,
+    );
+    for (const [name, entry] of Object.entries(sandboxView)) {
+      const existing = resolved.get(name);
+      if (existing === undefined) {
+        resolved.set(name, entry);
+        seenFrom.set(name, sandboxName);
+        continue;
+      }
+      if (!canonicalUpstreamsEqual(existing, entry)) {
+        const firstSeenAt = seenFrom.get(name) ?? '<unknown>';
+        logger.warn(
+          `mcp-gateway: upstream "${name}" defined differently by ${sandboxName} than by ${firstSeenAt}; keeping the ${firstSeenAt} definition`,
+        );
+      }
+    }
+  }
+
   const catalog = new Map<string, UpstreamCatalogEntry>();
-  for (const [name, def] of Object.entries(mcp.upstreams)) {
-    catalog.set(name, {
-      url: def.url,
-      clientMetadata: sidecarOAuthClientMetadata(def),
-    });
+  for (const [name, entry] of resolved) {
+    catalog.set(name, toCatalogEntry(entry));
   }
   forwarder.setCatalog(catalog satisfies UpstreamCatalog);
+}
+
+function toCatalogEntry(entry: CanonicalMcpUpstream): UpstreamCatalogEntry {
+  if (entry.auth.type === 'oauth') {
+    return {
+      url: entry.url,
+      auth: {
+        type: 'oauth',
+        clientMetadata: sidecarOAuthClientMetadata(entry.auth.clientName),
+      },
+    };
+  }
+  return {
+    url: entry.url,
+    auth: { type: 'bearer', tokenSource: entry.auth.tokenSource },
+  };
+}
+
+function canonicalUpstreamsEqual(
+  a: CanonicalMcpUpstream,
+  b: CanonicalMcpUpstream,
+): boolean {
+  if (a.url !== b.url) return false;
+  if (a.auth.type !== b.auth.type) return false;
+  if (a.auth.type === 'oauth' && b.auth.type === 'oauth') {
+    return a.auth.clientName === b.auth.clientName;
+  }
+  if (a.auth.type === 'bearer' && b.auth.type === 'bearer') {
+    return a.auth.tokenSource === b.auth.tokenSource;
+  }
+  return false;
 }
 
 /**

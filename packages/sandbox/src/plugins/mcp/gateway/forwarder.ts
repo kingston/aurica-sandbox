@@ -21,27 +21,46 @@ import {
 import { logger } from '#src/logger.js';
 import { errorMessage } from '#src/utils/error-message.js';
 
+import type { CanonicalToolPolicy } from '../schema.js';
 import { FileOAuthProvider } from './file-oauth-provider.js';
 import { pickHeader } from './http-utils.js';
+import { filterToolsForList, matchToolCall } from './policy.js';
 
 /**
  * Per-upstream configuration the gateway needs to forward MCP traffic.
- * Mirrors the relay shape it replaces so the surrounding plugin doesn't
- * need to know which forwarder strategy is in use.
+ * Discriminated by `auth.type`:
  *
- * `url` is the upstream MCP base URL (e.g.
- * `https://mcp.linear.app/mcp`). `clientMetadata` is the OAuth client
- * metadata used during refresh; it must match what `mcp login`
- * originally registered or the SDK will try to re-register on every
- * refresh.
+ * - `oauth`: the gateway runs the SDK's `auth()` flow + caches tokens via
+ *   {@link FileOAuthProvider}. `clientMetadata` must match what `mcp
+ *   login` originally registered or the SDK re-registers the client on
+ *   every refresh.
+ * - `bearer`: the gateway resolves `tokenSource` via the configured
+ *   credential cache and stamps `Authorization: Bearer <resolved>` onto
+ *   every outbound MCP request. No OAuth, no `mcp login`. Right for
+ *   PAT-style static credentials (GitHub PATs, internal service tokens).
  */
-export interface UpstreamCatalogEntry {
-  url: string;
-  clientMetadata: OAuthClientMetadata;
-}
+export type UpstreamCatalogEntry =
+  | {
+      url: string;
+      auth: { type: 'oauth'; clientMetadata: OAuthClientMetadata };
+    }
+  | {
+      url: string;
+      auth: { type: 'bearer'; tokenSource: string };
+    };
 
 /** Map of upstream name → upstream config. See {@link UpstreamCatalogEntry}. */
 export type UpstreamCatalog = ReadonlyMap<string, UpstreamCatalogEntry>;
+
+/**
+ * Subset of {@link CredentialCache} the forwarder depends on. Lets the
+ * sidecar pass in its own cache (so PAT lookups are shared with the
+ * proxy's `replace-header` resolutions) without dragging the whole
+ * class into the test surface.
+ */
+export interface BearerTokenResolver {
+  resolve(rawSource: string): Promise<string>;
+}
 
 /** Options for {@link McpForwarder}. */
 export interface McpForwarderOptions {
@@ -58,6 +77,14 @@ export interface McpForwarderOptions {
    * proxy's lifetime.
    */
   sessionIdleMs?: number;
+  /**
+   * Resolver used by `bearer`-auth upstreams to expand a credential
+   * source (`env:GH_PAT`, `gh-token`, …) into a token string. Required
+   * when any `bearer`-auth upstream is registered; calls fail loudly
+   * otherwise. The sidecar typically passes the same
+   * {@link CredentialCache} instance the host proxy uses.
+   */
+  bearerTokenResolver?: BearerTokenResolver;
 }
 
 /**
@@ -71,7 +98,8 @@ export interface McpForwarderOptions {
 interface SessionRecord {
   tenantName: string;
   serverName: string;
-  enabledTools: readonly string[] | undefined;
+  policies: readonly CanonicalToolPolicy[];
+  defaultAction: 'allow' | 'block';
   // eslint-disable-next-line @typescript-eslint/no-deprecated
   server: Server;
   transport: StreamableHTTPServerTransport;
@@ -87,13 +115,24 @@ interface SessionRecord {
  * `connectPromise` deduplicates concurrent first-request connects;
  * `client` is non-null once the connect resolves.
  */
-interface UpstreamRecord {
+interface OAuthUpstreamRecord {
+  authType: 'oauth';
   url: string;
   clientMetadata: OAuthClientMetadata;
   provider: FileOAuthProvider;
   client: Client | null;
   connectPromise: Promise<void> | null;
 }
+
+interface BearerUpstreamRecord {
+  authType: 'bearer';
+  url: string;
+  tokenSource: string;
+  client: Client | null;
+  connectPromise: Promise<void> | null;
+}
+
+type UpstreamRecord = OAuthUpstreamRecord | BearerUpstreamRecord;
 
 /**
  * Authenticated request context the gateway hands to
@@ -104,7 +143,8 @@ interface UpstreamRecord {
 export interface ForwardContext {
   tenantName: string;
   serverName: string;
-  enabledTools: readonly string[] | undefined;
+  policies: readonly CanonicalToolPolicy[];
+  defaultAction: 'allow' | 'block';
 }
 
 /**
@@ -147,11 +187,13 @@ export class McpForwarder {
   readonly #sessions = new Map<string, SessionRecord>();
   readonly #credentialsPath: string | undefined;
   readonly #sessionIdleMs: number;
+  readonly #bearerTokenResolver: BearerTokenResolver | undefined;
   #sweeper: NodeJS.Timeout | null = null;
 
   constructor(opts: McpForwarderOptions = {}) {
     this.#credentialsPath = opts.credentialsPath;
     this.#sessionIdleMs = opts.sessionIdleMs ?? DEFAULT_SESSION_IDLE_MS;
+    this.#bearerTokenResolver = opts.bearerTokenResolver;
   }
 
   /**
@@ -174,11 +216,10 @@ export class McpForwarder {
       }
     }
     for (const name of toDelete) this.#upstreams.delete(name);
-    for (const [id, session] of this.#sessions) {
-      if (!catalog.has(session.serverName)) {
-        this.#dropSession(id, 'upstream removed from catalog');
-      }
-    }
+    this.#dropSessionsWhere(
+      (s) => !catalog.has(s.serverName),
+      'upstream removed from catalog',
+    );
   }
 
   /**
@@ -282,10 +323,21 @@ export class McpForwarder {
 
   #sweep(): void {
     const cutoff = Date.now() - this.#sessionIdleMs;
+    this.#dropSessionsWhere((s) => s.lastActive < cutoff, 'idle timeout');
+  }
+
+  /**
+   * Drop every session for which `predicate` is true. Single chokepoint
+   * for session eviction so cleanup semantics (logging, transport close,
+   * map removal) stay identical across callers (catalog reload + idle
+   * sweep).
+   */
+  #dropSessionsWhere(
+    predicate: (session: SessionRecord) => boolean,
+    reason: string,
+  ): void {
     for (const [id, session] of this.#sessions) {
-      if (session.lastActive < cutoff) {
-        this.#dropSession(id, 'idle timeout');
-      }
+      if (predicate(session)) this.#dropSession(id, reason);
     }
   }
 
@@ -316,7 +368,8 @@ export class McpForwarder {
     const record: SessionRecord = {
       tenantName: ctx.tenantName,
       serverName: ctx.serverName,
-      enabledTools: ctx.enabledTools,
+      policies: ctx.policies,
+      defaultAction: ctx.defaultAction,
       server,
       // Filled in on the next line; `record` itself is only read inside
       // the SDK's deferred `onsessioninitialized` callback, which fires
@@ -389,7 +442,11 @@ export class McpForwarder {
       throw err;
     }
     const upstreamResult = await upstream.listTools();
-    const filtered = filterTools(upstreamResult.tools, ctx.enabledTools);
+    const filtered = filterToolsForList(
+      upstreamResult.tools,
+      ctx.policies,
+      ctx.defaultAction,
+    );
     return { ...upstreamResult, tools: filtered };
   }
 
@@ -397,18 +454,11 @@ export class McpForwarder {
     ctx: ForwardContext,
     params: { name: string; arguments?: Record<string, unknown> | undefined },
   ): Promise<CallToolResult> {
-    if (
-      ctx.enabledTools !== undefined &&
-      !ctx.enabledTools.includes(params.name)
-    ) {
+    const decision = matchToolCall(ctx.policies, ctx.defaultAction, params);
+    if (!decision.allow) {
       return {
         isError: true,
-        content: [
-          {
-            type: 'text',
-            text: `tool ${params.name} is not enabled for this sandbox`,
-          },
-        ],
+        content: [{ type: 'text', text: decision.reason }],
       };
     }
     let upstream: Client;
@@ -463,25 +513,34 @@ export class McpForwarder {
       );
     }
 
-    const provider = new FileOAuthProvider({
-      upstream: name,
-      redirectUrl: 'http://127.0.0.1/unused',
-      clientMetadata: entry.clientMetadata,
-      onAuthorizationUrl: () => {
-        throw new UpstreamLoginRequiredError(
-          name,
-          `${name} requires interactive authorization`,
-        );
-      },
-      credentialsPath: this.#credentialsPath,
-    });
-    const record: UpstreamRecord = {
-      url: entry.url,
-      clientMetadata: entry.clientMetadata,
-      provider,
-      client: null,
-      connectPromise: null,
-    };
+    const record: UpstreamRecord =
+      entry.auth.type === 'oauth'
+        ? {
+            authType: 'oauth',
+            url: entry.url,
+            clientMetadata: entry.auth.clientMetadata,
+            provider: new FileOAuthProvider({
+              upstream: name,
+              redirectUrl: 'http://127.0.0.1/unused',
+              clientMetadata: entry.auth.clientMetadata,
+              onAuthorizationUrl: () => {
+                throw new UpstreamLoginRequiredError(
+                  name,
+                  `${name} requires interactive authorization`,
+                );
+              },
+              credentialsPath: this.#credentialsPath,
+            }),
+            client: null,
+            connectPromise: null,
+          }
+        : {
+            authType: 'bearer',
+            url: entry.url,
+            tokenSource: entry.auth.tokenSource,
+            client: null,
+            connectPromise: null,
+          };
     this.#upstreams.set(name, record);
     record.connectPromise = this.#connectUpstream(name, record);
     await record.connectPromise;
@@ -496,6 +555,17 @@ export class McpForwarder {
   }
 
   async #connectUpstream(name: string, record: UpstreamRecord): Promise<void> {
+    if (record.authType === 'oauth') {
+      await this.#connectOAuthUpstream(name, record);
+      return;
+    }
+    await this.#connectBearerUpstream(name, record);
+  }
+
+  async #connectOAuthUpstream(
+    name: string,
+    record: OAuthUpstreamRecord,
+  ): Promise<void> {
     // The SDK's `Client` doesn't expose token state directly, so we
     // probe via the provider first: a missing token is a definitive
     // "needs login" signal and short-circuits the connect attempt.
@@ -523,6 +593,44 @@ export class McpForwarder {
     const transport = new StreamableHTTPClientTransport(new URL(record.url), {
       authProvider: record.provider,
     });
+    await this.#bindClient(name, record, transport);
+  }
+
+  async #connectBearerUpstream(
+    name: string,
+    record: BearerUpstreamRecord,
+  ): Promise<void> {
+    if (this.#bearerTokenResolver === undefined) {
+      // Static-auth upstreams need a resolver to expand `env:...` etc.
+      // Misconfiguration on the sidecar side — fail loudly so it
+      // surfaces in the proxy log on first call.
+      throw new UpstreamLoginRequiredError(
+        name,
+        `${name} is configured as bearer-auth but the gateway was not given a credential resolver; this is a programming error`,
+      );
+    }
+    let token: string;
+    try {
+      token = await this.#bearerTokenResolver.resolve(record.tokenSource);
+    } catch (err) {
+      throw new UpstreamLoginRequiredError(
+        name,
+        `failed to resolve credential ${record.tokenSource} for ${name}: ${errorMessage(err)}`,
+      );
+    }
+    const transport = new StreamableHTTPClientTransport(new URL(record.url), {
+      requestInit: {
+        headers: { Authorization: `Bearer ${token}` },
+      },
+    });
+    await this.#bindClient(name, record, transport);
+  }
+
+  async #bindClient(
+    name: string,
+    record: UpstreamRecord,
+    transport: StreamableHTTPClientTransport,
+  ): Promise<void> {
     const client = new Client({
       name: 'aurica-sandbox-gateway',
       version: '0.1.0',
@@ -539,21 +647,10 @@ export class McpForwarder {
       );
     }
     record.client = client;
-    logger.debug(`mcp-forwarder: upstream ${name} connected`);
+    logger.debug(
+      `mcp-forwarder: upstream ${name} connected (auth=${record.authType})`,
+    );
   }
-}
-
-/**
- * Whether a tool name passes the per-sandbox ACL. `undefined` means
- * "everything allowed" (the bare-string form of the project config).
- */
-function filterTools<T extends { name: string }>(
-  tools: T[],
-  enabledTools: readonly string[] | undefined,
-): T[] {
-  if (enabledTools === undefined) return tools;
-  const allow = new Set(enabledTools);
-  return tools.filter((t) => allow.has(t.name));
 }
 
 function respondJson(res: ServerResponse, status: number, body: unknown): void {

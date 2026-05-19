@@ -9,6 +9,7 @@ import type {
   VMExec,
 } from '#src/vm/types.js';
 
+import { orbBootstrapScript } from './bootstrap-script.js';
 import { discoverOrbBridgeIp } from './bridge-ip.js';
 import { createOrbExec } from './init.js';
 
@@ -161,6 +162,8 @@ export const orbProvider: SandboxVMProvider = {
   createExec(name: string, defaultUser: string): VMExec {
     return createOrbExec(name, defaultUser);
   },
+
+  bootstrapScript: orbBootstrapScript,
 
   /**
    * Forward `argv` into an OrbStack VM via `orbctl run -m <name> -e K=V …`

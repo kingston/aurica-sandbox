@@ -9,18 +9,20 @@ import { logger } from '#src/logger.js';
 import type { SandboxEntry } from '#src/state/index.js';
 import { errorMessage } from '#src/utils/error-message.js';
 
+import type { CanonicalToolPolicy } from '../schema.js';
 import type { McpForwarder } from './forwarder.js';
 import { pickHeader } from './http-utils.js';
 
 /**
- * Per-sandbox-per-server entry. Captures both the routing key (server
- * name) and the per-sandbox tool ACL surfaced to the forwarder's
- * `tools/list` filter. `tools: undefined` means "all tools" (the bare
- * string form in project config); `tools: []` means "no tools".
+ * Per-sandbox-per-server entry. Carries the routing key (server name)
+ * plus the per-sandbox policy list + `defaultAction` the forwarder
+ * evaluates against `tools/list` and `tools/call`. The shape mirrors
+ * {@link CanonicalServerEntry} after normalization.
  */
 export interface TenantServerEntry {
   name: string;
-  tools: readonly string[] | undefined;
+  policies: readonly CanonicalToolPolicy[];
+  defaultAction: 'allow' | 'block';
 }
 
 /**
@@ -331,7 +333,8 @@ export class McpGateway {
         {
           tenantName: id.tenant.name,
           serverName: id.server,
-          enabledTools: tenantServer.tools,
+          policies: tenantServer.policies,
+          defaultAction: tenantServer.defaultAction,
         },
         req,
         res,

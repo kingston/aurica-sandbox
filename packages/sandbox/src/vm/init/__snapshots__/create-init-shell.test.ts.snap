@@ -1,6 +1,6 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
-exports[`createInitShell > produces the expected bootstrap script with a single plugin snippet 1`] = `
+exports[`createInitShell > produces the expected bootstrap script with a provider snippet 1`] = `
 "#!/bin/bash
 set -euo pipefail
 IFS=$'\\n\\t'
@@ -20,19 +20,148 @@ apt-get install -y --no-install-recommends \\
 # already exists, and re-chowning is harmless.
 install -d -o sandbox -g sandbox -m 0755 /workspaces
 
-# 2. Strip OrbStack's passwordless-sudo grant for the default user.
-#    OrbStack ships /etc/sudoers.d/orbstack with a passwordless rule
-#    for the default user, which would let any process inside the
-#    sandbox escalate to root and tear down the iptables egress
-#    lockdown installed at the end of this script. We remove the rule
-#    entirely instead of requiring a password: there is no in-VM path
-#    to root at all. The host-side escape hatch (\`orb -m <name> -u root\`)
-#    is unaffected and remains the only way for an operator to act as
-#    root. Guarded on file existence so non-OrbStack providers stay
-#    correct.
-if [ -f /etc/sudoers.d/orbstack ]; then
-  rm -f /etc/sudoers.d/orbstack
+# 2. Provider bootstrap. Provider-specific quirks (e.g. OrbStack's
+#    passwordless-sudo removal) that don't belong in the cross-provider
+#    init script. Runs with the network still open, before plugins.
+# fake provider
+echo provider-bootstrap
+
+# 4. Install the proxy CA so MITM'd HTTPS validates inside the VM. mockttp
+#    intercepts every HTTPS request to apply the per-sandbox allowlist and
+#    credential substitution; without trusting this CA, every HTTPS call
+#    fails with a self-signed-cert error. Single-quoted heredoc terminator
+#    suppresses parameter expansion inside the cert body.
+cat > /usr/local/share/ca-certificates/aurica-sandbox.crt <<'EOF'
+-----BEGIN CERTIFICATE-----
+MIIBkTCB+wIJAKHHIgIIsgQyMA0GCSqGSIb3DQEBCwUAMBQxEjAQBgNVBAMMCWZp
+eHR1cmVDQTAeFw0yNTAxMDEwMDAwMDBaFw0zNTAxMDEwMDAwMDBaMBQxEjAQBgNV
+BAMMCWZpeHR1cmVDQTBcMA0GCSqGSIb3DQEBAQUAA0sAMEgCQQC1FIXTUREVI3Ec
+0pE6PpGDNKfP5LLxZxPyZbPYx8XR3PcPwfYFx9c5gK+sR2IpzkR7LsMI3z4JCUaT
+0eF1QZqpAgMBAAEwDQYJKoZIhvcNAQELBQADQQABFAKEVIXTUREVI3Ec0pE6PpGD
+NKfP5LLxZxPyZbPYx8XR3PcPwfYFx9c5gK+sR2IpzkR7LsMI3z4JCUaT0eF1QZqp
+-----END CERTIFICATE-----
+
+EOF
+update-ca-certificates >/dev/null
+
+# 5. Proxy env for post-lockdown shells. /etc/environment is read by PAM at
+#    login, so subsequent commands (apt, git, mise install, pnpm) pick up
+#    the proxy without any extra plumbing. Apps that honor these env vars
+#    use a faster forward-proxy path; apps that ignore them are still
+#    routed through the proxy by the DNAT rules in step 6 (mockttp peeks
+#    SNI / Host header to recover the hostname for the allowlist).
+#    NODE_EXTRA_CA_CERTS makes Node.js (and pkg-bundled binaries like
+#    pnpm) trust the proxy CA in addition to its built-in roots, so
+#    https registry fetches don't fail with "self-signed certificate in
+#    certificate chain".
+cat > /etc/environment <<EOF
+HTTP_PROXY=http://192.168.139.3:9999
+HTTPS_PROXY=http://192.168.139.3:9999
+http_proxy=http://192.168.139.3:9999
+https_proxy=http://192.168.139.3:9999
+NO_PROXY=localhost,127.0.0.1,192.168.139.3
+no_proxy=localhost,127.0.0.1,192.168.139.3
+NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/aurica-sandbox.crt
+EOF
+
+# 6. iptables: default DROP on OUTPUT for both IPv4 and IPv6, allow loopback,
+#    established, DNS, and the proxy IP:port. Transparent proxying is done
+#    by DNAT'ing tcp/80 and tcp/443 to the proxy: mockttp natively handles
+#    transparent traffic by peeking the TLS ClientHello SNI (HTTPS) and
+#    the Host header (HTTP) to reconstruct the original destination — no
+#    in-VM SNI shim needed. The '! -d <proxy>' exception prevents a NAT
+#    loop on the proxy's own port. Resolve the proxy hostname now so the
+#    rules pin the IP rather than relying on DNS at packet time. 'getent
+#    ahosts' returns every address (both families); IPv4-literal callers
+#    like OrbStack produce a single rule, hostname callers like Lima cover
+#    both.
+PROXY_IPS=$(getent ahosts 192.168.139.3 | awk '{ print $1 }' | sort -u)
+if [ -z "$PROXY_IPS" ]; then
+  echo "failed to resolve 192.168.139.3" >&2
+  exit 1
 fi
+
+# Expose the proxy's IPv4 to plugin and user init scripts via
+# /etc/environment. Plugins that need to address the host (e.g. the MCP
+# plugin's /etc/hosts entry for aurica.mcp.internal) read $AURICA_HOST_IP
+# instead of re-resolving the proxy hostname themselves. Skipped on
+# v6-only environments — the transparent NAT below is IPv4-only, so a
+# v6-only host has no usable address from inside the VM.
+PROXY_IPV4=$(printf '%s\\n' "$PROXY_IPS" | awk '!/:/ { print; exit }')
+if [ -n "$PROXY_IPV4" ]; then
+  echo "AURICA_HOST_IP=$PROXY_IPV4" >> /etc/environment
+fi
+
+# Apply the same skeleton (flush, lo, established, DNS) on both stacks.
+for ipt in iptables ip6tables; do
+  $ipt -F OUTPUT
+  $ipt -A OUTPUT -o lo -j ACCEPT
+  $ipt -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  $ipt -A OUTPUT -p udp --dport 53 -j ACCEPT
+  $ipt -A OUTPUT -p tcp --dport 53 -j ACCEPT
+done
+
+# Allow outbound to the proxy on every resolved family. This covers both
+# the env-var forward-proxy path (clients connect to <proxyIP>:<proxyPort>
+# directly) and the DNAT'd transparent path (post-NAT, the destination is
+# also <proxyIP>:<proxyPort>). Loop family-aware so hostname-passing
+# providers (Lima) get covered too.
+while IFS= read -r ip; do
+  case "$ip" in
+    *:*) ip6tables -A OUTPUT -p tcp -d "$ip" --dport 9999 -j ACCEPT ;;
+    *)   iptables  -A OUTPUT -p tcp -d "$ip" --dport 9999 -j ACCEPT ;;
+  esac
+done <<< "$PROXY_IPS"
+
+# Transparent NAT: rewrite tcp/80 and tcp/443 destinations to the proxy.
+# The '! -d <proxyIP>' exception keeps proxy-bound traffic from being
+# re-DNAT'd into itself. Only IPv4 here: OrbStack's bridge IP is IPv4,
+# IPv6 stays default-DROP.
+iptables -t nat -F OUTPUT
+while IFS= read -r ip; do
+  case "$ip" in
+    *:*) ;;  # IPv6 — no transparent path; v6 traffic is DROPped by policy
+    *)
+      iptables -t nat -A OUTPUT -p tcp ! -d "$ip" --dport 80  -j DNAT --to-destination "$ip:9999"
+      iptables -t nat -A OUTPUT -p tcp ! -d "$ip" --dport 443 -j DNAT --to-destination "$ip:9999"
+      ;;
+  esac
+done <<< "$PROXY_IPS"
+
+iptables  -P OUTPUT DROP
+ip6tables -P OUTPUT DROP
+
+# Surface a clear error on disallowed traffic instead of letting connects
+# hang until timeout. Default policy is still DROP — this just makes the
+# failure mode visible to the caller.
+iptables  -A OUTPUT -j REJECT --reject-with icmp-admin-prohibited
+ip6tables -A OUTPUT -j REJECT --reject-with icmp6-adm-prohibited
+
+mkdir -p /etc/iptables
+iptables-save  > /etc/iptables/rules.v4
+ip6tables-save > /etc/iptables/rules.v6
+"
+`;
+
+exports[`createInitShell > produces the expected bootstrap script with a single plugin snippet 1`] = `
+"#!/bin/bash
+set -euo pipefail
+IFS=$'\\n\\t'
+trap 'echo "ERROR: \\"$BASH_COMMAND\\" failed at line $LINENO (exit $?)" >&2' ERR
+
+export DEBIAN_FRONTEND=noninteractive
+
+# 1. Base packages. Network must be open — iptables lockdown comes last.
+apt-get update -y
+apt-get install -y --no-install-recommends \\
+  git iptables iptables-persistent ca-certificates curl sudo gnupg
+
+# Standard project workspace. Plugins that check out repos (today: github,
+# when a repo has \`checkout: true\`) clone into \`/workspaces/<repo>\` as the
+# default user, so the directory must exist and be writable before
+# post-lockdown plugin commands fire. Idempotent: \`-p\` no-ops if the dir
+# already exists, and re-chowning is harmless.
+install -d -o sandbox -g sandbox -m 0755 /workspaces
 
 # 3. Plugin bootstrap snippets. Run with the network still open;
 #    iptables lockdown comes last.
@@ -175,20 +304,6 @@ apt-get install -y --no-install-recommends \\
 # post-lockdown plugin commands fire. Idempotent: \`-p\` no-ops if the dir
 # already exists, and re-chowning is harmless.
 install -d -o sandbox -g sandbox -m 0755 /workspaces
-
-# 2. Strip OrbStack's passwordless-sudo grant for the default user.
-#    OrbStack ships /etc/sudoers.d/orbstack with a passwordless rule
-#    for the default user, which would let any process inside the
-#    sandbox escalate to root and tear down the iptables egress
-#    lockdown installed at the end of this script. We remove the rule
-#    entirely instead of requiring a password: there is no in-VM path
-#    to root at all. The host-side escape hatch (\`orb -m <name> -u root\`)
-#    is unaffected and remains the only way for an operator to act as
-#    root. Guarded on file existence so non-OrbStack providers stay
-#    correct.
-if [ -f /etc/sudoers.d/orbstack ]; then
-  rm -f /etc/sudoers.d/orbstack
-fi
 
 # 3. Plugin bootstrap snippets. Run with the network still open;
 #    iptables lockdown comes last.
@@ -334,20 +449,6 @@ apt-get install -y --no-install-recommends \\
 # post-lockdown plugin commands fire. Idempotent: \`-p\` no-ops if the dir
 # already exists, and re-chowning is harmless.
 install -d -o sandbox -g sandbox -m 0755 /workspaces
-
-# 2. Strip OrbStack's passwordless-sudo grant for the default user.
-#    OrbStack ships /etc/sudoers.d/orbstack with a passwordless rule
-#    for the default user, which would let any process inside the
-#    sandbox escalate to root and tear down the iptables egress
-#    lockdown installed at the end of this script. We remove the rule
-#    entirely instead of requiring a password: there is no in-VM path
-#    to root at all. The host-side escape hatch (\`orb -m <name> -u root\`)
-#    is unaffected and remains the only way for an operator to act as
-#    root. Guarded on file existence so non-OrbStack providers stay
-#    correct.
-if [ -f /etc/sudoers.d/orbstack ]; then
-  rm -f /etc/sudoers.d/orbstack
-fi
 
 # 4. Install the proxy CA so MITM'd HTTPS validates inside the VM. mockttp
 #    intercepts every HTTPS request to apply the per-sandbox allowlist and

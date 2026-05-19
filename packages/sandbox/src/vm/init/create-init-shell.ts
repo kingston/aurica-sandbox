@@ -39,9 +39,25 @@ export interface InitShellOptions {
    */
   caCertPem: string;
   /**
+   * Pre-lockdown shell snippet contributed by the VM provider (OrbStack,
+   * Lima, …). Runs as root with the network open, right after base apt
+   * packages and before any plugin bootstrap. Empty string when the
+   * provider has nothing to contribute.
+   *
+   * Used for provider-specific quirks that don't belong in the
+   * cross-provider init script — e.g. OrbStack ships
+   * `/etc/sudoers.d/orbstack` granting passwordless sudo to the default
+   * user, which the OrbStack provider removes here.
+   *
+   * Trusted code (it ships in the sandbox tool's source). The caller is
+   * responsible for validating any inputs interpolated into the snippet.
+   */
+  providerBootstrap: string;
+  /**
    * Pre-lockdown shell snippet contributed by the project's plugins. Runs
-   * as root with the network open, between base apt packages and the
-   * iptables lockdown. Empty string when no plugin contributed one.
+   * as root with the network open, after the provider bootstrap and
+   * before the iptables lockdown. Empty string when no plugin contributed
+   * one.
    *
    * Trusted code (it ships in the sandbox tool's source). The caller is
    * responsible for validating any inputs interpolated into the snippet.
@@ -55,9 +71,8 @@ export interface InitShellOptions {
  *
  *  1. apt-install baseline tools (git, iptables, iptables-persistent,
  *     ca-certificates, curl, sudo, gnupg)
- *  2. remove `/etc/sudoers.d/orbstack` so the default user has no sudo
- *     entry at all — there is no in-VM path to root, only the host-side
- *     `orb -m <name> -u root` escape hatch
+ *  2. run the provider bootstrap snippet (provider-specific quirks like
+ *     OrbStack's passwordless-sudo removal) — skipped cleanly when empty
  *  3. run the plugin bootstrap snippet (e.g. install Docker, install mise) —
  *     skipped cleanly when empty
  *  4. install the proxy CA into `/usr/local/share/ca-certificates/` and run
@@ -116,7 +131,17 @@ export function createInitShell(opts: InitShellOptions): string {
     );
   }
 
-  const { proxyHost, proxyPort, caCertPem, pluginBootstrap } = opts;
+  const {
+    proxyHost,
+    proxyPort,
+    caCertPem,
+    providerBootstrap,
+    pluginBootstrap,
+  } = opts;
+
+  const providerSection = providerBootstrap.trim()
+    ? `\n# 2. Provider bootstrap. Provider-specific quirks (e.g. OrbStack's\n#    passwordless-sudo removal) that don't belong in the cross-provider\n#    init script. Runs with the network still open, before plugins.\n${providerBootstrap}\n`
+    : '';
 
   const pluginSection = pluginBootstrap.trim()
     ? `\n# 3. Plugin bootstrap snippets. Run with the network still open;\n#    iptables lockdown comes last.\n${pluginBootstrap}\n`
@@ -140,21 +165,7 @@ apt-get install -y --no-install-recommends \\
 # post-lockdown plugin commands fire. Idempotent: \`-p\` no-ops if the dir
 # already exists, and re-chowning is harmless.
 install -d -o ${opts.user} -g ${opts.user} -m 0755 /workspaces
-
-# 2. Strip OrbStack's passwordless-sudo grant for the default user.
-#    OrbStack ships /etc/sudoers.d/orbstack with a passwordless rule
-#    for the default user, which would let any process inside the
-#    sandbox escalate to root and tear down the iptables egress
-#    lockdown installed at the end of this script. We remove the rule
-#    entirely instead of requiring a password: there is no in-VM path
-#    to root at all. The host-side escape hatch (\`orb -m <name> -u root\`)
-#    is unaffected and remains the only way for an operator to act as
-#    root. Guarded on file existence so non-OrbStack providers stay
-#    correct.
-if [ -f /etc/sudoers.d/orbstack ]; then
-  rm -f /etc/sudoers.d/orbstack
-fi
-${pluginSection}
+${providerSection}${pluginSection}
 # 4. Install the proxy CA so MITM'd HTTPS validates inside the VM. mockttp
 #    intercepts every HTTPS request to apply the per-sandbox allowlist and
 #    credential substitution; without trusting this CA, every HTTPS call

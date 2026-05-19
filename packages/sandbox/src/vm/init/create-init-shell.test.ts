@@ -19,6 +19,7 @@ describe('createInitShell', () => {
       proxyHost: '192.168.139.3',
       proxyPort: 9999,
       caCertPem: FIXTURE_CA_PEM,
+      providerBootstrap: '',
       pluginBootstrap: '',
     });
     expect(script).toMatchSnapshot();
@@ -30,6 +31,7 @@ describe('createInitShell', () => {
       proxyHost: '192.168.139.3',
       proxyPort: 9999,
       caCertPem: FIXTURE_CA_PEM,
+      providerBootstrap: '',
       pluginBootstrap: `# fake plugin
 echo hello`,
     });
@@ -42,11 +44,25 @@ echo hello`,
       proxyHost: '192.168.139.3',
       proxyPort: 9999,
       caCertPem: FIXTURE_CA_PEM,
+      providerBootstrap: '',
       pluginBootstrap: `# fake plugin a
 echo a
 
 # fake plugin b
 echo b`,
+    });
+    expect(script).toMatchSnapshot();
+  });
+
+  it('produces the expected bootstrap script with a provider snippet', () => {
+    const script = createInitShell({
+      user: 'sandbox',
+      proxyHost: '192.168.139.3',
+      proxyPort: 9999,
+      caCertPem: FIXTURE_CA_PEM,
+      providerBootstrap: `# fake provider
+echo provider-bootstrap`,
+      pluginBootstrap: '',
     });
     expect(script).toMatchSnapshot();
   });
@@ -58,6 +74,7 @@ echo b`,
         proxyHost: 'host.orb.internal',
         proxyPort: 9999,
         caCertPem: FIXTURE_CA_PEM,
+        providerBootstrap: '',
         pluginBootstrap: '',
       }),
     ).toThrow(/user/);
@@ -70,6 +87,7 @@ echo b`,
         proxyHost: 'host.orb.internal; echo pwned',
         proxyPort: 9999,
         caCertPem: FIXTURE_CA_PEM,
+        providerBootstrap: '',
         pluginBootstrap: '',
       }),
     ).toThrow(/proxyHost/);
@@ -82,6 +100,7 @@ echo b`,
         proxyHost: 'host.orb.internal',
         proxyPort: 0,
         caCertPem: FIXTURE_CA_PEM,
+        providerBootstrap: '',
         pluginBootstrap: '',
       }),
     ).toThrow(/proxyPort/);
@@ -91,6 +110,7 @@ echo b`,
         proxyHost: 'host.orb.internal',
         proxyPort: 70_000,
         caCertPem: FIXTURE_CA_PEM,
+        providerBootstrap: '',
         pluginBootstrap: '',
       }),
     ).toThrow(/proxyPort/);
@@ -103,6 +123,7 @@ echo b`,
         proxyHost: 'host.orb.internal',
         proxyPort: 9999,
         caCertPem: '',
+        providerBootstrap: '',
         pluginBootstrap: '',
       }),
     ).toThrow(/caCertPem/);
@@ -115,30 +136,33 @@ echo b`,
         proxyHost: 'host.orb.internal',
         proxyPort: 9999,
         caCertPem: 'not a certificate',
+        providerBootstrap: '',
         pluginBootstrap: '',
       }),
     ).toThrow(/caCertPem/);
   });
 
-  it('removes the OrbStack passwordless-sudo grant', () => {
+  it('interpolates the provider snippet when non-empty', () => {
     const script = createInitShell({
       user: 'sandbox',
       proxyHost: '192.168.139.3',
       proxyPort: 9999,
       caCertPem: FIXTURE_CA_PEM,
+      providerBootstrap: 'echo provider-marker-xyz',
       pluginBootstrap: '',
     });
-    expect(script).toContain('rm -f /etc/sudoers.d/orbstack');
+    expect(script).toContain('echo provider-marker-xyz');
   });
 
-  it('never re-introduces a NOPASSWD rule', () => {
+  it('omits the provider section header when the snippet is empty', () => {
     const script = createInitShell({
       user: 'sandbox',
       proxyHost: '192.168.139.3',
       proxyPort: 9999,
       caCertPem: FIXTURE_CA_PEM,
-      pluginBootstrap: '# fake plugin\necho hello',
+      providerBootstrap: '',
+      pluginBootstrap: '',
     });
-    expect(script).not.toMatch(/NOPASSWD/);
+    expect(script).not.toContain('# 2. Provider bootstrap');
   });
 });

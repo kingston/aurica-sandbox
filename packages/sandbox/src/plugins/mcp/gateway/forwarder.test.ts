@@ -29,10 +29,17 @@ interface FakeUpstreamHandle {
   close: () => Promise<void>;
   /** Last `tools/call` arguments seen, for round-trip assertions. */
   lastCallArgs: () => { name: string; args: unknown } | null;
+  /**
+   * Last `Authorization` request header observed by the upstream HTTP
+   * server. Useful for bearer-auth tests: assert the gateway actually
+   * stamped the resolved token onto the outbound request.
+   */
+  lastAuthHeader: () => string | null;
 }
 
 async function startFakeUpstream(): Promise<FakeUpstreamHandle> {
   let lastCall: { name: string; args: unknown } | null = null;
+  let lastAuth: string | null = null;
   // One transport per session keyed by Mcp-Session-Id, mirroring the
   // example pattern in the SDK docs.
   const sessions = new Map<string, StreamableHTTPServerTransport>();
@@ -46,6 +53,7 @@ async function startFakeUpstream(): Promise<FakeUpstreamHandle> {
     req: http.IncomingMessage,
     res: http.ServerResponse,
   ): Promise<void> {
+    lastAuth = req.headers.authorization ?? null;
     const sid = req.headers['mcp-session-id'];
     const sessionId = Array.isArray(sid) ? sid[0] : sid;
     const chunks: Buffer[] = [];
@@ -131,6 +139,7 @@ async function startFakeUpstream(): Promise<FakeUpstreamHandle> {
         });
       }),
     lastCallArgs: () => lastCall,
+    lastAuthHeader: () => lastAuth,
   };
 }
 
@@ -151,7 +160,14 @@ function catalogEntry(url: string): UpstreamCatalogEntry {
     token_endpoint_auth_method: 'none',
     redirect_uris: ['http://127.0.0.1/unused'],
   };
-  return { url, clientMetadata };
+  return { url, auth: { type: 'oauth', clientMetadata } };
+}
+
+function bearerCatalogEntry(
+  url: string,
+  tokenSource: string,
+): UpstreamCatalogEntry {
+  return { url, auth: { type: 'bearer', tokenSource } };
 }
 
 /**
@@ -167,7 +183,16 @@ interface Harness {
 
 async function harness(
   serverName: string,
-  serverEntry: { name: string; tools: readonly string[] | undefined },
+  serverEntry: {
+    name: string;
+    policies: readonly {
+      tools: readonly string[];
+      arguments:
+        | Readonly<Record<string, string | number | boolean>>
+        | undefined;
+    }[];
+    defaultAction: 'allow' | 'block';
+  },
 ): Promise<Harness> {
   const upstream = await startFakeUpstream();
   const credsPath = await makeTempCreds({
@@ -222,6 +247,12 @@ async function harness(
   };
 }
 
+const allowAll = {
+  name: 'github',
+  policies: [] as const,
+  defaultAction: 'allow' as const,
+};
+
 describe('McpForwarder via McpGateway', () => {
   let h: Harness | undefined;
   afterEach(async () => {
@@ -229,20 +260,24 @@ describe('McpForwarder via McpGateway', () => {
     h = undefined;
   });
 
-  it('exposes the upstream tool list to the guest verbatim when no ACL is set', async () => {
-    h = await harness('github', { name: 'github', tools: undefined });
+  it('exposes the upstream tool list verbatim when defaultAction is allow', async () => {
+    h = await harness('github', allowAll);
     const result = await h.client.listTools();
     expect(result.tools.map((t) => t.name).sort()).toEqual(['count', 'echo']);
   });
 
-  it('filters the tool list to the per-sandbox ACL', async () => {
-    h = await harness('github', { name: 'github', tools: ['echo'] });
+  it('tools/list returns only the union of policy-mentioned tools when default is block', async () => {
+    h = await harness('github', {
+      name: 'github',
+      policies: [{ tools: ['echo'], arguments: undefined }],
+      defaultAction: 'block',
+    });
     const result = await h.client.listTools();
     expect(result.tools.map((t) => t.name)).toEqual(['echo']);
   });
 
   it('forwards tools/call and returns the upstream result', async () => {
-    h = await harness('github', { name: 'github', tools: undefined });
+    h = await harness('github', allowAll);
     const result = await h.client.callTool({
       name: 'echo',
       arguments: { text: 'hello world' },
@@ -254,15 +289,113 @@ describe('McpForwarder via McpGateway', () => {
     });
   });
 
-  it('refuses a tools/call for a tool outside the ACL', async () => {
-    h = await harness('github', { name: 'github', tools: ['echo'] });
+  it('refuses a tools/call for a tool with no matching policy', async () => {
+    h = await harness('github', {
+      name: 'github',
+      policies: [{ tools: ['echo'], arguments: undefined }],
+      defaultAction: 'block',
+    });
     const result = await h.client.callTool({
       name: 'count',
       arguments: { text: 'ignored' },
     });
     expect(result.isError).toBe(true);
-    // The upstream must not have been touched.
+    expect(result.content).toEqual([
+      { type: 'text', text: 'tool count is not allowed for this sandbox' },
+    ]);
     expect(h.upstream.lastCallArgs()).toBeNull();
+  });
+
+  it('allows a tools/call when args satisfy the policy (subset equality)', async () => {
+    h = await harness('github', {
+      name: 'github',
+      policies: [{ tools: ['echo'], arguments: { text: 'hello' } }],
+      defaultAction: 'block',
+    });
+    // Extra arg `flair` is ignored — subset semantics.
+    const result = await h.client.callTool({
+      name: 'echo',
+      arguments: { text: 'hello', flair: '!' },
+    });
+    expect(result.content).toEqual([{ type: 'text', text: 'hello' }]);
+  });
+
+  it('refuses a tools/call when a required arg key is missing, naming the missing key', async () => {
+    h = await harness('github', {
+      name: 'github',
+      policies: [{ tools: ['echo'], arguments: { text: 'hello' } }],
+      defaultAction: 'block',
+    });
+    const result = await h.client.callTool({
+      name: 'echo',
+      arguments: {},
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content).toEqual([
+      {
+        type: 'text',
+        text: 'tool echo call denied: argument "text" is required (expected "hello", but it was missing from the call)',
+      },
+    ]);
+    expect(h.upstream.lastCallArgs()).toBeNull();
+  });
+
+  it('refuses a tools/call when an arg value differs from the policy, reporting expected vs actual', async () => {
+    h = await harness('github', {
+      name: 'github',
+      policies: [{ tools: ['echo'], arguments: { text: 'hello' } }],
+      defaultAction: 'block',
+    });
+    const result = await h.client.callTool({
+      name: 'echo',
+      arguments: { text: 'world' },
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content).toEqual([
+      {
+        type: 'text',
+        text: 'tool echo call denied: argument "text" must equal "hello" (got "world")',
+      },
+    ]);
+    expect(h.upstream.lastCallArgs()).toBeNull();
+  });
+
+  it('reports every mismatched argument in one message when multiple keys are wrong', async () => {
+    h = await harness('github', {
+      name: 'github',
+      policies: [{ tools: ['echo'], arguments: { text: 'hello', flair: '!' } }],
+      defaultAction: 'block',
+    });
+    const result = await h.client.callTool({
+      name: 'echo',
+      arguments: { text: 'world' },
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content).toEqual([
+      {
+        type: 'text',
+        text:
+          'tool echo call denied: argument "text" must equal "hello" (got "world"); ' +
+          'argument "flair" is required (expected "!", but it was missing from the call)',
+      },
+    ]);
+    expect(h.upstream.lastCallArgs()).toBeNull();
+  });
+
+  it('first-match-wins: a later, broader policy catches what an earlier, narrower one rejected', async () => {
+    h = await harness('github', {
+      name: 'github',
+      policies: [
+        { tools: ['echo'], arguments: { text: 'only-this' } },
+        { tools: ['echo'], arguments: undefined },
+      ],
+      defaultAction: 'block',
+    });
+    const result = await h.client.callTool({
+      name: 'echo',
+      arguments: { text: 'whatever' },
+    });
+    expect(result.content).toEqual([{ type: 'text', text: 'whatever' }]);
   });
 });
 
@@ -288,7 +421,7 @@ describe('McpForwarder login-required surfaces', () => {
         name: 'sb-1',
         bearer: 'sb-bearer',
         sourceIp: '127.0.0.1',
-        servers: [{ name: 'github', tools: undefined }],
+        servers: [{ name: 'github', policies: [], defaultAction: 'allow' }],
         enabledServers: ['github'],
       },
     ]);
@@ -322,5 +455,172 @@ describe('McpForwarder login-required surfaces', () => {
     expect(result.tools).toEqual([]);
     expect(result._meta?.['aurica.mcp.error']).toBe('login_required');
     expect(result._meta?.['aurica.mcp.server']).toBe('github');
+  });
+});
+
+describe('McpForwarder bearer-auth upstream', () => {
+  let teardown: (() => Promise<void>) | undefined;
+  afterEach(async () => {
+    await teardown?.();
+    teardown = undefined;
+  });
+
+  /**
+   * Boots a forwarder with a single `bearer`-auth upstream and a
+   * scripted `bearerTokenResolver` so the test can observe whether the
+   * resolver was called and verify the gateway stamped the resolved
+   * token onto the outbound `Authorization` header.
+   */
+  async function boot(opts: {
+    resolver: (rawSource: string) => Promise<string>;
+  }): Promise<{
+    client: Client;
+    upstream: FakeUpstreamHandle;
+  }> {
+    const upstream = await startFakeUpstream();
+    const forwarder = new McpForwarder({
+      bearerTokenResolver: { resolve: opts.resolver },
+    });
+    forwarder.setCatalog(
+      new Map([['github-pat', bearerCatalogEntry(upstream.url, 'env:GH_PAT')]]),
+    );
+    const gateway = new McpGateway({ host: '127.0.0.1', forwarder });
+    const bound = await gateway.listen();
+    gateway.setTenants([
+      {
+        name: 'sb-1',
+        bearer: 'sb-bearer',
+        sourceIp: '127.0.0.1',
+        servers: [{ name: 'github-pat', policies: [], defaultAction: 'allow' }],
+        enabledServers: ['github-pat'],
+      },
+    ]);
+    const transport = new StreamableHTTPClientTransport(
+      new URL(`http://127.0.0.1:${bound.port}/github-pat/mcp`),
+      {
+        requestInit: {
+          headers: {
+            Authorization: 'Bearer sb-bearer',
+            'X-Forwarded-For': '127.0.0.1',
+          },
+        },
+      },
+    );
+    const client = new Client({ name: 'test-client', version: '0.0.1' });
+    await client.connect(
+      transport as unknown as Parameters<typeof client.connect>[0],
+    );
+    teardown = async () => {
+      await client.close();
+      await gateway.close();
+      await forwarder.close();
+      await upstream.close();
+    };
+    return { client, upstream };
+  }
+
+  it('stamps the resolved bearer onto outbound MCP requests, bypassing OAuth', async () => {
+    const calls: string[] = [];
+    const { client, upstream } = await boot({
+      resolver: (src) => {
+        calls.push(src);
+        return Promise.resolve('ghp_test_token');
+      },
+    });
+    const result = await client.callTool({
+      name: 'echo',
+      arguments: { text: 'hi' },
+    });
+    expect(result.content).toEqual([{ type: 'text', text: 'hi' }]);
+    expect(calls).toEqual(['env:GH_PAT']);
+    expect(upstream.lastAuthHeader()).toBe('Bearer ghp_test_token');
+  });
+
+  it('surfaces a login-required-shaped error when the resolver throws', async () => {
+    const { client } = await boot({
+      resolver: () => Promise.reject(new Error('GH_PAT not set')),
+    });
+    const result = await client.listTools();
+    expect(result.tools).toEqual([]);
+    expect(result._meta?.['aurica.mcp.error']).toBe('login_required');
+    expect(String(result._meta?.['aurica.mcp.message'])).toContain(
+      'failed to resolve credential env:GH_PAT',
+    );
+  });
+
+  it('returns an isError tools/call result when the resolver throws, with a host-side login hint', async () => {
+    const { client, upstream } = await boot({
+      resolver: () => Promise.reject(new Error('GH_PAT not set')),
+    });
+    const result = await client.callTool({
+      name: 'echo',
+      arguments: { text: 'hi' },
+    });
+    expect(result.isError).toBe(true);
+    const text = (result.content as { type: string; text: string }[])[0]?.text;
+    expect(text).toContain('failed to resolve credential env:GH_PAT');
+    expect(text).toContain('aurica-sandbox mcp login github-pat');
+    // Upstream must never have been called — the resolver failed before
+    // any outbound request could be made.
+    expect(upstream.lastCallArgs()).toBeNull();
+    expect(upstream.lastAuthHeader()).toBeNull();
+  });
+});
+
+describe('McpForwarder bearer-auth without a credential resolver', () => {
+  let teardown: (() => Promise<void>) | undefined;
+  afterEach(async () => {
+    await teardown?.();
+    teardown = undefined;
+  });
+
+  it('fails loudly when a bearer upstream is configured but no resolver was injected', async () => {
+    const upstream = await startFakeUpstream();
+    // No `bearerTokenResolver` passed — this is the misconfiguration we
+    // want to surface as a clear login_required error rather than a
+    // silent NPE.
+    const forwarder = new McpForwarder();
+    forwarder.setCatalog(
+      new Map([['github-pat', bearerCatalogEntry(upstream.url, 'env:GH_PAT')]]),
+    );
+    const gateway = new McpGateway({ host: '127.0.0.1', forwarder });
+    const bound = await gateway.listen();
+    gateway.setTenants([
+      {
+        name: 'sb-1',
+        bearer: 'sb-bearer',
+        sourceIp: '127.0.0.1',
+        servers: [{ name: 'github-pat', policies: [], defaultAction: 'allow' }],
+        enabledServers: ['github-pat'],
+      },
+    ]);
+    const transport = new StreamableHTTPClientTransport(
+      new URL(`http://127.0.0.1:${bound.port}/github-pat/mcp`),
+      {
+        requestInit: {
+          headers: {
+            Authorization: 'Bearer sb-bearer',
+            'X-Forwarded-For': '127.0.0.1',
+          },
+        },
+      },
+    );
+    const client = new Client({ name: 'test-client', version: '0.0.1' });
+    await client.connect(
+      transport as unknown as Parameters<typeof client.connect>[0],
+    );
+    teardown = async () => {
+      await client.close();
+      await gateway.close();
+      await forwarder.close();
+      await upstream.close();
+    };
+
+    const result = await client.listTools();
+    expect(result.tools).toEqual([]);
+    expect(result._meta?.['aurica.mcp.error']).toBe('login_required');
+    expect(String(result._meta?.['aurica.mcp.message'])).toContain(
+      'was not given a credential resolver',
+    );
   });
 });
