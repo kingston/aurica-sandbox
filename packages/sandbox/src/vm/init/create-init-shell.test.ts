@@ -119,4 +119,26 @@ echo b`,
       }),
     ).toThrow(/caCertPem/);
   });
+
+  it('removes the OrbStack passwordless-sudo grant', () => {
+    const script = createInitShell({
+      user: 'sandbox',
+      proxyHost: '192.168.139.3',
+      proxyPort: 9999,
+      caCertPem: FIXTURE_CA_PEM,
+      pluginBootstrap: '',
+    });
+    expect(script).toContain('rm -f /etc/sudoers.d/orbstack');
+  });
+
+  it('never re-introduces a NOPASSWD rule', () => {
+    const script = createInitShell({
+      user: 'sandbox',
+      proxyHost: '192.168.139.3',
+      proxyPort: 9999,
+      caCertPem: FIXTURE_CA_PEM,
+      pluginBootstrap: '# fake plugin\necho hello',
+    });
+    expect(script).not.toMatch(/NOPASSWD/);
+  });
 });
