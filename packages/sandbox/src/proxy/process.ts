@@ -186,6 +186,7 @@ export async function runProxyProcess(
       loadUserConfig,
       loadSandboxConfig,
       sandboxes: stream,
+      credentialResolver: credentialCache,
     });
     if (sidecar) sidecars.push(sidecar);
   }

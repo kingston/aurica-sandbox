@@ -29,10 +29,17 @@ interface FakeUpstreamHandle {
   close: () => Promise<void>;
   /** Last `tools/call` arguments seen, for round-trip assertions. */
   lastCallArgs: () => { name: string; args: unknown } | null;
+  /**
+   * Last `Authorization` request header observed by the upstream HTTP
+   * server. Useful for bearer-auth tests: assert the gateway actually
+   * stamped the resolved token onto the outbound request.
+   */
+  lastAuthHeader: () => string | null;
 }
 
 async function startFakeUpstream(): Promise<FakeUpstreamHandle> {
   let lastCall: { name: string; args: unknown } | null = null;
+  let lastAuth: string | null = null;
   // One transport per session keyed by Mcp-Session-Id, mirroring the
   // example pattern in the SDK docs.
   const sessions = new Map<string, StreamableHTTPServerTransport>();
@@ -46,6 +53,7 @@ async function startFakeUpstream(): Promise<FakeUpstreamHandle> {
     req: http.IncomingMessage,
     res: http.ServerResponse,
   ): Promise<void> {
+    lastAuth = req.headers.authorization ?? null;
     const sid = req.headers['mcp-session-id'];
     const sessionId = Array.isArray(sid) ? sid[0] : sid;
     const chunks: Buffer[] = [];
@@ -131,6 +139,7 @@ async function startFakeUpstream(): Promise<FakeUpstreamHandle> {
         });
       }),
     lastCallArgs: () => lastCall,
+    lastAuthHeader: () => lastAuth,
   };
 }
 
@@ -151,7 +160,14 @@ function catalogEntry(url: string): UpstreamCatalogEntry {
     token_endpoint_auth_method: 'none',
     redirect_uris: ['http://127.0.0.1/unused'],
   };
-  return { url, clientMetadata };
+  return { url, auth: { type: 'oauth', clientMetadata } };
+}
+
+function bearerCatalogEntry(
+  url: string,
+  tokenSource: string,
+): UpstreamCatalogEntry {
+  return { url, auth: { type: 'bearer', tokenSource } };
 }
 
 /**
@@ -439,5 +455,96 @@ describe('McpForwarder login-required surfaces', () => {
     expect(result.tools).toEqual([]);
     expect(result._meta?.['aurica.mcp.error']).toBe('login_required');
     expect(result._meta?.['aurica.mcp.server']).toBe('github');
+  });
+});
+
+describe('McpForwarder bearer-auth upstream', () => {
+  let teardown: (() => Promise<void>) | undefined;
+  afterEach(async () => {
+    await teardown?.();
+    teardown = undefined;
+  });
+
+  /**
+   * Boots a forwarder with a single `bearer`-auth upstream and a
+   * scripted `bearerTokenResolver` so the test can observe whether the
+   * resolver was called and verify the gateway stamped the resolved
+   * token onto the outbound `Authorization` header.
+   */
+  async function boot(opts: {
+    resolver: (rawSource: string) => Promise<string>;
+  }): Promise<{
+    client: Client;
+    upstream: FakeUpstreamHandle;
+  }> {
+    const upstream = await startFakeUpstream();
+    const forwarder = new McpForwarder({
+      bearerTokenResolver: { resolve: opts.resolver },
+    });
+    forwarder.setCatalog(
+      new Map([['github-pat', bearerCatalogEntry(upstream.url, 'env:GH_PAT')]]),
+    );
+    const gateway = new McpGateway({ host: '127.0.0.1', forwarder });
+    const bound = await gateway.listen();
+    gateway.setTenants([
+      {
+        name: 'sb-1',
+        bearer: 'sb-bearer',
+        sourceIp: '127.0.0.1',
+        servers: [{ name: 'github-pat', policies: [], defaultAction: 'allow' }],
+        enabledServers: ['github-pat'],
+      },
+    ]);
+    const transport = new StreamableHTTPClientTransport(
+      new URL(`http://127.0.0.1:${bound.port}/github-pat/mcp`),
+      {
+        requestInit: {
+          headers: {
+            Authorization: 'Bearer sb-bearer',
+            'X-Forwarded-For': '127.0.0.1',
+          },
+        },
+      },
+    );
+    const client = new Client({ name: 'test-client', version: '0.0.1' });
+    await client.connect(
+      transport as unknown as Parameters<typeof client.connect>[0],
+    );
+    teardown = async () => {
+      await client.close();
+      await gateway.close();
+      await forwarder.close();
+      await upstream.close();
+    };
+    return { client, upstream };
+  }
+
+  it('stamps the resolved bearer onto outbound MCP requests, bypassing OAuth', async () => {
+    const calls: string[] = [];
+    const { client, upstream } = await boot({
+      resolver: (src) => {
+        calls.push(src);
+        return Promise.resolve('ghp_test_token');
+      },
+    });
+    const result = await client.callTool({
+      name: 'echo',
+      arguments: { text: 'hi' },
+    });
+    expect(result.content).toEqual([{ type: 'text', text: 'hi' }]);
+    expect(calls).toEqual(['env:GH_PAT']);
+    expect(upstream.lastAuthHeader()).toBe('Bearer ghp_test_token');
+  });
+
+  it('surfaces a login-required-shaped error when the resolver throws', async () => {
+    const { client } = await boot({
+      resolver: () => Promise.reject(new Error('GH_PAT not set')),
+    });
+    const result = await client.listTools();
+    expect(result.tools).toEqual([]);
+    expect(result._meta?.['aurica.mcp.error']).toBe('login_required');
+    expect(String(result._meta?.['aurica.mcp.message'])).toContain(
+      'failed to resolve credential env:GH_PAT',
+    );
   });
 });

@@ -33,7 +33,14 @@ per-sandbox bearer that the gateway recognises.
 
 ---
 
-## User config (`~/.aurica/sandbox/config.json`)
+## Upstream config
+
+Upstreams may be declared in **either** the user config (default
+catalog, shared across every sandbox on the host) or the project
+config (project-scoped additions/overrides). Projects use them by name
+in `plugins.mcp.servers`.
+
+### User-level (`~/.aurica/sandbox/config.json`)
 
 ```jsonc
 {
@@ -45,6 +52,11 @@ per-sandbox bearer that the gateway recognises.
         },
         "linear": {
           "url": "https://mcp.linear.app/sse",
+          "auth": { "type": "oauth", "clientName": "my-cli" },
+        },
+        "github-pat": {
+          "url": "https://api.github.com/mcp/",
+          "auth": { "type": "bearer", "tokenSource": "env:GH_PAT" },
         },
       },
     },
@@ -52,13 +64,58 @@ per-sandbox bearer that the gateway recognises.
 }
 ```
 
-| Field        | Type   | Notes                                                                                                                     |
-| ------------ | ------ | ------------------------------------------------------------------------------------------------------------------------- |
-| `url`        | string | Upstream MCP base URL (Streamable HTTP).                                                                                  |
-| `clientName` | string | Optional. Sent as `client_name` during Dynamic Client Registration. Some upstreams render it on the OAuth consent screen. |
+### Project-level (`<project>/.aurica/sandbox.json`)
+
+Project upstreams are merged into the user catalog by name. A project
+entry **fully replaces** the user entry of the same name (both `url`
+and `auth` come from the project side, since `auth` is a
+discriminated union). Brand-new project names are added to the
+catalog.
+
+```jsonc
+{
+  "plugins": {
+    "mcp": {
+      "upstreams": {
+        "github-internal": {
+          "url": "https://internal-ghe.example.com/mcp/",
+          "auth": { "type": "bearer", "tokenSource": "env:GHE_PAT" },
+        },
+      },
+      "servers": ["github-internal"],
+    },
+  },
+}
+```
+
+If two sandboxes on the same host declare the same upstream name with
+**different** definitions, the gateway logs a warning and keeps the
+first-seen definition (a single global catalog can't hold two
+different definitions of the same name).
+
+### Field reference
+
+| Field              | Type                                                                                | Required | Notes                                                                                                                       |
+| ------------------ | ----------------------------------------------------------------------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `url`              | string                                                                              | yes      | Upstream MCP base URL (Streamable HTTP).                                                                                    |
+| `auth`             | `{ type: "oauth"; clientName?: string } \| { type: "bearer"; tokenSource: string }` | no       | Authentication strategy. Defaults to `{ type: "oauth" }` when omitted.                                                      |
+| `auth.clientName`  | string                                                                              | no       | (oauth) Sent as `client_name` during Dynamic Client Registration. Some upstreams render it on the consent screen.           |
+| `auth.tokenSource` | string                                                                              | yes      | (bearer) Credential-source reference (`env:VAR`, `gh-token`, …). Resolved at request time; plain literals are not accepted. |
 
 The upstream name (`"github"`, `"linear"`, …) is the routing key
 projects refer to. It must be kebab-case (`[a-z0-9][a-z0-9-]*`).
+
+### OAuth vs bearer
+
+- **`oauth`** (default): the gateway runs the SDK's OAuth flow once
+  via `aurica-sandbox mcp login <name>`, caches tokens in
+  `~/.aurica/sandbox/credentials.json`, and refreshes them
+  transparently.
+- **`bearer`**: no OAuth. The gateway resolves `tokenSource` through
+  the existing credential cache (`env:VAR`, `gh-token`, …) and stamps
+  `Authorization: Bearer <resolved>` on every outbound request. Use
+  for GitHub PATs, internal service tokens, and other static-credential
+  upstreams. `mcp login` refuses to run against a `bearer` upstream.
 
 ---
 
@@ -242,6 +299,52 @@ denied: argument "owner" must equal "acme" (got "other-org")`.
 
 ---
 
+## Worked example — GitHub PAT via bearer auth
+
+Goal: skip OAuth entirely and authenticate the GitHub MCP with a
+personal access token already in your shell environment.
+
+**Host setup:**
+
+```bash
+export GH_PAT=ghp_yourtoken...   # in your login shell or via direnv
+```
+
+```jsonc
+// ~/.aurica/sandbox/config.json
+{
+  "plugins": {
+    "mcp": {
+      "upstreams": {
+        "github-pat": {
+          "url": "https://api.github.com/mcp/",
+          "auth": { "type": "bearer", "tokenSource": "env:GH_PAT" },
+        },
+      },
+    },
+  },
+}
+```
+
+```bash
+aurica-sandbox proxy            # start (or restart) the proxy daemon
+aurica-sandbox mcp list
+# → github-pat  https://api.github.com/mcp/  [static bearer (env:GH_PAT)]
+# No `mcp login` step — bearer upstreams don't use OAuth.
+```
+
+**Per-project:** same as any other upstream — just reference the name:
+
+```jsonc
+{ "plugins": { "mcp": { "servers": ["github-pat"] } } }
+```
+
+The gateway will resolve `env:GH_PAT` once per idle window (15 min by
+default) and stamp `Authorization: Bearer <pat>` on every outbound MCP
+call. The PAT never leaves the host.
+
+---
+
 ## How requests flow
 
 ```
@@ -288,3 +391,21 @@ The host proxy stamps the originating sandbox IP into
 the request didn't transit the proxy (misconfigured guest) or the
 proxy is forwarding without the XFF header (proxy bug — file an
 issue).
+
+**`failed to resolve credential env:GH_PAT for <name>`.**
+A `bearer`-auth upstream's `tokenSource` failed to resolve. For
+`env:VAR`, ensure the variable is exported in the shell running
+`aurica-sandbox proxy`. For `gh-token`, run `gh auth login` on the
+host.
+
+**`mcp login` fails with `static bearer auth … \`mcp login\` only
+applies to oauth upstreams`.**
+You're trying to run the OAuth dance against a `bearer`-auth
+upstream. Either change the upstream to `auth: { type: "oauth" }` or
+skip `mcp login` — bearer upstreams don't need it.
+
+**Project upstream silently isn't taking effect.**
+Look in the proxy log for a warning like `upstream "github" defined
+differently by sb-other than by <user>; keeping the <user> definition`.
+Another sandbox on this host declared the same name first; rename
+your project upstream or remove the conflicting declaration.

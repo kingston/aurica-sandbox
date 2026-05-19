@@ -198,6 +198,13 @@ export interface SidecarContext {
   loadUserConfig: () => Promise<UserConfig>;
   loadSandboxConfig: (projectDir: string) => Promise<SandboxConfig>;
   sandboxes: SandboxRegistrationStream;
+  /**
+   * Shared credential resolver: same instance the host proxy uses for
+   * `replace-header` mutations. Sidecars that resolve credential
+   * sources (`env:VAR`, `gh-token`, …) should use this so a token is
+   * cached once across the proxy + every plugin sidecar.
+   */
+  credentialResolver: { resolve(rawSource: string): Promise<string> };
 }
 
 /**

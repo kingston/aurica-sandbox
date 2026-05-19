@@ -19,7 +19,11 @@ import {
   readUpstreamSlot,
 } from '../gateway/credentials-store.js';
 import { FileOAuthProvider } from '../gateway/file-oauth-provider.js';
-import { BASE_OAUTH_CLIENT_METADATA, readMcpUserConfig } from '../schema.js';
+import {
+  BASE_OAUTH_CLIENT_METADATA,
+  normalizeUpstream,
+  readMcpUserConfig,
+} from '../schema.js';
 
 interface LoginCallback {
   url: string;
@@ -134,13 +138,19 @@ export async function runMcpLogin(
       `unknown MCP upstream "${upstream}"; declare it under plugins.mcp.upstreams in your user config first`,
     );
   }
+  const canonical = normalizeUpstream(upstreamConfig);
+  if (canonical.auth.type !== 'oauth') {
+    throw new Error(
+      `MCP upstream "${upstream}" is configured with static bearer auth (tokenSource ${JSON.stringify(canonical.auth.tokenSource)}); \`mcp login\` only applies to oauth upstreams`,
+    );
+  }
 
   const callback = await createOAuthCallback();
   try {
     const clientMetadata: OAuthClientMetadata = {
       ...BASE_OAUTH_CLIENT_METADATA,
       client_name:
-        upstreamConfig.clientName ?? BASE_OAUTH_CLIENT_METADATA.client_name,
+        canonical.auth.clientName ?? BASE_OAUTH_CLIENT_METADATA.client_name,
       redirect_uris: [callback.url],
     };
 
@@ -219,12 +229,18 @@ export async function runMcpList(options: {
     return;
   }
   for (const [name, cfg] of upstreams) {
-    const slot = await readUpstreamSlot(name, options.credentialsPath);
-    const status = slot?.tokens
-      ? 'logged in'
-      : slot?.clientInformation
-        ? 'registered, no tokens'
-        : 'not logged in';
+    const canonical = normalizeUpstream(cfg);
+    let status: string;
+    if (canonical.auth.type === 'bearer') {
+      status = `static bearer (${canonical.auth.tokenSource})`;
+    } else {
+      const slot = await readUpstreamSlot(name, options.credentialsPath);
+      status = slot?.tokens
+        ? 'logged in'
+        : slot?.clientInformation
+          ? 'registered, no tokens'
+          : 'not logged in';
+    }
     logger.info(`  ${name}  ${cfg.url}  [${status}]`);
   }
 }
