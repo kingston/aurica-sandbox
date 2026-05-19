@@ -547,4 +547,80 @@ describe('McpForwarder bearer-auth upstream', () => {
       'failed to resolve credential env:GH_PAT',
     );
   });
+
+  it('returns an isError tools/call result when the resolver throws, with a host-side login hint', async () => {
+    const { client, upstream } = await boot({
+      resolver: () => Promise.reject(new Error('GH_PAT not set')),
+    });
+    const result = await client.callTool({
+      name: 'echo',
+      arguments: { text: 'hi' },
+    });
+    expect(result.isError).toBe(true);
+    const text = (result.content as { type: string; text: string }[])[0]?.text;
+    expect(text).toContain('failed to resolve credential env:GH_PAT');
+    expect(text).toContain('aurica-sandbox mcp login github-pat');
+    // Upstream must never have been called — the resolver failed before
+    // any outbound request could be made.
+    expect(upstream.lastCallArgs()).toBeNull();
+    expect(upstream.lastAuthHeader()).toBeNull();
+  });
+});
+
+describe('McpForwarder bearer-auth without a credential resolver', () => {
+  let teardown: (() => Promise<void>) | undefined;
+  afterEach(async () => {
+    await teardown?.();
+    teardown = undefined;
+  });
+
+  it('fails loudly when a bearer upstream is configured but no resolver was injected', async () => {
+    const upstream = await startFakeUpstream();
+    // No `bearerTokenResolver` passed — this is the misconfiguration we
+    // want to surface as a clear login_required error rather than a
+    // silent NPE.
+    const forwarder = new McpForwarder();
+    forwarder.setCatalog(
+      new Map([['github-pat', bearerCatalogEntry(upstream.url, 'env:GH_PAT')]]),
+    );
+    const gateway = new McpGateway({ host: '127.0.0.1', forwarder });
+    const bound = await gateway.listen();
+    gateway.setTenants([
+      {
+        name: 'sb-1',
+        bearer: 'sb-bearer',
+        sourceIp: '127.0.0.1',
+        servers: [{ name: 'github-pat', policies: [], defaultAction: 'allow' }],
+        enabledServers: ['github-pat'],
+      },
+    ]);
+    const transport = new StreamableHTTPClientTransport(
+      new URL(`http://127.0.0.1:${bound.port}/github-pat/mcp`),
+      {
+        requestInit: {
+          headers: {
+            Authorization: 'Bearer sb-bearer',
+            'X-Forwarded-For': '127.0.0.1',
+          },
+        },
+      },
+    );
+    const client = new Client({ name: 'test-client', version: '0.0.1' });
+    await client.connect(
+      transport as unknown as Parameters<typeof client.connect>[0],
+    );
+    teardown = async () => {
+      await client.close();
+      await gateway.close();
+      await forwarder.close();
+      await upstream.close();
+    };
+
+    const result = await client.listTools();
+    expect(result.tools).toEqual([]);
+    expect(result._meta?.['aurica.mcp.error']).toBe('login_required');
+    expect(String(result._meta?.['aurica.mcp.message'])).toContain(
+      'was not given a credential resolver',
+    );
+  });
 });
