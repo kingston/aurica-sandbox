@@ -3,7 +3,7 @@ import type {
   Mutation,
   ProxyPolicy,
   ProxyPolicyTransform,
-} from '#src/config/index.js';
+} from '#src/config/proxy-policy.js';
 import { assertSafeShellIdent } from '#src/utils/shell-safety.js';
 
 import type { PluginCommand, SandboxPlugin } from '../types.js';
@@ -139,7 +139,7 @@ export const githubPlugin: SandboxPlugin<
   name: 'github',
   projectConfigSchema: githubProjectConfigSchema,
   userConfigSchema: githubUserConfigSchema,
-  initialize({ project, user, placeholder, linuxUser }) {
+  initialize({ project, user, generatePlaceholder, linuxUser }) {
     // The clone destination paths are interpolated as argv (not shell), so
     // they are not vulnerable to shell metacharacters, but we still validate
     // the linux user for consistency with the other plugins and to keep the
@@ -159,6 +159,13 @@ export const githubPlugin: SandboxPlugin<
       );
     }
     const gitUser = project.user ?? user?.defaultUser;
+
+    // Single token covers both the git basic-auth password (over HTTPS to
+    // github.com/codeload.github.com) and the `gh` CLI's `oauth_token` in
+    // `~/.config/gh/hosts.yml`. Both substitute to the same upstream
+    // credential — splitting them would just produce two placeholders that
+    // resolve identically.
+    const placeholder = generatePlaceholder('token');
 
     const policies: ProxyPolicy[] = [];
     const credentialUrls: string[] = [];

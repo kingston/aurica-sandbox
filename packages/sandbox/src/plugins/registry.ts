@@ -2,6 +2,7 @@ import { claudeCodePlugin } from './claude-code/claude-code.plugin.js';
 import { cursorPlugin } from './cursor/cursor.plugin.js';
 import { dockerPlugin } from './docker/docker.plugin.js';
 import { githubPlugin } from './github/github.plugin.js';
+import { mcpPlugin } from './mcp/mcp.plugin.js';
 import { misePlugin } from './mise/mise.plugin.js';
 import type { SandboxPlugin } from './types.js';
 
@@ -29,6 +30,7 @@ export const PLUGINS = [
   misePlugin,
   claudeCodePlugin,
   cursorPlugin,
+  mcpPlugin,
 ] as const satisfies readonly SandboxPlugin[];
 
 /** Tuple type of the registry, used to derive keyed config schemas. */

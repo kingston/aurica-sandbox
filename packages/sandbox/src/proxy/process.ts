@@ -1,8 +1,18 @@
-import { loadSandboxConfig, sandboxConfigPath } from '#src/config/index.js';
+import {
+  loadSandboxConfig,
+  loadUserConfig,
+  sandboxConfigPath,
+} from '#src/config/index.js';
 import { CredentialCache } from '#src/credentials/index.js';
 import { logger } from '#src/logger.js';
+import { PLUGINS } from '#src/plugins/index.js';
+import type {
+  ProxySidecar,
+  SandboxRegistrationStream,
+} from '#src/plugins/index.js';
 import { readState, withState } from '#src/state/index.js';
 import type { SandboxEntry, State } from '#src/state/index.js';
+import { errorMessage } from '#src/utils/error-message.js';
 
 import { SandboxConfigWatcher } from './config-watcher.js';
 import { deriveRulesFromConfig } from './derive-rules.js';
@@ -77,17 +87,19 @@ export async function runProxyProcess(
   });
   const addr = await proxy.listen();
 
-  await withState((state) => {
-    state.proxy = {
-      pid: process.pid,
-      host: addr.host,
-      port: addr.port,
-      startedAt: new Date().toISOString(),
-    };
-  });
-
   const watcher = new SandboxConfigWatcher();
   const linuxUser = process.env.USER ?? 'sandbox';
+
+  // In-process pub/sub for sandbox registration changes. Sidecars
+  // subscribe to this so they can keep per-sandbox tables in sync as
+  // sandboxes are created, destroyed, or have their `sandbox.json`
+  // edited. The stream fires once on subscribe with the current
+  // snapshot, then on every subsequent change.
+  const stream = new InMemorySandboxRegistrationStream();
+  const publishStreamSnapshot = async (): Promise<void> => {
+    const state = await readState();
+    stream.publish(Object.values(state.sandboxes));
+  };
 
   watcher.setListener((event, name, path) => {
     if (event === 'unlink') {
@@ -105,10 +117,15 @@ export async function runProxyProcess(
         await proxy.refresh();
         log.info(`proxy reloaded for ${name} from ${path}`);
       }
+      // A sandbox.json edit can change plugin opt-ins, so re-publish
+      // even when the host proxy's registration set didn't move —
+      // sidecars subscribe to this stream to refresh their per-sandbox
+      // derived state.
+      stream.publish(Object.values(state.sandboxes));
     })();
   });
 
-  await applyRegistrations(proxy, watcher, await readState(), linuxUser, log);
+  await publishStreamSnapshot();
 
   // Visibility: mockttp emits structured events for every request lifecycle.
   // Registered via setEventSubscriber so the listeners get re-attached after
@@ -141,6 +158,43 @@ export async function runProxyProcess(
     });
   });
 
+  // Commit the proxy entry to disk so `requireRunningProxy` succeeds
+  // for any subsequent CLI call (e.g. `create`).
+  await withState((state) => {
+    state.proxy = {
+      pid: process.pid,
+      host: addr.host,
+      port: addr.port,
+      startedAt: new Date().toISOString(),
+    };
+  });
+
+  // Start any plugin-contributed sidecars. Each plugin's hook is called
+  // once at boot; the returned handle is retained so we can await its
+  // `stop()` on shutdown. Sidecars that throw at boot fail the whole
+  // proxy startup — partial readiness would hide real configuration
+  // errors behind subtle later-stage failures.
+  //
+  // Loaders are injected (rather than imported by the plugin) to keep
+  // plugin modules out of the registry-init cycle that runs through
+  // `config/user.ts` ↔ `userPluginsSchema`. The proxy entry point lives
+  // outside that cycle, so it can value-import these freely.
+  const sidecars: ProxySidecar[] = [];
+  for (const plugin of PLUGINS) {
+    if (!plugin.proxySidecar) continue;
+    const sidecar = await plugin.proxySidecar({
+      loadUserConfig,
+      loadSandboxConfig,
+      sandboxes: stream,
+    });
+    if (sidecar) sidecars.push(sidecar);
+  }
+
+  // Register sandboxes now that the proxy entry is on disk. Plugins like
+  // `mcp` read this state to derive their domains, policies, and
+  // post-lockdown commands.
+  await applyRegistrations(proxy, watcher, await readState(), linuxUser, log);
+
   log.info(`proxy http://${addr.host}:${addr.port} (pid ${process.pid})`);
 
   const onHup = (): void => {
@@ -148,6 +202,7 @@ export async function runProxyProcess(
       const fresh = await readState();
       await applyRegistrations(proxy, watcher, fresh, linuxUser, log);
       log.info(formatReloadSummary(proxy.summary()));
+      stream.publish(Object.values(fresh.sandboxes));
     })();
   };
   process.on('SIGHUP', onHup);
@@ -157,6 +212,19 @@ export async function runProxyProcess(
     if (stopping) return;
     stopping = true;
     process.off('SIGHUP', onHup);
+    // Sidecars first so they can drain in-flight work while the proxy
+    // is still up (e.g. log a structured "stopping" line, finish a
+    // pending OAuth callback). Awaited in parallel; one failure
+    // shouldn't block the others.
+    await Promise.all(
+      sidecars.map(async (sidecar) => {
+        try {
+          await sidecar.stop();
+        } catch (err) {
+          log.error(`sidecar stop failed: ${errorMessage(err)}`);
+        }
+      }),
+    );
     await watcher.closeAll();
     await proxy.close();
     await withState((state) => {
@@ -175,6 +243,43 @@ export async function runProxyProcess(
   process.once('SIGTERM', onTerm);
 
   return { host: addr.host, port: addr.port, stop };
+}
+
+/**
+ * In-memory implementation of {@link SandboxRegistrationStream}. Kept
+ * private to this module — the surface area is shaped exactly by what
+ * sidecars need: a `snapshot()` for synchronous reads and a `subscribe()`
+ * that fires once immediately with the current snapshot and then on
+ * every publish.
+ *
+ * Listeners are stored in an Array (rather than a Set) so insertion
+ * order is preserved across publish calls, which makes the test
+ * assertions for multi-sidecar setups deterministic.
+ */
+class InMemorySandboxRegistrationStream implements SandboxRegistrationStream {
+  #current: readonly SandboxEntry[] = [];
+  readonly #listeners: ((snapshot: readonly SandboxEntry[]) => void)[] = [];
+
+  snapshot(): readonly SandboxEntry[] {
+    return this.#current;
+  }
+
+  subscribe(listener: (snapshot: readonly SandboxEntry[]) => void): () => void {
+    this.#listeners.push(listener);
+    listener(this.#current);
+    return () => {
+      const idx = this.#listeners.indexOf(listener);
+      if (idx !== -1) this.#listeners.splice(idx, 1);
+    };
+  }
+
+  publish(entries: readonly SandboxEntry[]): void {
+    this.#current = entries;
+    // Iterate a snapshot of the listeners array so a subscriber that
+    // unsubscribes during its callback doesn't shift indices under us.
+    const snapshot = [...this.#listeners];
+    for (const listener of snapshot) listener(entries);
+  }
 }
 
 /**
@@ -224,6 +329,8 @@ async function loadAndRegister(
     const config = await loadSandboxConfig(entry.projectDir);
     const { domains, policies } = deriveRulesFromConfig(config, {
       user: linuxUser,
+      sandboxName: entry.name,
+      authSecret: entry.authSecret,
     });
     proxy.register(entry.name, {
       sourceIp: entry.ip,

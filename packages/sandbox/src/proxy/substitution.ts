@@ -36,10 +36,14 @@ function applyTransform(
 }
 
 /**
- * Outcome of evaluating policies against a request. `pass` lets the request
- * through (with `headers` already mutated in place); `block` short-circuits
- * the proxy into returning a 403 carrying `blockedBy` (the policy id) for
- * audit.
+ * Outcome of evaluating policies against a request.
+ *
+ * - `pass` — request continues to its original destination with `headers`
+ *   already mutated in place.
+ * - `block` — short-circuit with a 403, carrying `blockedBy` (the policy
+ *   id) for audit.
+ * - `rewrite` — request continues but to `url` instead of its original
+ *   destination. Mutations have already been applied to `headers`.
  */
 export type EvaluationOutcome =
   | { outcome: 'pass'; headers: Record<string, string | string[] | undefined> }
@@ -47,6 +51,11 @@ export type EvaluationOutcome =
       outcome: 'block';
       headers: Record<string, string | string[] | undefined>;
       blockedBy: string;
+    }
+  | {
+      outcome: 'rewrite';
+      headers: Record<string, string | string[] | undefined>;
+      url: string;
     };
 
 /**
@@ -65,6 +74,7 @@ export async function applyPolicies(
   method: string,
   headers: Record<string, string | string[] | undefined>,
   resolver: SubstitutionResolver,
+  pathWithQuery: string = path,
 ): Promise<EvaluationOutcome> {
   for (const policy of policies) {
     if (!matchDomain(policy.domain, host)) continue;
@@ -72,6 +82,15 @@ export async function applyPolicies(
 
     if (policy.action.type === 'block') {
       return { outcome: 'block', headers, blockedBy: policy.id };
+    }
+    if (policy.action.type === 'rewrite-url') {
+      if (policy.action.mutations) {
+        for (const mutation of policy.action.mutations) {
+          await applyMutation(mutation, headers, resolver);
+        }
+      }
+      const url = policy.action.target.split('{path}').join(pathWithQuery);
+      return { outcome: 'rewrite', headers, url };
     }
     // type === 'allow'
     if (policy.action.mutations) {

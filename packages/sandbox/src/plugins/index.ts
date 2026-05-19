@@ -1,6 +1,7 @@
 export {
   expandPlugins,
   githubDomainsForGitCoverage,
+  makeGeneratePlaceholder,
   type ExpandContext,
   type ExpandedPlugins,
 } from './expand.js';
@@ -18,8 +19,12 @@ export {
   type UserPlugins,
 } from './schema.js';
 export type {
+  CliCommandContext,
   InitializedPlugin,
   PluginCommand,
   PluginInitContext,
+  ProxySidecar,
   SandboxPlugin,
+  SandboxRegistrationStream,
+  SidecarContext,
 } from './types.js';

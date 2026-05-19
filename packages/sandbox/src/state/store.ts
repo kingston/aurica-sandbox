@@ -4,7 +4,7 @@ import path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { z } from 'zod';
 
-import { stateFilePath } from '#src/config/index.js';
+import { stateFilePath } from '#src/config/paths.js';
 
 const sandboxEntrySchema = z.object({
   name: z.string(),
@@ -19,6 +19,13 @@ const sandboxEntrySchema = z.object({
   ]),
   ip: z.string().nullable(),
   createdAt: z.string(),
+  /**
+   * Per-sandbox auth secret. Used as the bearer the MCP gateway
+   * validates incoming guest traffic against. Required — every newly
+   * created sandbox is allocated one before its state entry is
+   * persisted, so an entry that lacks one is malformed.
+   */
+  authSecret: z.string().min(1),
 });
 
 export type SandboxEntry = z.infer<typeof sandboxEntrySchema>;

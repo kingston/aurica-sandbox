@@ -17,30 +17,38 @@ export function githubDomainsForGitCoverage(plugins: ProjectPlugins): string[] {
 }
 
 /**
- * Derive a placeholder string from a plugin's name + config. The proxy
- * uses `(host, header, placeholder)` to dispatch substitutions, so
- * colliding placeholders across plugins would cause one resolver to
- * clobber another.
+ * Build a `generatePlaceholder(suffix)` function scoped to one plugin's
+ * `initialize` call. The returned function hashes
+ * `authSecret + ':' + pluginName + ':' + suffix` into a `__AURICA_TOKEN_...__`
+ * token the plugin can substitute anywhere on the wire.
  *
- * The placeholder MUST be deterministic: the value is baked into the VM
- * at create-time (e.g. `git config http.<url>.extraHeader`), and the
- * proxy re-derives rules from `.aurica/sandbox.json` on every reload. A
- * random placeholder would diverge between the two and break credential
- * substitution after the first reload.
+ * Determinism: the placeholder is baked into the VM at create time
+ * (e.g. `git config http.<url>.extraHeader`) AND re-derived by the
+ * proxy on every reload. Both inputs (`authSecret` from persisted
+ * state, `pluginName` + caller-supplied `suffix` from code) are stable
+ * across reload, so the same call produces the same token.
  *
- * Hashing `{ name, config }` keeps placeholders unique across plugins
- * even when two plugins have empty configs (`{}`).
+ * Collision protection: folding the plugin name in means two plugins
+ * can both call `generatePlaceholder('api')` without clashing on the
+ * proxy's `(host, header, placeholder)` dispatch table. The
+ * caller-supplied `suffix` lets a single plugin produce multiple
+ * distinct tokens (e.g. `'git'` and `'gh'`).
  *
  * 16 hex chars (64 bits of SHA-256) is enough collision resistance for
- * the tiny set of plugins in any one sandbox.
+ * the tiny set of placeholders in any one sandbox.
  */
-function placeholderFor(name: string, config: unknown): string {
-  const digest = createHash('sha256')
-    .update(JSON.stringify({ name, config }))
-    .digest('hex')
-    .slice(0, 16)
-    .toUpperCase();
-  return `__AURICA_TOKEN_${digest}__`;
+export function makeGeneratePlaceholder(
+  pluginName: string,
+  authSecret: string,
+): (suffix: string) => string {
+  return (suffix: string): string => {
+    const digest = createHash('sha256')
+      .update(`${authSecret}:${pluginName}:${suffix}`)
+      .digest('hex')
+      .slice(0, 16)
+      .toUpperCase();
+    return `__AURICA_TOKEN_${digest}__`;
+  };
 }
 
 /**
@@ -66,6 +74,12 @@ export interface ExpandedPlugins {
 /** Context passed to `expandPlugins` and threaded into each plugin's init. */
 export interface ExpandContext {
   linuxUser: string;
+  sandboxName: string;
+  /**
+   * The sandbox's per-run secret. Threaded into each plugin's
+   * `PluginInitContext.authSecret`.
+   */
+  authSecret: string;
 }
 
 /**
@@ -98,7 +112,6 @@ export function expandPlugins(
     if (projectConfig === undefined) continue;
 
     const userConfig = (userPlugins as Record<string, unknown>)[plugin.name];
-    const placeholder = placeholderFor(plugin.name, projectConfig);
 
     const initialized = plugin.initialize({
       // The framework has already validated both blocks against the
@@ -107,8 +120,10 @@ export function expandPlugins(
       // is already correctly typed against its declared schemas.
       project: projectConfig as never,
       user: userConfig as never,
-      placeholder,
+      generatePlaceholder: makeGeneratePlaceholder(plugin.name, ctx.authSecret),
       linuxUser: ctx.linuxUser,
+      sandboxName: ctx.sandboxName,
+      authSecret: ctx.authSecret,
     });
 
     for (const d of initialized.domains) domains.add(d);

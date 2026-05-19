@@ -110,11 +110,12 @@ export const claudeCodePlugin: SandboxPlugin<
   name: 'claude-code',
   projectConfigSchema: claudeCodeProjectConfigSchema,
   userConfigSchema: undefined,
-  initialize({ project, placeholder, linuxUser }) {
+  initialize({ project, generatePlaceholder, linuxUser }) {
     assertSafeShellIdent('linuxUser', linuxUser);
 
     const { keepHeader, dropHeader, defaultEnv } = AUTH_MODE[project.authMode];
     const tokenSource = project.tokenSource ?? `env:${defaultEnv}`;
+    const placeholder = generatePlaceholder('api');
 
     const policies: ProxyPolicy[] = [
       {

@@ -28,6 +28,15 @@ export function stateFilePath(): string {
   return path.join(stateDir(), 'state.json');
 }
 
+/**
+ * Path to the file holding cached OAuth client information and access /
+ * refresh tokens for upstream MCP servers. Owned by the MCP gateway; mode
+ * 600.
+ */
+export function credentialsFilePath(): string {
+  return path.join(stateDir(), 'credentials.json');
+}
+
 /** Path to the per-project sandbox manifest, relative to a project dir. */
 export function sandboxConfigPath(projectDir: string): string {
   return path.join(projectDir, '.aurica', 'sandbox.json');
