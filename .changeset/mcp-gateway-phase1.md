@@ -14,10 +14,12 @@ Add MCP gateway support (Phase 1).
   for plugins to register Commander subcommands, and
   `proxySidecar(ctx)` for plugins to run a long-running helper in the
   same process as the host proxy. Existing plugins are unchanged.
-- `state.proxy` gains an `mcpGatewayPort` field; `state.sandboxes`
-  entries gain a `bearer` field. Both are nullable for backwards
-  compatibility with existing state files.
+- `state.sandboxes` entries gain a required `authSecret` field — the
+  per-sandbox secret the framework hashes into the placeholder bearer
+  the gateway validates. Existing state files without one fail schema
+  validation; destroy/recreate sandboxes to upgrade.
 
-Phase 2 (proxy URL-rewrite policy + guest-side `~/.claude.json` wiring)
-lands in a follow-up; the gateway currently accepts authenticated
-requests and replies `501 Not Implemented` for the upstream relay.
+The gateway proxies `tools/list` and `tools/call` to the configured
+upstream and filters tools against the per-sandbox ACL. Methods outside
+`tools/*` (resources, prompts, …) return JSON-RPC "Method not found" by
+design — surface area is intentionally tools-only for v1.

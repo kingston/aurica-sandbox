@@ -10,7 +10,7 @@ Single-package pnpm monorepo. All source lives in [packages/sandbox/src/](packag
 - `cli/commands/` — command implementations (init, proxy, create, destroy, shell, run, …)
 - `config/` — Zod schemas + loaders for project (`.aurica/sandbox.json`) and user config
 - `credentials/` — token providers (env, gh-token) and idle cache
-- `plugins/` — built-in plugins: `github/`, `mise/`, `docker/`, `claude-code/`, `cursor/`
+- `plugins/` — built-in plugins: `github/`, `mise/`, `docker/`, `claude-code/`, `cursor/`, `mcp/`
 - `proxy/` — mockttp-based HTTPS proxy: CA generation, credential-substitution policy, live config reload
 - `vm/` — VM provider abstraction; OrbStack provider under `providers/orb`
 - `state/` — on-disk sandbox registry

@@ -19,8 +19,10 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 
 import { logger } from '#src/logger.js';
+import { errorMessage } from '#src/utils/error-message.js';
 
 import { FileOAuthProvider } from './file-oauth-provider.js';
+import { pickHeader } from './http-utils.js';
 
 /**
  * Per-upstream configuration the gateway needs to forward MCP traffic.
@@ -307,7 +309,22 @@ export class McpForwarder {
       { name: 'aurica-sandbox-mcp-gateway', version: '0.1.0' },
       { capabilities: { tools: {} } },
     );
-    const transport = new StreamableHTTPServerTransport({
+    // `record` is declared before the transport so the
+    // `onsessioninitialized` callback can close over it without a
+    // forward reference. The transport is patched in immediately after
+    // construction.
+    const record: SessionRecord = {
+      tenantName: ctx.tenantName,
+      serverName: ctx.serverName,
+      enabledTools: ctx.enabledTools,
+      server,
+      // Filled in on the next line; `record` itself is only read inside
+      // the SDK's deferred `onsessioninitialized` callback, which fires
+      // long after the assignment below.
+      transport: undefined as unknown as StreamableHTTPServerTransport,
+      lastActive: Date.now(),
+    };
+    record.transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (sessionId) => {
         // The SDK assigns the session ID *after* construction; bind the
@@ -338,21 +355,15 @@ export class McpForwarder {
     // fields as `T | undefined` rather than `T?`, so we go through
     // `unknown` to satisfy our stricter `exactOptionalPropertyTypes`.
     server
-      .connect(transport as unknown as Parameters<typeof server.connect>[0])
+      .connect(
+        record.transport as unknown as Parameters<typeof server.connect>[0],
+      )
       .catch((err: unknown) => {
         logger.error(
           `mcp-forwarder: server.connect failed: ${errorMessage(err)}`,
         );
       });
 
-    const record: SessionRecord = {
-      tenantName: ctx.tenantName,
-      serverName: ctx.serverName,
-      enabledTools: ctx.enabledTools,
-      server,
-      transport,
-      lastActive: Date.now(),
-    };
     return record;
   }
 
@@ -545,16 +556,7 @@ function filterTools<T extends { name: string }>(
   return tools.filter((t) => allow.has(t.name));
 }
 
-function pickHeader(value: string | string[] | undefined): string | undefined {
-  if (Array.isArray(value)) return value[0];
-  return value;
-}
-
 function respondJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json' });
   res.end(JSON.stringify(body));
-}
-
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }

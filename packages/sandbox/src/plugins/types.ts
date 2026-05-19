@@ -4,7 +4,7 @@ import type { z } from 'zod';
 import type { ProxyPolicy } from '#src/config/proxy-policy.js';
 import type { SandboxConfig } from '#src/config/sandbox.js';
 import type { UserConfig } from '#src/config/user.js';
-import type { SandboxEntry, State } from '#src/state/index.js';
+import type { SandboxEntry } from '#src/state/index.js';
 
 /**
  * One command a plugin wants the orchestrator to run inside the VM after the
@@ -197,9 +197,6 @@ export interface CliCommandContext {
 export interface SidecarContext {
   loadUserConfig: () => Promise<UserConfig>;
   loadSandboxConfig: (projectDir: string) => Promise<SandboxConfig>;
-  withState: <T>(
-    mutator: (state: State) => T | Promise<T>,
-  ) => Promise<{ state: State; result: T }>;
   sandboxes: SandboxRegistrationStream;
 }
 

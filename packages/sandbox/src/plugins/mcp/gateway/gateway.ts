@@ -7,8 +7,10 @@ import {
 
 import { logger } from '#src/logger.js';
 import type { SandboxEntry } from '#src/state/index.js';
+import { errorMessage } from '#src/utils/error-message.js';
 
 import type { McpForwarder } from './forwarder.js';
+import { pickHeader } from './http-utils.js';
 
 /**
  * Per-sandbox-per-server entry. Captures both the routing key (server
@@ -137,9 +139,7 @@ export class McpGateway {
         const pathname = new URL(req.url ?? '/', 'http://x').pathname;
         void this.#dispatch(pathname, req, res);
       } catch (err) {
-        logger.error(
-          `mcp-gateway: unhandled error: ${err instanceof Error ? err.message : String(err)}`,
-        );
+        logger.error(`mcp-gateway: unhandled error: ${errorMessage(err)}`);
         res.writeHead(500, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ error: 'internal_error' }));
       }
@@ -189,8 +189,6 @@ export class McpGateway {
 
   /**
    * Bound `{ host, port }`, or `null` when the server isn't listening.
-   * Useful for surfacing the port back into the plugin's slot under
-   * `state.proxy.sidecars` after `listen()`.
    */
   address(): { host: string; port: number } | null {
     if (this.#boundPort === null) return null;
@@ -320,9 +318,9 @@ export class McpGateway {
       body = await readJsonBody(req);
     } catch (err) {
       logger.warn(
-        `mcp-gateway: invalid request body for ${id.server}/${id.tenant.name}: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        `mcp-gateway: invalid request body for ${id.server}/${id.tenant.name}: ${errorMessage(
+          err,
+        )}`,
       );
       res.writeHead(400, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: 'invalid_body' }));
@@ -341,9 +339,9 @@ export class McpGateway {
       );
     } catch (err) {
       logger.error(
-        `mcp-gateway: forwarder for ${id.server}/${id.tenant.name} threw: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        `mcp-gateway: forwarder for ${id.server}/${id.tenant.name} threw: ${errorMessage(
+          err,
+        )}`,
       );
       if (!res.headersSent) {
         res.writeHead(502, { 'content-type': 'application/json' });
@@ -387,11 +385,6 @@ function parseForwardedFor(header: string | undefined): string | null {
   const first = header.split(',')[0]?.trim();
   if (first === undefined || first === '') return null;
   return first;
-}
-
-function pickHeader(value: string | string[] | undefined): string | undefined {
-  if (Array.isArray(value)) return value[0];
-  return value;
 }
 
 const ERROR_STATUS: Record<IdentifyFailureReason, number> = {

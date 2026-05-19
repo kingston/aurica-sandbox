@@ -19,37 +19,7 @@ import {
   readUpstreamSlot,
 } from '../gateway/credentials-store.js';
 import { FileOAuthProvider } from '../gateway/file-oauth-provider.js';
-import { mcpUserConfigSchema, type McpUserConfig } from '../schema.js';
-
-/**
- * Pull the `mcp` block out of `userConfig.plugins` and re-parse it through
- * the plugin's own schema. The framework types `plugins.<name>` as a union
- * across every registered plugin's user-config shape, so a property lookup
- * on the union doesn't narrow; re-parsing recovers the precise `McpUserConfig`
- * shape (and applies the empty-default for absent blocks).
- */
-function readMcpUserConfig(userConfig: {
-  plugins: Record<string, unknown>;
-}): McpUserConfig {
-  return mcpUserConfigSchema.parse(userConfig.plugins.mcp ?? {});
-}
-
-/**
- * Default client metadata sent during Dynamic Client Registration. The
- * upstream displays `client_name` to the user in the OAuth consent
- * screen, so a recognizable string is preferable over an opaque
- * identifier. Per-upstream overrides come from user config.
- *
- * `redirect_uris` is left blank here — the per-login callback URL is
- * built fresh each `mcp login` invocation (with a randomly-chosen
- * localhost port) and patched in before constructing the provider.
- */
-const BASE_CLIENT_METADATA: Omit<OAuthClientMetadata, 'redirect_uris'> = {
-  client_name: 'aurica-sandbox',
-  grant_types: ['authorization_code', 'refresh_token'],
-  response_types: ['code'],
-  token_endpoint_auth_method: 'none',
-};
+import { BASE_OAUTH_CLIENT_METADATA, readMcpUserConfig } from '../schema.js';
 
 interface LoginCallback {
   url: string;
@@ -168,9 +138,9 @@ export async function runMcpLogin(
   const callback = await createOAuthCallback();
   try {
     const clientMetadata: OAuthClientMetadata = {
-      ...BASE_CLIENT_METADATA,
+      ...BASE_OAUTH_CLIENT_METADATA,
       client_name:
-        upstreamConfig.clientName ?? BASE_CLIENT_METADATA.client_name,
+        upstreamConfig.clientName ?? BASE_OAUTH_CLIENT_METADATA.client_name,
       redirect_uris: [callback.url],
     };
 
@@ -363,18 +333,71 @@ function createDeferredUrl(): {
  * Skips the paste prompt entirely when stdin isn't a TTY (CI, piped
  * input) — there's nobody to prompt.
  */
-async function collectAuthCode(callback: LoginCallback): Promise<string> {
+/**
+ * Outcome of {@link parseCodeOrUrlInput}: either a recovered code or
+ * `null` for empty input. URL-parse failures throw directly.
+ */
+export function parseCodeOrUrlInput(raw: string): string | null {
+  const answer = raw.trim();
+  if (!answer) return null;
+  // Two accepted shapes: a full URL with `?code=…`, or a bare code.
+  if (/^https?:\/\//i.test(answer)) {
+    const parsed = new URL(answer);
+    const err = parsed.searchParams.get('error');
+    if (err) throw new Error(`OAuth error from upstream: ${err}`);
+    const code = parsed.searchParams.get('code');
+    if (!code) {
+      throw new Error('pasted URL has no `code` parameter');
+    }
+    return code;
+  }
+  return answer;
+}
+
+/**
+ * Optional injection points for {@link collectAuthCode}. Tests pass
+ * stubs; production callers omit them and the defaults wire to
+ * `process.stdin` / `process.stderr` and the real readline.
+ */
+export interface CollectAuthCodeOptions {
+  /**
+   * Reads one line from the user. Defaults to a readline prompt against
+   * stdin/stderr. Tests inject a stub to drive the race deterministically.
+   */
+  readLine?: (signal: AbortSignal) => Promise<string | null>;
+  /**
+   * Whether the paste prompt should run. Defaults to `process.stdin.isTTY`.
+   * Tests can force interactive mode without an actual TTY.
+   */
+  interactive?: boolean;
+}
+
+/**
+ * Resolve the OAuth `code` from either the loopback callback or a
+ * user-pasted redirect URL/code. Whichever finishes first wins; the
+ * loser is cancelled so the user isn't left at a dead prompt.
+ *
+ * Skips the paste prompt entirely when stdin isn't a TTY (CI, piped
+ * input) — there's nobody to prompt.
+ */
+export async function collectAuthCode(
+  callback: LoginCallback,
+  options: CollectAuthCodeOptions = {},
+): Promise<string> {
   const callbackPromise = callback.awaitCode();
-  if (!process.stdin.isTTY) {
+  const interactive = options.interactive ?? process.stdin.isTTY;
+  if (!interactive) {
     return callbackPromise;
   }
   const ac = new AbortController();
+  const reader = options.readLine ?? defaultReadLine;
   // When the paste prompt returns `null` (empty line / stdin closed) we
   // fall back to waiting on the loopback callback indefinitely — the
   // user might still complete the browser flow afterwards.
-  const pastePromise: Promise<string> = promptForCodeOrUrl(ac.signal).then(
-    (c) => c ?? callbackPromise,
-  );
+  const pastePromise: Promise<string> = reader(ac.signal).then((raw) => {
+    if (raw === null) return callbackPromise;
+    return parseCodeOrUrlInput(raw) ?? callbackPromise;
+  });
   try {
     return await Promise.race([callbackPromise, pastePromise]);
   } finally {
@@ -383,23 +406,11 @@ async function collectAuthCode(callback: LoginCallback): Promise<string> {
 }
 
 /**
- * Read a line from stdin and try to recover an OAuth `code` from it.
- *
- * Accepts either:
- *   - the full redirect URL the user copied out of their browser
- *     (typical when the loopback callback never reached us — wrong
- *     network, the tab got closed, etc.), or
- *   - a bare authorization code pasted from the URL's `?code=…`
- *     query parameter.
- *
- * Returns `null` if the line is empty or stdin closes — callers race
- * this against the loopback callback, so giving up cleanly is fine.
- *
- * The `signal` lets the caller cancel the prompt the instant the
- * loopback callback wins the race, so we don't leave the user staring
- * at a dead prompt.
+ * Default {@link CollectAuthCodeOptions.readLine}: prompt on
+ * stdin/stderr via readline. Returns `null` on abort (the loopback
+ * callback won the race) or an empty line; propagates any other error.
  */
-async function promptForCodeOrUrl(signal: AbortSignal): Promise<string | null> {
+async function defaultReadLine(signal: AbortSignal): Promise<string | null> {
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stderr,
@@ -413,23 +424,8 @@ async function promptForCodeOrUrl(signal: AbortSignal): Promise<string | null> {
       'Or paste the redirect URL (or just the `code` value) and press Enter: ',
       { signal },
     );
-    const answer = raw.trim();
-    if (!answer) return null;
-    // Two accepted shapes: a full URL with `?code=…`, or a bare code.
-    if (/^https?:\/\//i.test(answer)) {
-      const parsed = new URL(answer);
-      const err = parsed.searchParams.get('error');
-      if (err) throw new Error(`OAuth error from upstream: ${err}`);
-      const code = parsed.searchParams.get('code');
-      if (!code) {
-        throw new Error('pasted URL has no `code` parameter');
-      }
-      return code;
-    }
-    return answer;
+    return raw;
   } catch (err) {
-    // AbortError on signal-trigger is expected: the loopback callback
-    // won the race. Surface anything else.
     if (signal.aborted) return null;
     throw err;
   } finally {

@@ -11,7 +11,8 @@ import type {
   SandboxRegistrationStream,
 } from '#src/plugins/index.js';
 import { readState, withState } from '#src/state/index.js';
-import type { ProxyEntry, SandboxEntry, State } from '#src/state/index.js';
+import type { SandboxEntry, State } from '#src/state/index.js';
+import { errorMessage } from '#src/utils/error-message.js';
 
 import { SandboxConfigWatcher } from './config-watcher.js';
 import { deriveRulesFromConfig } from './derive-rules.js';
@@ -86,35 +87,6 @@ export async function runProxyProcess(
   });
   const addr = await proxy.listen();
 
-  // Boot-phase shadow of `state.proxy`. Sidecars can publish per-plugin
-  // slots into `pendingProxyEntry.sidecars` via `sidecarWithState`; the
-  // fully-populated entry is committed to disk after every sidecar has
-  // booted. Today no built-in plugin uses this — the MCP gateway binds
-  // a fixed port and doesn't publish anything — but the channel is
-  // preserved for future plugins that need to surface bound addresses
-  // or other late-bound state.
-  const pendingProxyEntry: ProxyEntry = {
-    pid: process.pid,
-    host: addr.host,
-    port: addr.port,
-    startedAt: new Date().toISOString(),
-    sidecars: {},
-  };
-  let proxyCommitted = false;
-  const sidecarWithState: <T>(
-    mutator: (state: State) => T | Promise<T>,
-  ) => Promise<{ state: State; result: T }> = async (mutator) => {
-    if (proxyCommitted) return withState(mutator);
-    // Shadow state: real `sandboxes` (so sidecars can read them) plus
-    // the not-yet-committed proxy entry. Mutations to
-    // `state.proxy.sidecars[<name>]` land on `pendingProxyEntry`
-    // because the mutator receives the same object reference.
-    const snapshot = await readState();
-    const shadow: State = { ...snapshot, proxy: pendingProxyEntry };
-    const result = await mutator(shadow);
-    return { state: shadow, result };
-  };
-
   const watcher = new SandboxConfigWatcher();
   const linuxUser = process.env.USER ?? 'sandbox';
 
@@ -186,16 +158,22 @@ export async function runProxyProcess(
     });
   });
 
+  // Commit the proxy entry to disk so `requireRunningProxy` succeeds
+  // for any subsequent CLI call (e.g. `create`).
+  await withState((state) => {
+    state.proxy = {
+      pid: process.pid,
+      host: addr.host,
+      port: addr.port,
+      startedAt: new Date().toISOString(),
+    };
+  });
+
   // Start any plugin-contributed sidecars. Each plugin's hook is called
   // once at boot; the returned handle is retained so we can await its
   // `stop()` on shutdown. Sidecars that throw at boot fail the whole
   // proxy startup — partial readiness would hide real configuration
   // errors behind subtle later-stage failures.
-  //
-  // Sidecars boot BEFORE `state.proxy` is committed, so they write
-  // their slot through `sidecarWithState` (which mutates
-  // `pendingProxyEntry`); the slot lands on disk together with the
-  // proxy entry in the commit step below.
   //
   // Loaders are injected (rather than imported by the plugin) to keep
   // plugin modules out of the registry-init cycle that runs through
@@ -207,23 +185,14 @@ export async function runProxyProcess(
     const sidecar = await plugin.proxySidecar({
       loadUserConfig,
       loadSandboxConfig,
-      withState: sidecarWithState,
       sandboxes: stream,
     });
     if (sidecar) sidecars.push(sidecar);
   }
 
-  // Commit the proxy entry — fully populated with sidecar slots — to
-  // disk in one atomic write. After this point `requireRunningProxy`
-  // succeeds and `create` is guaranteed to observe every sidecar slot.
-  await withState((state) => {
-    state.proxy = pendingProxyEntry;
-  });
-  proxyCommitted = true;
-
-  // Register sandboxes now that runtime state (sidecar slots included)
-  // is on disk. Plugins like `mcp` read this state to derive their
-  // domains, policies, and post-lockdown commands.
+  // Register sandboxes now that the proxy entry is on disk. Plugins like
+  // `mcp` read this state to derive their domains, policies, and
+  // post-lockdown commands.
   await applyRegistrations(proxy, watcher, await readState(), linuxUser, log);
 
   log.info(`proxy http://${addr.host}:${addr.port} (pid ${process.pid})`);
@@ -252,9 +221,7 @@ export async function runProxyProcess(
         try {
           await sidecar.stop();
         } catch (err) {
-          log.error(
-            `sidecar stop failed: ${err instanceof Error ? err.message : String(err)}`,
-          );
+          log.error(`sidecar stop failed: ${errorMessage(err)}`);
         }
       }),
     );

@@ -35,15 +35,6 @@ const proxyEntrySchema = z.object({
   host: z.string(),
   port: z.number().int(),
   startedAt: z.string(),
-  /**
-   * Per-plugin sidecar state, keyed by plugin name. Each sidecar owns
-   * its own slot (shape is opaque to the proxy) and is expected to
-   * populate it on start and clear it on stop. The proxy itself never
-   * reads from this bag — it exists so external tooling (e.g. `mcp
-   * list`) can discover sidecar endpoints without the proxy having to
-   * know about specific plugins.
-   */
-  sidecars: z.record(z.string(), z.unknown()).default({}),
 });
 
 export type ProxyEntry = z.infer<typeof proxyEntrySchema>;

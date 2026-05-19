@@ -1,6 +1,7 @@
 import type { ProxyPolicy } from '#src/config/proxy-policy.js';
 import { logger } from '#src/logger.js';
 import type { SandboxEntry } from '#src/state/index.js';
+import { errorMessage } from '#src/utils/error-message.js';
 
 import { makeGeneratePlaceholder } from '../expand.js';
 import type {
@@ -23,6 +24,8 @@ import {
   mcpProjectConfigSchema,
   mcpUserConfigSchema,
   normalizeServerEntries,
+  readMcpUserConfig,
+  sidecarOAuthClientMetadata,
   type CanonicalServerEntry,
   type McpProjectConfig,
   type McpUserConfig,
@@ -86,11 +89,20 @@ export const mcpPlugin: SandboxPlugin<
     // dedicated watcher, and proxy reloads are when users typically
     // edit it. This lets `mcp login` for a new upstream take effect on
     // the next reload without restarting the proxy.
-    const unsubscribe = ctx.sandboxes.subscribe((snapshot) => {
-      void Promise.all([
+    //
+    // Rebuilds are serialized via {@link runSerialized}: back-to-back
+    // publishes (rapid create+destroy, or a watcher burst) could
+    // otherwise interleave so the last-completed rebuild — not the
+    // last-fired — wins.
+    const scheduleRebuild = runSerialized(async () => {
+      const snapshot = ctx.sandboxes.snapshot();
+      await Promise.all([
         rebuildTenants(gateway, ctx.loadSandboxConfig, snapshot),
         rebuildUpstreamCatalog(forwarder, ctx.loadUserConfig),
       ]);
+    });
+    const unsubscribe = ctx.sandboxes.subscribe(() => {
+      scheduleRebuild();
     });
 
     return {
@@ -264,7 +276,7 @@ async function rebuildTenants(
         );
       } catch (err) {
         logger.error(
-          `mcp-gateway: failed to load ${sandbox.name}'s sandbox.json: ${err instanceof Error ? err.message : String(err)}`,
+          `mcp-gateway: failed to load ${sandbox.name}'s sandbox.json: ${errorMessage(err)}`,
         );
         serversByName.set(sandbox.name, []);
       }
@@ -280,21 +292,6 @@ async function rebuildTenants(
 }
 
 /**
- * Default OAuth client metadata advertised to upstreams during refresh.
- * Must match what `mcp login` registered, otherwise the SDK's `auth()`
- * helper attempts a re-registration on every refresh.
- */
-function defaultClientMetadata(): UpstreamCatalogEntry['clientMetadata'] {
-  return {
-    client_name: 'aurica-sandbox',
-    grant_types: ['authorization_code', 'refresh_token'],
-    response_types: ['code'],
-    token_endpoint_auth_method: 'none',
-    redirect_uris: ['http://127.0.0.1/unused'],
-  };
-}
-
-/**
  * Refresh the forwarder's upstream catalog from the user-level
  * `plugins.mcp.upstreams` block. On config-load failure the catalog is
  * cleared and every MCP request gets a structured "no upstream" error
@@ -305,27 +302,13 @@ async function rebuildUpstreamCatalog(
   forwarder: McpForwarder,
   loadUserConfig: SidecarContext['loadUserConfig'],
 ): Promise<void> {
-  let userConfig: Awaited<ReturnType<SidecarContext['loadUserConfig']>>;
-  try {
-    userConfig = await loadUserConfig();
-  } catch (err) {
-    logger.error(
-      `mcp-gateway: failed to load user config: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    forwarder.setCatalog(new Map());
-    return;
-  }
-  // Re-parse through this plugin's schema to narrow the framework's
-  // union-typed `plugins.<name>` to a precise `McpUserConfig` and pick
-  // up the empty-default for absent blocks.
   let mcp: McpUserConfig;
   try {
-    mcp = mcpUserConfigSchema.parse(
-      (userConfig.plugins as { mcp?: unknown }).mcp ?? {},
-    );
+    const userConfig = await loadUserConfig();
+    mcp = readMcpUserConfig(userConfig);
   } catch (err) {
     logger.error(
-      `mcp-gateway: user config plugins.mcp is invalid: ${err instanceof Error ? err.message : String(err)}`,
+      `mcp-gateway: failed to load user config: ${errorMessage(err)}`,
     );
     forwarder.setCatalog(new Map());
     return;
@@ -334,11 +317,43 @@ async function rebuildUpstreamCatalog(
   for (const [name, def] of Object.entries(mcp.upstreams)) {
     catalog.set(name, {
       url: def.url,
-      clientMetadata: {
-        ...defaultClientMetadata(),
-        ...(def.clientName ? { client_name: def.clientName } : {}),
-      },
+      clientMetadata: sidecarOAuthClientMetadata(def),
     });
   }
   forwarder.setCatalog(catalog satisfies UpstreamCatalog);
+}
+
+/**
+ * Wrap an async task so concurrent invocations collapse: only one run
+ * is in flight at a time, and any invocations that arrive while a run
+ * is active cause exactly one additional run to fire when the current
+ * one settles. The returned function is fire-and-forget; errors thrown
+ * by `task` are logged.
+ *
+ * Lets the sandbox-snapshot subscriber re-trigger a rebuild without
+ * interleaving stale and fresh snapshots — the last-fired publish is
+ * always observed by the final run.
+ */
+function runSerialized(task: () => Promise<void>): () => void {
+  let running = false;
+  let pending = false;
+  const run = (): void => {
+    if (running) {
+      pending = true;
+      return;
+    }
+    running = true;
+    void task()
+      .catch((err: unknown) => {
+        logger.error(`mcp-gateway: rebuild failed: ${errorMessage(err)}`);
+      })
+      .finally(() => {
+        running = false;
+        if (pending) {
+          pending = false;
+          run();
+        }
+      });
+  };
+  return run;
 }
