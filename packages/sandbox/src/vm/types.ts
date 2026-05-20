@@ -15,10 +15,22 @@ export interface SandboxVM {
  */
 export interface VMExec {
   /**
-   * Push the contents of `localDir` into `<defaultUserHome>/<dest>` inside
-   * the VM. Recursive. The destination directory is created if absent.
+   * Push the contents of `localDir` into the VM at `dest`. Recursive. The
+   * destination directory is created if absent. `dest` is either a path
+   * relative to the default user's home (e.g. `code/repo`) or an absolute
+   * path (must start with `/`, e.g. `/workspaces/repo`). Files are written
+   * as the default user via tar-over-stdin, so the destination must be
+   * writable by them.
    */
   pushDir(localDir: string, dest: string): Promise<void>;
+
+  /**
+   * Push a single host file to `vmAbsPath` inside the VM. The path must be
+   * absolute (start with `/`). Parent directories are created if missing.
+   * File mode and mtime are preserved (single-file tar-over-stdin). The
+   * destination must be writable by the default user.
+   */
+  pushFile(localFile: string, vmAbsPath: string): Promise<void>;
 
   /**
    * Run a command inside the VM. `user: 'root'` switches to root; `'default'`

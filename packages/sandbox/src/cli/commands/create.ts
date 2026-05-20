@@ -17,6 +17,7 @@ import {
 } from '#src/state/index.js';
 import { defaultProvider } from '#src/vm/index.js';
 import { createInitShell } from '#src/vm/init/create-init-shell.js';
+import { resolveFileCopies } from '#src/vm/init/resolve-file-copies.js';
 import { runInitPipeline } from '#src/vm/init/run-init.js';
 import { waitForIp } from '#src/vm/wait-for-ip.js';
 
@@ -132,6 +133,11 @@ export async function runCreate(
   const name = nameArg ?? (await defaultName(projectDir));
   const config = await loadSandboxConfig(projectDir);
 
+  // Resolve declared host->VM file copies before creating the VM. A typo
+  // or missing `.env` should fail fast here, not after we've spent 10s
+  // standing up a machine we're about to throw away.
+  const fileCopies = await resolveFileCopies(projectDir, config.files);
+
   const createSpinner = ora(`creating VM ${name}`).start();
   try {
     await defaultProvider.createVM({ name });
@@ -226,6 +232,7 @@ export async function runCreate(
       userInitDir,
       projectInitDir,
       pluginCommands: expanded.commands,
+      fileCopies,
       ...(expanded.projectInitCwdOverride !== undefined
         ? { projectInitCwdOverride: expanded.projectInitCwdOverride }
         : {}),

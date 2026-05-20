@@ -26,6 +26,10 @@ function makeFakeExec(): {
       calls.push({ kind: 'push', arg: `${localDir} -> ${dest}` });
       return Promise.resolve();
     },
+    pushFile: (localFile, vmAbsPath) => {
+      calls.push({ kind: 'push', arg: `file ${localFile} -> ${vmAbsPath}` });
+      return Promise.resolve();
+    },
     run: ({ user, argv, cwd }) => {
       calls.push({ kind: 'run', arg: argv.join(' '), user, cwd });
       return Promise.resolve();
@@ -145,6 +149,61 @@ describe('runInitPipeline', () => {
       'bash -l /home/sandbox/.aurica-init-staging/user/setup-user.sh',
       'bash -l /home/sandbox/.aurica-init-staging/project/setup-root.sh',
     ]);
+  });
+
+  it('runs fileCopies after built-in but before plugin commands', async () => {
+    const { exec, calls } = makeFakeExec();
+    await runInitPipeline(exec, {
+      user: 'sandbox',
+      builtinScript: '#!/bin/bash\n:',
+      userInitDir: null,
+      projectInitDir: null,
+      fileCopies: [
+        { absSrc: '/host/.env', isFile: true, dest: '.env' },
+        {
+          absSrc: '/host/skills',
+          isFile: false,
+          dest: '~/.claude/skills',
+        },
+      ],
+      pluginCommands: [
+        { user: 'root', argv: ['apt-get', 'install', '-y', 'jq'] },
+      ],
+    });
+
+    const ordered = calls.map((c) => `${c.kind}:${c.arg}`);
+    const builtinIdx = ordered.findIndex((s) =>
+      s.includes('builtin/builtin.sh'),
+    );
+    const fileCopyIdx = ordered.findIndex((s) =>
+      s.includes('file /host/.env -> /workspaces/.env'),
+    );
+    const dirCopyIdx = ordered.findIndex((s) =>
+      s.includes('/host/skills -> /home/sandbox/.claude/skills'),
+    );
+    const pluginIdx = ordered.findIndex((s) =>
+      s.includes('apt-get install -y jq'),
+    );
+    expect(builtinIdx).toBeGreaterThanOrEqual(0);
+    expect(fileCopyIdx).toBeGreaterThan(builtinIdx);
+    expect(dirCopyIdx).toBeGreaterThan(fileCopyIdx);
+    expect(pluginIdx).toBeGreaterThan(dirCopyIdx);
+  });
+
+  it('uses projectInitCwdOverride as the base for relative file dests', async () => {
+    const { exec, calls } = makeFakeExec();
+    await runInitPipeline(exec, {
+      user: 'sandbox',
+      builtinScript: '#!/bin/bash\n:',
+      userInitDir: null,
+      projectInitDir: null,
+      projectInitCwdOverride: '/workspaces/repo',
+      fileCopies: [{ absSrc: '/host/.env', isFile: true, dest: '.env' }],
+    });
+    const fileCopy = calls.find(
+      (c) => c.kind === 'push' && c.arg.startsWith('file '),
+    );
+    expect(fileCopy?.arg).toBe('file /host/.env -> /workspaces/repo/.env');
   });
 
   it('applies pluginCommands after built-in with the requested user', async () => {
@@ -277,6 +336,10 @@ describe('runInitPipeline', () => {
     let runCount = 0;
     const exec: VMExec = {
       pushDir: () => {
+        calls.push({ kind: 'push', arg: '' });
+        return Promise.resolve();
+      },
+      pushFile: () => {
         calls.push({ kind: 'push', arg: '' });
         return Promise.resolve();
       },

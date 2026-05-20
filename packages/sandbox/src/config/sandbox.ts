@@ -30,6 +30,25 @@ export type {
 } from './proxy-policy.js';
 
 /**
+ * Single host-to-VM file/directory copy declared in the project config.
+ *
+ * `src`: host path. A leading `~/` is expanded against the host user's
+ * home directory; any other path is resolved against the project
+ * directory containing `.aurica/sandbox.json`.
+ *
+ * `dest`: VM path. A leading `~/` is expanded against the default user's
+ * home inside the VM (`/home/<user>/...`); any other path is resolved
+ * against the project working directory inside the VM (the same value
+ * `setup-project.sh` runs in — typically `/workspaces`, or the github
+ * plugin's checkout root).
+ */
+export const fileCopyEntrySchema = z.object({
+  src: z.string().min(1),
+  dest: z.string().min(1),
+});
+export type FileCopyEntry = z.infer<typeof fileCopyEntrySchema>;
+
+/**
  * Project-side sandbox config schema. `plugins` is a keyed object where
  * each key is a plugin name and the value is that plugin's
  * project-level config — opt-in by inclusion. Strict: every block is
@@ -50,6 +69,7 @@ export const sandboxConfigSchema = z.object({
       policies: z.array(proxyPolicySchema).default([]),
     })
     .default({ domains: [], policies: [] }),
+  files: z.array(fileCopyEntrySchema).default([]),
   plugins: projectPluginsSchema.default({}),
 });
 
@@ -94,6 +114,7 @@ export function defaultSandboxConfig(
     name,
     resources: { cpu: 4, memoryMb: 8192, diskGb: 50 },
     proxy: { domains: [], policies: [] },
+    files: [],
     plugins: {} as ProjectPlugins,
   };
 }
