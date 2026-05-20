@@ -4,6 +4,9 @@ import path from 'node:path';
 
 import type { VMExec } from '#src/vm/types.js';
 
+import { pushFileCopies } from './push-file-copies.js';
+import type { ResolvedFileCopy } from './resolve-file-copies.js';
+
 export type { VMExec };
 
 const STAGING_DIR = '.aurica-init-staging';
@@ -42,6 +45,14 @@ export interface InitPipelineOptions {
    * this hook — sees them.
    */
   projectInitCwdOverride?: string;
+  /**
+   * Pre-resolved host files/directories to copy into the VM. Runs after
+   * the built-in bootstrap but before plugin commands and user/project
+   * hooks, so hooks can read the copied files (e.g. source a `.env`).
+   * Destinations without a `~/` prefix land under the same `projectCwd`
+   * used for `setup-project.sh`.
+   */
+  fileCopies?: ResolvedFileCopy[];
 }
 
 const DEFAULT_PROJECT_INIT_CWD = '/workspaces';
@@ -73,10 +84,11 @@ async function fileExistsIn(dir: string, name: string): Promise<boolean> {
  *
  * Order is fixed:
  *  1. built-in (base packages + plugin bootstrap + iptables lockdown) — run as root
- *  2. plugin commands (post-lockdown) — argv-only, each picks its own user
- *  3. user-level setup-root.sh / setup-user.sh / setup-project.sh
- *  4. project-level setup-root.sh / setup-user.sh / setup-project.sh
- *  5. cleanup of the staging directory
+ *  2. file copies (host -> VM, post-lockdown) — config `files[]`
+ *  3. plugin commands (post-lockdown) — argv-only, each picks its own user
+ *  4. user-level setup-root.sh / setup-user.sh / setup-project.sh
+ *  5. project-level setup-root.sh / setup-user.sh / setup-project.sh
+ *  6. cleanup of the staging directory
  *
  * Each script within a layer is run only if it exists. `setup-project.sh`
  * additionally requires `projectInitContext` to be set — the script only
@@ -105,12 +117,21 @@ export async function runInitPipeline(
     });
   });
 
-  // 2. Plugin commands.
+  // 2. File copies (host -> VM). Sits between the built-in bootstrap and
+  //    plugin commands so plugin commands AND every hook layer can read
+  //    the copied files. The lockdown step has already run inside the
+  //    bootstrap, but copies travel over the orbctl control channel, not
+  //    the VM's network — iptables doesn't apply.
+  if (opts.fileCopies && opts.fileCopies.length > 0) {
+    await pushFileCopies(exec, opts.user, projectCwd, opts.fileCopies);
+  }
+
+  // 3. Plugin commands (post-lockdown, post-file-copy).
   for (const cmd of opts.pluginCommands ?? []) {
     await exec.run({ user: cmd.user, argv: cmd.argv });
   }
 
-  // 3 & 4. User and project hooks.
+  // 4 & 5. User and project hooks.
   await runHookLayer(exec, opts.user, 'user', opts.userInitDir, projectCwd);
   await runHookLayer(
     exec,
@@ -120,7 +141,7 @@ export async function runInitPipeline(
     projectCwd,
   );
 
-  // 5. Cleanup staging dir. Best-effort: a failure here doesn't change the
+  // 6. Cleanup staging dir. Best-effort: a failure here doesn't change the
   //    correctness of the bootstrap, so we don't gate success on it.
   try {
     await exec.run({
