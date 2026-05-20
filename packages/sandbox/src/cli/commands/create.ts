@@ -104,7 +104,7 @@ export async function destroyIfExists(name: string): Promise<void> {
 }
 
 /**
- * Create a fresh sandbox VM end-to-end:
+ * Create a primary sandbox VM end-to-end:
  *
  *   1. Read `.aurica/sandbox.json` (with cross-field validation).
  *   2. Create a bare `--isolated` VM via the active provider. If a VM
@@ -116,8 +116,11 @@ export async function destroyIfExists(name: string): Promise<void> {
  *      then user-level hooks from `~/.aurica/sandbox/init/`, then
  *      project-level hooks from `<projectDir>/.aurica/init/`. Output
  *      streams live to the terminal.
- *   5. Register the sandbox in state with `status: 'running'` and reload
- *      the proxy so its allowlist + actions take effect.
+ *   5. Stop the VM so it can be cloned cleanly via `fork`. Register it in
+ *      state with `kind: 'primary'` and `status: 'stopped'`.
+ *
+ * Pass `start: true` to skip the stop step and leave the VM running
+ * immediately after init (equivalent to the old default behavior).
  *
  * On init failure: record `status: 'failed-init'` and rethrow. The VM is
  * left in place for inspection; the caller can run `aurica-sandbox
@@ -126,6 +129,7 @@ export async function destroyIfExists(name: string): Promise<void> {
 export async function runCreate(
   projectDir: string,
   nameArg: string | undefined,
+  { start = false }: { start?: boolean } = {},
 ): Promise<void> {
   // Fail fast if proxy isn't running.
   const proxy = await requireRunningProxy();
@@ -194,6 +198,7 @@ export async function runCreate(
       ip,
       createdAt: new Date().toISOString(),
       authSecret,
+      kind: 'primary',
     };
   });
   await signalProxyReload();
@@ -245,13 +250,41 @@ export async function runCreate(
     throw err;
   }
 
-  await withState((state) => {
-    const entry = state.sandboxes[name];
-    if (entry) entry.status = 'running';
-  });
-  await signalProxyReload();
-
-  logger.log(
-    JSON.stringify({ name, status: 'running', ip, projectDir }, null, 2),
-  );
+  if (start) {
+    // Leave VM running — caller wants to work in it directly.
+    await withState((state) => {
+      const entry = state.sandboxes[name];
+      if (entry) entry.status = 'running';
+    });
+    await signalProxyReload();
+    logger.log(
+      JSON.stringify({ name, status: 'running', ip, projectDir }, null, 2),
+    );
+  } else {
+    // Stop the VM so it can be cleanly cloned by `fork`. The primary is a
+    // base image, not a working sandbox; forks are the working sandboxes.
+    const stopSpinner = ora(`stopping primary VM ${name}`).start();
+    try {
+      await defaultProvider.stopVM(name);
+      stopSpinner.succeed(`primary VM ${name} stopped`);
+    } catch (err) {
+      stopSpinner.fail();
+      throw err;
+    }
+    await withState((state) => {
+      const entry = state.sandboxes[name];
+      if (entry) {
+        entry.status = 'stopped';
+        entry.ip = null;
+      }
+    });
+    await signalProxyReload();
+    logger.log(
+      JSON.stringify(
+        { name, status: 'stopped', kind: 'primary', projectDir },
+        null,
+        2,
+      ),
+    );
+  }
 }

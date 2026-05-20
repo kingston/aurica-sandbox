@@ -65,6 +65,14 @@ export interface HostBridgeIp {
 
 export interface SandboxVMProvider {
   createVM: (options: CreateVMOptions) => Promise<SandboxVM>;
+  /**
+   * Clone an existing stopped VM into a new VM with the given name. The
+   * source VM is paused briefly during the clone operation and resumes its
+   * prior state (stopped) when done. The new VM starts in the stopped state;
+   * callers must `startVM` it separately. Disk is copy-on-write — no
+   * double usage until the fork diverges.
+   */
+  cloneVM: (sourceName: string, destName: string) => Promise<SandboxVM>;
   destroyVM: (name: string) => Promise<void>;
   startVM: (name: string) => Promise<SandboxVM>;
   stopVM: (name: string) => Promise<void>;

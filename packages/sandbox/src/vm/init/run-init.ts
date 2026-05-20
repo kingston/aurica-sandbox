@@ -11,6 +11,26 @@ export type { VMExec };
 
 const STAGING_DIR = '.aurica-init-staging';
 
+/** Inputs to {@link runForkInitHooks}. */
+export interface ForkInitHooksOptions {
+  /** Default Linux user inside the VM. */
+  user: string;
+  /** Name of the fork VM. Passed to hooks as `FORK_NAME`. */
+  forkName: string;
+  /** Name of the primary VM this was cloned from. Passed as `MASTER_NAME`. */
+  masterName: string;
+  /** Branch arg from `fork --branch`. Passed as `FORK_BRANCH` (may be empty). */
+  branch: string;
+  /** Stable 1-based fork index. Passed as `CONCURRENCY_INDEX`. */
+  concurrencyIndex: number;
+  /** Host path to `~/.aurica/sandbox/init`, or null if absent. */
+  userInitDir: string | null;
+  /** Host path to `<projectDir>/.aurica/init`, or null if absent. */
+  projectInitDir: string | null;
+  /** Working directory for `setup-fork.sh`. Defaults to `/workspaces`. */
+  projectInitCwdOverride?: string;
+}
+
 /** Inputs to {@link runInitPipeline}. */
 export interface InitPipelineOptions {
   /**
@@ -151,6 +171,84 @@ export async function runInitPipeline(
   } catch {
     /* ignore */
   }
+}
+
+/**
+ * Run `setup-fork.sh` hook scripts (user-level and project-level) after a
+ * fork VM has booted. These hooks allow each fork to diverge from the primary
+ * (e.g. check out a different branch, run `pnpm install`).
+ *
+ * Env vars injected into every hook:
+ *   - `FORK_NAME` — the fork VM's name
+ *   - `MASTER_NAME` — the primary VM this was cloned from
+ *   - `FORK_BRANCH` — value of `--branch` flag (empty string if not provided)
+ *   - `CONCURRENCY_INDEX` — stable 1-based integer unique among forks of the same primary
+ *
+ * Hook files are pushed from the host to a temporary staging directory inside
+ * the VM, executed once, then cleaned up. Each hook runs as the default user
+ * under `bash -l` so mise-managed tools are on PATH.
+ */
+export async function runForkInitHooks(
+  exec: VMExec,
+  opts: ForkInitHooksOptions,
+): Promise<void> {
+  const stagingHome = `/home/${opts.user}/${STAGING_DIR}`;
+  const projectCwd = opts.projectInitCwdOverride ?? DEFAULT_PROJECT_INIT_CWD;
+
+  const hookEnv = [
+    `FORK_NAME=${opts.forkName}`,
+    `MASTER_NAME=${opts.masterName}`,
+    `FORK_BRANCH=${opts.branch}`,
+    `CONCURRENCY_INDEX=${opts.concurrencyIndex}`,
+  ].join(' ');
+
+  await runForkHookLayer(
+    exec,
+    opts.user,
+    'user-fork',
+    opts.userInitDir,
+    projectCwd,
+    hookEnv,
+    stagingHome,
+  );
+  await runForkHookLayer(
+    exec,
+    opts.user,
+    'project-fork',
+    opts.projectInitDir,
+    projectCwd,
+    hookEnv,
+    stagingHome,
+  );
+
+  // Best-effort staging cleanup.
+  try {
+    await exec.run({ user: 'root', argv: ['rm', '-rf', stagingHome] });
+  } catch {
+    /* ignore */
+  }
+}
+
+async function runForkHookLayer(
+  exec: VMExec,
+  _vmUser: string,
+  layerKey: string,
+  dir: string | null,
+  projectCwd: string,
+  hookEnv: string,
+  stagingHome: string,
+): Promise<void> {
+  if (!dir) return;
+  const hasHook = await fileExistsIn(dir, 'setup-fork.sh');
+  if (!hasHook) return;
+
+  await exec.pushDir(dir, `${STAGING_DIR}/${layerKey}`);
+  const stagingPath = `${stagingHome}/${layerKey}`;
+  await exec.run({
+    user: 'default',
+    cwd: projectCwd,
+    argv: ['bash', '-c', `${hookEnv} bash -l ${stagingPath}/setup-fork.sh`],
+  });
 }
 
 async function runHookLayer(

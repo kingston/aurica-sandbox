@@ -26,6 +26,24 @@ const sandboxEntrySchema = z.object({
    * persisted, so an entry that lacks one is malformed.
    */
   authSecret: z.string().min(1),
+  /**
+   * Whether this is a primary VM (the base image for a project) or a fork
+   * cloned from it. Defaults to `'primary'` for existing entries written
+   * before this field was introduced.
+   */
+  kind: z.enum(['primary', 'fork']).default('primary'),
+  /**
+   * For forks: the name of the primary VM this was cloned from. Absent on
+   * primary entries.
+   */
+  parentName: z.string().optional(),
+  /**
+   * For forks: a stable 1-based integer unique among all forks of the same
+   * primary. Allows hooks and services inside the fork to derive
+   * non-colliding port numbers (e.g. `3000 + CONCURRENCY_INDEX`). Gaps
+   * created by destroyed forks are reused by the next fork created.
+   */
+  concurrencyIndex: z.number().int().positive().optional(),
 });
 
 export type SandboxEntry = z.infer<typeof sandboxEntrySchema>;

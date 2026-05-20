@@ -7,6 +7,7 @@ import { Command } from 'commander';
 import { runCa } from '#src/cli/commands/ca.js';
 import { runCreate } from '#src/cli/commands/create.js';
 import { runDestroy } from '#src/cli/commands/destroy.js';
+import { runFork } from '#src/cli/commands/fork.js';
 import { runInit } from '#src/cli/commands/init.js';
 import { runList } from '#src/cli/commands/list.js';
 import { runRebuild } from '#src/cli/commands/rebuild.js';
@@ -59,10 +60,21 @@ program
 program
   .command('create [name]')
   .description(
-    'create a sandbox VM and run init (default name: <folder>-<branch>)',
+    'create a primary sandbox VM and run init (default name: <folder>-<branch>); VM is stopped after init and ready to fork',
   )
-  .action(async (name: string | undefined) => {
-    await runCreate(process.cwd(), name);
+  .option('--start', 'leave the VM running after init instead of stopping it')
+  .action(async (name: string | undefined, opts: { start: boolean }) => {
+    await runCreate(process.cwd(), name, { start: opts.start });
+  });
+
+program
+  .command('fork [name]')
+  .description(
+    'clone the project primary into a new running fork (default name: <primary>-fork-<N>)',
+  )
+  .option('--branch <branch>', 'branch hint passed to setup-fork.sh hooks', '')
+  .action(async (name: string | undefined, opts: { branch: string }) => {
+    await runFork(process.cwd(), name, { branch: opts.branch });
   });
 
 program
@@ -92,10 +104,17 @@ program
 
 program
   .command('destroy <name>')
-  .description('destroy a sandbox')
+  .description(
+    'destroy a sandbox (primaries with live forks require --cascade)',
+  )
   .option('-f, --force', 'destroy even if not registered', false)
-  .action(async (name: string, opts: { force: boolean }) => {
-    await runDestroy(name, opts.force);
+  .option(
+    '--cascade',
+    'also destroy all forks when destroying a primary',
+    false,
+  )
+  .action(async (name: string, opts: { force: boolean; cascade: boolean }) => {
+    await runDestroy(name, opts.force, opts.cascade);
   });
 
 program

@@ -3,12 +3,7 @@ import ora from 'ora';
 import { signalProxyReload, withState } from '#src/state/index.js';
 import { defaultProvider } from '#src/vm/index.js';
 
-/**
- * Unregister `name` from state and destroy the underlying VM. With `force`
- * true, missing state entries and VM-destroy failures are tolerated — useful
- * when state and the VM provider have drifted out of sync.
- */
-export async function runDestroy(name: string, force: boolean): Promise<void> {
+async function destroyOne(name: string, force: boolean): Promise<void> {
   const { result: registered } = await withState((state) => {
     const exists = name in state.sandboxes;
     if (exists) {
@@ -37,6 +32,43 @@ export async function runDestroy(name: string, force: boolean): Promise<void> {
       throw err;
     }
   }
+}
 
+/**
+ * Unregister `name` from state and destroy the underlying VM.
+ *
+ * If `name` is a primary with live forks, the destroy is refused unless
+ * `cascade` is true, in which case all forks are destroyed first.
+ *
+ * With `force` true, missing state entries and VM-destroy failures are
+ * tolerated — useful when state and the VM provider have drifted out of sync.
+ */
+export async function runDestroy(
+  name: string,
+  force: boolean,
+  cascade = false,
+): Promise<void> {
+  // Check for live forks before touching anything.
+  const { result: forkNames } = await withState((state) => {
+    const entry = state.sandboxes[name];
+    if (entry?.kind !== 'primary') return [];
+    return Object.values(state.sandboxes)
+      .filter((e) => e.kind === 'fork' && e.parentName === name)
+      .map((e) => e.name);
+  });
+
+  if (forkNames.length > 0 && !cascade) {
+    throw new Error(
+      `Cannot destroy primary ${name}: ${forkNames.length} fork(s) still exist: ${forkNames.join(', ')}.\n` +
+        `Destroy them first or use --cascade to remove them automatically.`,
+    );
+  }
+
+  // Cascade: destroy all forks in parallel, then the primary.
+  if (forkNames.length > 0) {
+    await Promise.all(forkNames.map((forkName) => destroyOne(forkName, force)));
+  }
+
+  await destroyOne(name, force);
   await signalProxyReload();
 }
