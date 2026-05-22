@@ -1,5 +1,4 @@
 import { randomBytes } from 'node:crypto';
-import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -15,6 +14,7 @@ import {
   signalProxyReload,
   withState,
 } from '#src/state/index.js';
+import { statDirOrNull } from '#src/utils/path-exists.js';
 import { defaultProvider } from '#src/vm/index.js';
 import { createInitShell } from '#src/vm/init/create-init-shell.js';
 import { resolveFileCopies } from '#src/vm/init/resolve-file-copies.js';
@@ -43,15 +43,6 @@ export async function defaultName(projectDir: string): Promise<string> {
     /* not a git repo; fall through */
   }
   return folder;
-}
-
-async function statDirOrNull(p: string): Promise<string | null> {
-  try {
-    const stat = await fs.stat(p);
-    return stat.isDirectory() ? p : null;
-  } catch {
-    return null;
-  }
 }
 
 /**

@@ -1,4 +1,3 @@
-import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -11,6 +10,7 @@ import {
   withState,
 } from '#src/state/index.js';
 import type { SandboxEntry, State } from '#src/state/index.js';
+import { statDirOrNull } from '#src/utils/path-exists.js';
 import { defaultProvider } from '#src/vm/index.js';
 import { runForkInitHooks } from '#src/vm/init/run-init.js';
 import { waitForIp } from '#src/vm/wait-for-ip.js';
@@ -30,9 +30,12 @@ function findPrimary(
 
 /**
  * Pick the lowest unused 1-based concurrency index among existing forks of
- * the given primary.
+ * the given primary. Gaps left by destroyed forks are reused.
  */
-function nextConcurrencyIndex(state: State, primaryName: string): number {
+export function nextConcurrencyIndex(
+  state: State,
+  primaryName: string,
+): number {
   const used = new Set(
     Object.values(state.sandboxes)
       .filter((e) => e.kind === 'fork' && e.parentName === primaryName)
@@ -42,15 +45,6 @@ function nextConcurrencyIndex(state: State, primaryName: string): number {
   let idx = 1;
   while (used.has(idx)) idx++;
   return idx;
-}
-
-async function statDirOrNull(p: string): Promise<string | null> {
-  try {
-    const stat = await fs.stat(p);
-    return stat.isDirectory() ? p : null;
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -128,70 +122,84 @@ export async function runFork(
     throw err;
   }
 
-  const startSpinner = ora(`starting fork ${forkName}`).start();
+  // From here on the fork VM exists; on any failure mark the entry
+  // `failed-init` (mirroring `runCreate`) so `list` reflects reality rather
+  // than leaving a ghost `creating` entry. The VM is left in place for
+  // inspection.
   try {
-    await defaultProvider.startVM(forkName);
-    startSpinner.succeed(`started fork ${forkName}`);
+    const startSpinner = ora(`starting fork ${forkName}`).start();
+    try {
+      await defaultProvider.startVM(forkName);
+      startSpinner.succeed(`started fork ${forkName}`);
+    } catch (err) {
+      startSpinner.fail();
+      throw err;
+    }
+
+    const ipSpinner = ora('waiting for IP').start();
+    const vm = await waitForIp(forkName);
+    const ip = vm.networkInfo?.ipV4 ?? null;
+    if (ip) {
+      ipSpinner.succeed(`got IP ${ip}`);
+    } else {
+      ipSpinner.fail('no IP after 30s');
+      throw new Error(
+        `Fork ${forkName} did not acquire an IPv4 within 30 seconds`,
+      );
+    }
+
+    await withState((state) => {
+      const entry = state.sandboxes[forkName];
+      if (entry) entry.ip = ip;
+    });
+    await signalProxyReload();
+
+    // Run fork init hooks. These are the only init scripts that run on a
+    // fork — the full pipeline already ran on the primary and is inherited
+    // via clone.
+    const linuxUser = process.env.USER ?? 'sandbox';
+    const userInitDir = await statDirOrNull(
+      path.join(os.homedir(), '.aurica', 'sandbox', 'init'),
+    );
+    const projectInitDir = await statDirOrNull(
+      path.join(projectDir, '.aurica', 'init'),
+    );
+    const exec = defaultProvider.createExec(forkName, linuxUser);
+    await runForkInitHooks(exec, {
+      user: linuxUser,
+      forkName,
+      primaryName,
+      branch,
+      concurrencyIndex,
+      userInitDir,
+      projectInitDir,
+    });
+
+    await withState((state) => {
+      const entry = state.sandboxes[forkName];
+      if (entry) entry.status = 'running';
+    });
+    await signalProxyReload();
+
+    logger.log(
+      JSON.stringify(
+        {
+          name: forkName,
+          status: 'running',
+          ip,
+          parentName: primaryName,
+          concurrencyIndex,
+        },
+        null,
+        2,
+      ),
+    );
   } catch (err) {
-    startSpinner.fail();
+    await withState((state) => {
+      const entry = state.sandboxes[forkName];
+      if (entry) entry.status = 'failed-init';
+    });
+    await signalProxyReload();
     throw err;
   }
-
-  const ipSpinner = ora('waiting for IP').start();
-  const vm = await waitForIp(forkName);
-  const ip = vm.networkInfo?.ipV4 ?? null;
-  if (ip) {
-    ipSpinner.succeed(`got IP ${ip}`);
-  } else {
-    ipSpinner.fail('no IP after 30s');
-    throw new Error(
-      `Fork ${forkName} did not acquire an IPv4 within 30 seconds`,
-    );
-  }
-
-  await withState((state) => {
-    const entry = state.sandboxes[forkName];
-    if (entry) entry.ip = ip;
-  });
-  await signalProxyReload();
-
-  // Run fork init hooks. These are the only init scripts that run on a fork —
-  // the full pipeline already ran on the primary and is inherited via clone.
-  const linuxUser = process.env.USER ?? 'sandbox';
-  const userInitDir = await statDirOrNull(
-    path.join(os.homedir(), '.aurica', 'sandbox', 'init'),
-  );
-  const projectInitDir = await statDirOrNull(
-    path.join(projectDir, '.aurica', 'init'),
-  );
-  const exec = defaultProvider.createExec(forkName, linuxUser);
-  await runForkInitHooks(exec, {
-    user: linuxUser,
-    forkName,
-    masterName: primaryName,
-    branch,
-    concurrencyIndex,
-    userInitDir,
-    projectInitDir,
-  });
-
-  await withState((state) => {
-    const entry = state.sandboxes[forkName];
-    if (entry) entry.status = 'running';
-  });
-  await signalProxyReload();
-
-  logger.log(
-    JSON.stringify(
-      {
-        name: forkName,
-        status: 'running',
-        ip,
-        parentName: primaryName,
-        concurrencyIndex,
-      },
-      null,
-      2,
-    ),
-  );
 }

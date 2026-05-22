@@ -17,8 +17,8 @@ export interface ForkInitHooksOptions {
   user: string;
   /** Name of the fork VM. Passed to hooks as `FORK_NAME`. */
   forkName: string;
-  /** Name of the primary VM this was cloned from. Passed as `MASTER_NAME`. */
-  masterName: string;
+  /** Name of the primary VM this was cloned from. Passed as `PRIMARY_NAME`. */
+  primaryName: string;
   /** Branch arg from `fork --branch`. Passed as `FORK_BRANCH` (may be empty). */
   branch: string;
   /** Stable 1-based fork index. Passed as `CONCURRENCY_INDEX`. */
@@ -180,9 +180,14 @@ export async function runInitPipeline(
  *
  * Env vars injected into every hook:
  *   - `FORK_NAME` — the fork VM's name
- *   - `MASTER_NAME` — the primary VM this was cloned from
+ *   - `PRIMARY_NAME` — the primary VM this was cloned from
  *   - `FORK_BRANCH` — value of `--branch` flag (empty string if not provided)
  *   - `CONCURRENCY_INDEX` — stable 1-based integer unique among forks of the same primary
+ *
+ * Only `setup-fork.sh` runs on a fork, and only as the default user — there
+ * is no root/per-user hook here. Fork VMs inherit all root and user-global
+ * setup from the primary via the clone; the fork hook exists solely to let
+ * each fork diverge (branch checkout, dependency install).
  *
  * Hook files are pushed from the host to a temporary staging directory inside
  * the VM, executed once, then cleaned up. Each hook runs as the default user
@@ -195,16 +200,15 @@ export async function runForkInitHooks(
   const stagingHome = `/home/${opts.user}/${STAGING_DIR}`;
   const projectCwd = opts.projectInitCwdOverride ?? DEFAULT_PROJECT_INIT_CWD;
 
-  const hookEnv = [
-    `FORK_NAME=${opts.forkName}`,
-    `MASTER_NAME=${opts.masterName}`,
-    `FORK_BRANCH=${opts.branch}`,
-    `CONCURRENCY_INDEX=${opts.concurrencyIndex}`,
-  ].join(' ');
+  const hookEnv: Record<string, string> = {
+    FORK_NAME: opts.forkName,
+    PRIMARY_NAME: opts.primaryName,
+    FORK_BRANCH: opts.branch,
+    CONCURRENCY_INDEX: String(opts.concurrencyIndex),
+  };
 
   await runForkHookLayer(
     exec,
-    opts.user,
     'user-fork',
     opts.userInitDir,
     projectCwd,
@@ -213,7 +217,6 @@ export async function runForkInitHooks(
   );
   await runForkHookLayer(
     exec,
-    opts.user,
     'project-fork',
     opts.projectInitDir,
     projectCwd,
@@ -231,11 +234,10 @@ export async function runForkInitHooks(
 
 async function runForkHookLayer(
   exec: VMExec,
-  _vmUser: string,
   layerKey: string,
   dir: string | null,
   projectCwd: string,
-  hookEnv: string,
+  hookEnv: Record<string, string>,
   stagingHome: string,
 ): Promise<void> {
   if (!dir) return;
@@ -247,7 +249,8 @@ async function runForkHookLayer(
   await exec.run({
     user: 'default',
     cwd: projectCwd,
-    argv: ['bash', '-c', `${hookEnv} bash -l ${stagingPath}/setup-fork.sh`],
+    env: hookEnv,
+    argv: ['bash', '-l', `${stagingPath}/setup-fork.sh`],
   });
 }
 

@@ -64,9 +64,11 @@ export async function runDestroy(
     );
   }
 
-  // Cascade: destroy all forks in parallel, then the primary.
-  if (forkNames.length > 0) {
-    await Promise.all(forkNames.map((forkName) => destroyOne(forkName, force)));
+  // Cascade: destroy each fork one at a time, then the primary. Sequential
+  // so the per-VM `ora` spinners don't overwrite each other and a mid-cascade
+  // failure leaves the remaining VMs (and the primary) untouched.
+  for (const forkName of forkNames) {
+    await destroyOne(forkName, force);
   }
 
   await destroyOne(name, force);

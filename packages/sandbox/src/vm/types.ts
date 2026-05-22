@@ -36,12 +36,16 @@ export interface VMExec {
    * Run a command inside the VM. `user: 'root'` switches to root; `'default'`
    * uses the VM's default Linux user. When `cwd` is set, the command runs
    * with that path as its working directory — callers should rely on this
-   * rather than wrapping `argv` in `bash -c 'cd …'`.
+   * rather than wrapping `argv` in `bash -c 'cd …'`. When `env` is set, each
+   * key/value is injected into the command's environment — callers should
+   * rely on this rather than prefixing `argv` with `K=V` shell assignments,
+   * which would require an unsafe `bash -c` wrapper.
    */
   run(args: {
     user: 'root' | 'default';
     argv: string[];
     cwd?: string;
+    env?: Record<string, string>;
   }): Promise<void>;
 }
 
