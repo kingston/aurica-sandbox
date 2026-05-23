@@ -13,11 +13,10 @@ const sampleSandbox = {
   name: 'a',
   projectDir: '/tmp/proj',
   status: 'running' as const,
-  domains: ['*.github.com'],
-  actions: [],
   ip: '192.168.1.10',
   createdAt: '2026-01-01T00:00:00.000Z',
   authSecret: 'test-secret',
+  kind: 'primary' as const,
 };
 
 describe('runStop', () => {

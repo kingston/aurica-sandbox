@@ -92,6 +92,20 @@ export const orbProvider: SandboxVMProvider = {
   },
 
   /**
+   * Clone a stopped OrbStack machine into a new machine with `destName`. The
+   * source machine is paused briefly while OrbStack snapshots it; it returns
+   * to its previous state (stopped) once cloning completes. The new machine
+   * starts in the stopped state — call `startVM` to boot it.
+   *
+   * OrbStack implements clone as copy-on-write: no extra disk is consumed
+   * until the clone diverges from the source.
+   */
+  async cloneVM(sourceName: string, destName: string): Promise<SandboxVM> {
+    await orbctlText('clone', sourceName, destName);
+    return { name: destName };
+  },
+
+  /**
    * Permanently delete an OrbStack machine by name. Stops it first if running.
    * Uses `orbctl delete -f` so it never prompts. Throws if no such machine.
    */

@@ -155,11 +155,15 @@ export function createOrbExec(vmName: string, defaultUser: string): VMExec {
       );
     },
 
-    async run({ user, argv, cwd }): Promise<void> {
+    async run({ user, argv, cwd, env }): Promise<void> {
       await ensureBooted();
       const orbArgv = ['run', '-m', vmName];
       if (user === 'root') orbArgv.push('-u', 'root');
       if (cwd !== undefined) orbArgv.push('-w', cwd);
+      if (env) {
+        for (const [k, v] of Object.entries(env))
+          orbArgv.push('-e', `${k}=${v}`);
+      }
       orbArgv.push(...argv);
       await execa('orbctl', orbArgv, { stdio: 'inherit' });
     },

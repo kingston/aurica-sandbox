@@ -36,12 +36,16 @@ export interface VMExec {
    * Run a command inside the VM. `user: 'root'` switches to root; `'default'`
    * uses the VM's default Linux user. When `cwd` is set, the command runs
    * with that path as its working directory — callers should rely on this
-   * rather than wrapping `argv` in `bash -c 'cd …'`.
+   * rather than wrapping `argv` in `bash -c 'cd …'`. When `env` is set, each
+   * key/value is injected into the command's environment — callers should
+   * rely on this rather than prefixing `argv` with `K=V` shell assignments,
+   * which would require an unsafe `bash -c` wrapper.
    */
   run(args: {
     user: 'root' | 'default';
     argv: string[];
     cwd?: string;
+    env?: Record<string, string>;
   }): Promise<void>;
 }
 
@@ -65,6 +69,14 @@ export interface HostBridgeIp {
 
 export interface SandboxVMProvider {
   createVM: (options: CreateVMOptions) => Promise<SandboxVM>;
+  /**
+   * Clone an existing stopped VM into a new VM with the given name. The
+   * source VM is paused briefly during the clone operation and resumes its
+   * prior state (stopped) when done. The new VM starts in the stopped state;
+   * callers must `startVM` it separately. Disk is copy-on-write — no
+   * double usage until the fork diverges.
+   */
+  cloneVM: (sourceName: string, destName: string) => Promise<SandboxVM>;
   destroyVM: (name: string) => Promise<void>;
   startVM: (name: string) => Promise<SandboxVM>;
   stopVM: (name: string) => Promise<void>;

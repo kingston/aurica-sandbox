@@ -14,6 +14,7 @@ function sampleSandbox(overrides: Partial<SandboxEntry> = {}): SandboxEntry {
     ip: '127.0.0.1',
     createdAt: '2026-05-16T00:00:00.000Z',
     authSecret: 'secret-1',
+    kind: 'primary',
     ...overrides,
   };
 }
