@@ -16,7 +16,12 @@ import { errorMessage } from '#src/utils/error-message.js';
 
 import { SandboxConfigWatcher } from './config-watcher.js';
 import { deriveRulesFromConfig } from './derive-rules.js';
-import { HostProxy } from './host-proxy.js';
+import {
+  HostProxy,
+  normalizeRemoteIp,
+  type VerboseDenialLog,
+  type VerboseRequestLog,
+} from './host-proxy.js';
 
 /**
  * Default port for the singleton host proxy. Pinned (rather than ephemeral) so
@@ -64,6 +69,14 @@ interface ProxyLog {
 
 interface ProxyProcessOptions {
   log?: ProxyLog;
+  /**
+   * When true, log a verbose decision line for every request — matched
+   * policy id, outcome (pass/block/rewrite), and any applied mutations
+   * (values redacted) — and surface allowlist denials with method+host+IP.
+   * Defaults to false; the proxy still logs one line per response either
+   * way.
+   */
+  verbose?: boolean;
 }
 
 /**
@@ -101,10 +114,17 @@ export async function runProxyProcess(
   }
 
   const credentialCache = new CredentialCache({ idleTimeoutSeconds: 900 });
-  const proxy = await HostProxy.create({
+  const verbose = options.verbose === true;
+  const proxyOptions: Parameters<typeof HostProxy.create>[0] = {
     resolver: credentialCache,
     port: resolveProxyPort(log),
-  });
+  };
+  if (verbose) {
+    proxyOptions.verboseLogger = (event) => {
+      logVerbose(log, event);
+    };
+  }
+  const proxy = await HostProxy.create(proxyOptions);
   const addr = await proxy.listen();
 
   const watcher = new SandboxConfigWatcher();
@@ -153,23 +173,30 @@ export async function runProxyProcess(
   //
   // We log on response (not request) so each line carries the outcome — the
   // status code makes success vs. failure obvious at a glance. Method + URL
-  // aren't on the response event, so we track them by request id and consume
-  // the entry on response/abort.
-  const inflight = new Map<string, string>();
+  // and the originating IP aren't on the response event, so we track them
+  // by request id and consume the entry on response/abort.
+  const inflight = new Map<string, { label: string; remoteIp: string }>();
   await proxy.setEventSubscriber(async (server) => {
     await server.on('request', (req) => {
-      inflight.set(req.id, `${req.method} ${req.url}`);
+      inflight.set(req.id, {
+        label: `${req.method} ${req.url}`,
+        remoteIp: normalizeRemoteIp(req.remoteIpAddress) ?? '?',
+      });
     });
     await server.on('response', (res) => {
-      const label = inflight.get(res.id) ?? `? ${res.id}`;
+      const entry = inflight.get(res.id);
       inflight.delete(res.id);
-      const line = `${res.statusCode} ${label}`;
+      const label = entry?.label ?? `? ${res.id}`;
+      const remoteIp = entry?.remoteIp ?? '?';
+      const line = `${res.statusCode} [${remoteIp}] ${label}`;
       if (res.statusCode >= 400) log.error(line.trimEnd());
       else log.info(line.trimEnd());
     });
     await server.on('abort', (req) => {
+      const entry = inflight.get(req.id);
       inflight.delete(req.id);
-      log.error(`aborted ${req.method} ${req.url}`);
+      const remoteIp = entry?.remoteIp ?? '?';
+      log.error(`aborted [${remoteIp}] ${req.method} ${req.url}`);
     });
     await server.on('tls-client-error', (err) => {
       log.error(
@@ -366,6 +393,52 @@ async function loadAndRegister(
     // Still watch the file so a corrected save triggers a retry.
     watcher.watch(entry.name, sandboxConfigPath(entry.projectDir));
     return false;
+  }
+}
+
+/**
+ * Render a verbose `decision` or `denial` event onto the proxy log.
+ *
+ * Decision lines describe what the proxy decided to do *before* the upstream
+ * replies — they always pair with a matching response line, so duplicating
+ * status here would be premature. The summary captures the policy that
+ * matched (if any), the outcome, any URL rewrite, and a redacted view of
+ * each mutation actually applied to the outgoing request.
+ *
+ * Denial lines fire from the unmatched-request sweep so verbose users see
+ * the request that was rejected by the allowlist (without it, only the 403
+ * response line shows up).
+ */
+function logVerbose(
+  log: ProxyLog,
+  event:
+    | ({ type: 'decision' } & VerboseRequestLog)
+    | ({ type: 'denial' } & VerboseDenialLog),
+): void {
+  if (event.type === 'denial') {
+    log.info(
+      `denied [${event.remoteIp}] ${event.method} ${event.host}${event.path} (allowlist)`,
+    );
+    return;
+  }
+  const policy = event.matchedPolicyId ?? '(no match)';
+  const tail =
+    event.outcome === 'block'
+      ? ` blockedBy=${event.blockedBy ?? policy}`
+      : event.outcome === 'rewrite' && event.rewriteUrl !== undefined
+        ? ` -> ${event.rewriteUrl}`
+        : '';
+  log.info(
+    `${event.outcome} [${event.remoteIp}] ${event.method} ${event.host}${event.path} policy=${policy}${tail}`,
+  );
+  for (const m of event.mutations) {
+    const valuePart =
+      m.kind === 'remove-header'
+        ? ''
+        : m.redacted === true
+          ? ' = <redacted>'
+          : ` = ${m.value ?? ''}`;
+    log.info(`  ${m.kind} ${m.header}${valuePart}`);
   }
 }
 

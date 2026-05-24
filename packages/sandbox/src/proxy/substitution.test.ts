@@ -473,6 +473,8 @@ describe('applyPolicies — first-match-wins and block', () => {
       outcome: 'block',
       headers,
       blockedBy: 'block-secrets',
+      matchedPolicyId: 'block-secrets',
+      appliedMutations: [],
     });
     // Header was not mutated because block short-circuited.
     expect(headers.Authorization).toBe('Bearer p');

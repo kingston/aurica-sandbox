@@ -21,9 +21,65 @@ interface SandboxRegistration {
   policies: readonly ProxyPolicy[];
 }
 
+/**
+ * Per-request verbose log payload emitted from `beforeRequest`. Surfaces the
+ * details that aren't visible on mockttp's own `response` / `abort` events:
+ * which policy matched (if any), the outcome, the rewrite target when
+ * applicable, and a redacted list of mutations actually applied to the
+ * outgoing request.
+ *
+ * Emitted before the request leaves the proxy; the matching `response` line
+ * follows once the upstream replies, so a single request produces a verbose
+ * "decision" line and then a "result" line.
+ */
+export interface VerboseRequestLog {
+  method: string;
+  host: string;
+  path: string;
+  remoteIp: string;
+  matchedPolicyId?: string;
+  outcome: 'pass' | 'block' | 'rewrite';
+  blockedBy?: string;
+  rewriteUrl?: string;
+  mutations: {
+    kind: 'set-header' | 'remove-header' | 'replace-header';
+    header: string;
+    value?: string;
+    redacted?: boolean;
+  }[];
+}
+
+/**
+ * Logged when a request is denied because its host wasn't on any matching
+ * sandbox's allowlist (the `forUnmatchedRequest` sweep). Visible only when
+ * `verbose` is set; without it, only the eventual 403 response shows up via
+ * the normal response logger.
+ */
+export interface VerboseDenialLog {
+  method: string;
+  host: string;
+  path: string;
+  remoteIp: string;
+  reason: 'allowlist';
+}
+
+export type VerboseLogger = (
+  event:
+    | ({ type: 'decision' } & VerboseRequestLog)
+    | ({ type: 'denial' } & VerboseDenialLog),
+) => void;
+
 export interface HostProxyOptions {
   resolver: SubstitutionResolver;
   port?: number;
+  /**
+   * Optional sink for verbose, per-request decision logs. When supplied,
+   * the proxy emits a `decision` event from `beforeRequest` for every
+   * allowlisted request (carrying matched policy id, outcome, and applied
+   * mutations) and a `denial` event for every request rejected by the
+   * allowlist sweep. Leave undefined to disable verbose logging.
+   */
+  verboseLogger?: VerboseLogger;
 }
 
 /**
@@ -47,6 +103,7 @@ export class HostProxy {
   private readonly resolver: SubstitutionResolver;
   private readonly registrations = new Map<string, SandboxRegistration>();
   private readonly preferredPort: number;
+  private readonly verboseLogger: VerboseLogger | undefined;
   private listenAddress?: { host: string; port: number };
   private eventSubscriber?: EventSubscriber;
 
@@ -54,6 +111,7 @@ export class HostProxy {
     this.server = server;
     this.resolver = options.resolver;
     this.preferredPort = options.port ?? 0;
+    this.verboseLogger = options.verboseLogger;
   }
 
   /**
@@ -194,6 +252,27 @@ export class HostProxy {
             this.resolver,
             parts.pathWithQuery,
           );
+          if (this.verboseLogger) {
+            const decision: { type: 'decision' } & VerboseRequestLog = {
+              type: 'decision',
+              method: parts.method,
+              host: parts.host,
+              path: parts.pathWithQuery,
+              remoteIp,
+              outcome: result.outcome,
+              mutations: result.appliedMutations,
+            };
+            if (result.matchedPolicyId !== undefined) {
+              decision.matchedPolicyId = result.matchedPolicyId;
+            }
+            if (result.outcome === 'block') {
+              decision.blockedBy = result.blockedBy;
+            }
+            if (result.outcome === 'rewrite') {
+              decision.rewriteUrl = result.url;
+            }
+            this.verboseLogger(decision);
+          }
           if (result.outcome === 'block') {
             return {
               response: {
@@ -223,15 +302,32 @@ export class HostProxy {
         },
       });
 
-    // Sweep: anything that didn't match the allowlist gets 403.
-    await this.server
-      .forUnmatchedRequest()
-      .thenReply(
-        403,
-        'Forbidden',
-        'aurica-sandbox: domain not in allowlist\n',
-        { 'content-type': 'text/plain' },
-      );
+    // Sweep: anything that didn't match the allowlist gets 403. Uses
+    // `thenCallback` (instead of `thenReply`) so verbose mode can surface
+    // each denial with method+host+IP — `thenReply` would hide the request
+    // details from us and only the response-event line would survive.
+    await this.server.forUnmatchedRequest().thenCallback((req) => {
+      if (this.verboseLogger) {
+        const parts = hostAndPathFromRequest(req);
+        const remoteIp = normalizeRemoteIp(req.remoteIpAddress);
+        if (parts !== null && remoteIp !== null) {
+          this.verboseLogger({
+            type: 'denial',
+            method: parts.method,
+            host: parts.host,
+            path: parts.pathWithQuery,
+            remoteIp,
+            reason: 'allowlist',
+          });
+        }
+      }
+      return {
+        statusCode: 403,
+        statusMessage: 'Forbidden',
+        headers: { 'content-type': 'text/plain' },
+        body: 'aurica-sandbox: domain not in allowlist\n',
+      };
+    });
 
     // Mockttp's reset() above also tore down any event listeners; re-attach
     // them now so log streams keep working across reloads.
@@ -293,7 +389,7 @@ function stripHeader(
  * proxy compares equal to its plain v4 form. Mockttp listens on `::` by
  * default, which surfaces incoming v4 connections as `::ffff:x.x.x.x`.
  */
-function normalizeRemoteIp(remoteIp: string | undefined): string | null {
+export function normalizeRemoteIp(remoteIp: string | undefined): string | null {
   if (remoteIp === undefined) return null;
   if (remoteIp.startsWith('::ffff:')) return remoteIp.slice('::ffff:'.length);
   return remoteIp;

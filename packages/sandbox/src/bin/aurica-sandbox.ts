@@ -36,8 +36,13 @@ program
 program
   .command('proxy')
   .description('run the host proxy (foreground; long-running)')
-  .action(async () => {
-    await runProxyProcess();
+  .option(
+    '-v, --verbose',
+    'log every request decision (matched policy, outcome, mutations, originating IP) and allowlist denials',
+    false,
+  )
+  .action(async (opts: { verbose: boolean }) => {
+    await runProxyProcess({ verbose: opts.verbose });
     await new Promise<never>(() => {
       /* run forever */
     });

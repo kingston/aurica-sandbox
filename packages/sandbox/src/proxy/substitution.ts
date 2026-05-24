@@ -36,6 +36,20 @@ function applyTransform(
 }
 
 /**
+ * A single mutation that was actually performed against a request, summarised
+ * for verbose logging. `value` is the post-resolution, post-transform string
+ * that the upstream will see; `redacted` is true when that value originated
+ * from a credential source (`env:VAR`) — callers should not echo the raw
+ * value to logs in that case.
+ */
+export interface AppliedMutation {
+  kind: 'set-header' | 'remove-header' | 'replace-header';
+  header: string;
+  value?: string;
+  redacted?: boolean;
+}
+
+/**
  * Outcome of evaluating policies against a request.
  *
  * - `pass` — request continues to its original destination with `headers`
@@ -44,8 +58,13 @@ function applyTransform(
  *   id) for audit.
  * - `rewrite` — request continues but to `url` instead of its original
  *   destination. Mutations have already been applied to `headers`.
+ *
+ * `matchedPolicyId` identifies the policy whose match drove the outcome
+ * (undefined when no policy matched and the request passes through
+ * untouched). `appliedMutations` enumerates the mutations that ran, in
+ * order — empty when none ran.
  */
-export type EvaluationOutcome =
+export type EvaluationOutcome = (
   | { outcome: 'pass'; headers: Record<string, string | string[] | undefined> }
   | {
       outcome: 'block';
@@ -56,7 +75,11 @@ export type EvaluationOutcome =
       outcome: 'rewrite';
       headers: Record<string, string | string[] | undefined>;
       url: string;
-    };
+    }
+) & {
+  matchedPolicyId?: string;
+  appliedMutations: AppliedMutation[];
+};
 
 /**
  * Walk policies in order, return the outcome of the first match. If no
@@ -81,26 +104,46 @@ export async function applyPolicies(
     if (policy.matchers && !matchesAny(policy.matchers, path, method)) continue;
 
     if (policy.action.type === 'block') {
-      return { outcome: 'block', headers, blockedBy: policy.id };
+      return {
+        outcome: 'block',
+        headers,
+        blockedBy: policy.id,
+        matchedPolicyId: policy.id,
+        appliedMutations: [],
+      };
     }
+    const appliedMutations: AppliedMutation[] = [];
     if (policy.action.type === 'rewrite-url') {
       if (policy.action.mutations) {
         for (const mutation of policy.action.mutations) {
-          await applyMutation(mutation, headers, resolver);
+          const applied = await applyMutation(mutation, headers, resolver);
+          if (applied) appliedMutations.push(applied);
         }
       }
       const url = policy.action.target.split('{path}').join(pathWithQuery);
-      return { outcome: 'rewrite', headers, url };
+      return {
+        outcome: 'rewrite',
+        headers,
+        url,
+        matchedPolicyId: policy.id,
+        appliedMutations,
+      };
     }
     // type === 'allow'
     if (policy.action.mutations) {
       for (const mutation of policy.action.mutations) {
-        await applyMutation(mutation, headers, resolver);
+        const applied = await applyMutation(mutation, headers, resolver);
+        if (applied) appliedMutations.push(applied);
       }
     }
-    return { outcome: 'pass', headers };
+    return {
+      outcome: 'pass',
+      headers,
+      matchedPolicyId: policy.id,
+      appliedMutations,
+    };
   }
-  return { outcome: 'pass', headers };
+  return { outcome: 'pass', headers, appliedMutations: [] };
 }
 
 function matchesAny(
@@ -142,37 +185,61 @@ function prefixMatches(path: string, prefix: string): boolean {
   return false;
 }
 
+/**
+ * Apply a mutation in place. Returns a summary of what happened (the header
+ * name, plus a value when relevant) so callers can log it, or `null` when
+ * the mutation was a no-op (e.g. `remove-header` for a header that isn't
+ * present, or `replace-header` whose `from` didn't match).
+ *
+ * `value` is omitted for `remove-header`. `redacted` is true when the value
+ * was sourced from `resolver.resolve` (i.e. credentials) — callers should
+ * not echo it to logs.
+ */
 async function applyMutation(
   mutation: Mutation,
   headers: Record<string, string | string[] | undefined>,
   resolver: SubstitutionResolver,
-): Promise<void> {
+): Promise<AppliedMutation | null> {
   if (mutation.kind === 'set-header') {
     const value = await resolver.resolve(mutation.value);
     const existingKey = findHeaderKey(headers, mutation.header);
     headers[existingKey ?? mutation.header] = value;
-    return;
+    return {
+      kind: 'set-header',
+      header: mutation.header,
+      value,
+      redacted: true,
+    };
   }
   if (mutation.kind === 'remove-header') {
     const existingKey = findHeaderKey(headers, mutation.header);
-    if (existingKey) headers[existingKey] = undefined;
-    return;
+    if (!existingKey) return null;
+    headers[existingKey] = undefined;
+    return { kind: 'remove-header', header: mutation.header };
   }
   // replace-header
   const headerKey = findHeaderKey(headers, mutation.header);
-  if (!headerKey) return;
+  if (!headerKey) return null;
   const original = headers[headerKey];
-  if (original === undefined) return;
+  if (original === undefined) return null;
   const matchValue = applyTransform(mutation.from, mutation.transform);
   const resolved = await resolver.resolve(mutation.to);
   const replacement = applyTransform(resolved, mutation.transform);
-  if (Array.isArray(original)) {
-    headers[headerKey] = original.map((v) =>
-      v.includes(matchValue) ? v.split(matchValue).join(replacement) : v,
-    );
-  } else if (original.includes(matchValue)) {
-    headers[headerKey] = original.split(matchValue).join(replacement);
-  }
+  const didReplace = Array.isArray(original)
+    ? original.some((v) => v.includes(matchValue))
+    : original.includes(matchValue);
+  if (!didReplace) return null;
+  headers[headerKey] = Array.isArray(original)
+    ? original.map((v) =>
+        v.includes(matchValue) ? v.split(matchValue).join(replacement) : v,
+      )
+    : original.split(matchValue).join(replacement);
+  return {
+    kind: 'replace-header',
+    header: mutation.header,
+    value: replacement,
+    redacted: true,
+  };
 }
 
 function findHeaderKey(
