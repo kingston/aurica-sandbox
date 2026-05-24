@@ -11,13 +11,13 @@
     "build": "turbo build",
     "check": "turbo run lint format:check test",
     "check:fix": "turbo run lint:fix format test",
-    "dev": "tsx watch --conditions=@aurica/source packages/sandbox/src/bin/aurica-sandbox.ts",
+    "dev": "tsx watch --env-file-if-exists=.env.development --conditions=@aurica/source packages/sandbox/src/bin/aurica-sandbox.ts",
     "format": "oxfmt",
     "format:check": "oxfmt --check",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
     "release": "turbo run build && changeset publish",
-    "start": "tsx --conditions=@aurica/source packages/sandbox/src/bin/aurica-sandbox.ts",
+    "start": "tsx --env-file-if-exists=.env.development --conditions=@aurica/source packages/sandbox/src/bin/aurica-sandbox.ts",
     "test": "turbo test"
   },
   "devDependencies": {
