@@ -1,4 +1,3 @@
-export { runCa } from './ca.js';
 export { runCreate } from './create.js';
 export { runDestroy } from './destroy.js';
 export { runFork } from './fork.js';

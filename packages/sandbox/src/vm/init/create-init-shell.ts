@@ -26,9 +26,9 @@ export interface InitShellOptions {
   /** TCP port the proxy listens on. */
   proxyPort: number;
   /**
-   * PEM-encoded certificate for the host proxy's MITM CA (the same cert
-   * `aurica-sandbox ca` prints). Installed into the VM's system trust store
-   * so HTTPS requests through the proxy validate. Required because mockttp
+   * PEM-encoded certificate for the host proxy's MITM CA. Installed into
+   * the VM's system trust store so HTTPS requests through the proxy
+   * validate. Required because mockttp
    * MITMs every HTTPS request to apply the per-sandbox allowlist and
    * credential substitution; without trusting this CA, HTTPS in the VM
    * fails with `SSL certificate problem: self-signed certificate in

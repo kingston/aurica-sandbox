@@ -4,7 +4,6 @@ import process from 'node:process';
 
 import { Command } from 'commander';
 
-import { runCa } from '#src/cli/commands/ca.js';
 import { runCreate } from '#src/cli/commands/create.js';
 import { runDestroy } from '#src/cli/commands/destroy.js';
 import { runFork } from '#src/cli/commands/fork.js';
@@ -48,13 +47,6 @@ program
   .description('scaffold .aurica/sandbox.json')
   .action(async () => {
     await runInit(process.cwd());
-  });
-
-program
-  .command('ca')
-  .description('print the proxy CA certificate (PEM) to stdout')
-  .action(async () => {
-    await runCa();
   });
 
 program

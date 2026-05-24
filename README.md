@@ -44,7 +44,6 @@ asbox shell <name>
 | ------------------------------ | ------------------------------------------------------------ |
 | `init`                         | Scaffold `.aurica/sandbox.json`.                             |
 | `proxy`                        | Run the host egress proxy (foreground).                      |
-| `ca`                           | Print the proxy CA certificate (PEM).                        |
 | `create [name]`                | Create a VM and run init. Default name: `<folder>-<branch>`. |
 | `rebuild [name]`               | Destroy and recreate (use after editing `sandbox.json`).     |
 | `start <name>` / `stop <name>` | Resume / pause a VM (disk preserved).                        |
