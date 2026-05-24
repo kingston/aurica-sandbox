@@ -25,3 +25,6 @@ verifyDepsBeforeRun: install
 
 onlyBuiltDependencies:
   - esbuild
+
+allowBuilds:
+  esbuild: false
