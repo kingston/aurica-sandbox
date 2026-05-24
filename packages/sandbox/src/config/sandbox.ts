@@ -8,6 +8,7 @@ import {
   type UserPlugins,
 } from '#src/plugins/index.js';
 
+import { parseConfigFile } from './parse-config-file.js';
 import { sandboxConfigPath } from './paths.js';
 import { proxyPolicySchema } from './proxy-policy.js';
 import { loadUserConfig } from './user.js';
@@ -49,6 +50,29 @@ export const fileCopyEntrySchema = z.object({
 export type FileCopyEntry = z.infer<typeof fileCopyEntrySchema>;
 
 /**
+ * Single host-to-VM bind-mount declared in the project config. Forwarded
+ * to `orbctl create --mount` so changes inside the VM are visible on the
+ * host (and vice versa) for the life of the machine.
+ *
+ * `src`: host path. Follows the same rules as `files[].src` — `~/`
+ * expands against the host user's home, anything else resolves against
+ * the project directory containing `.aurica/sandbox.json`. Must be an
+ * existing directory; orbctl only bind-mounts directories.
+ *
+ * `dest`: optional absolute VM path. When omitted, orbctl mounts the
+ * source at the same absolute path inside the VM (the `SOURCE`-only form
+ * of `--mount`). When set, must start with `/`.
+ *
+ * Only honored at VM creation time. `orb clone` carries mounts to forks
+ * automatically, so configuring them on the primary is enough.
+ */
+export const mountEntrySchema = z.object({
+  src: z.string().min(1),
+  dest: z.string().min(1).optional(),
+});
+export type MountEntry = z.infer<typeof mountEntrySchema>;
+
+/**
  * Project-side sandbox config schema. `plugins` is a keyed object where
  * each key is a plugin name and the value is that plugin's
  * project-level config — opt-in by inclusion. Strict: every block is
@@ -70,6 +94,7 @@ export const sandboxConfigSchema = z.object({
     })
     .default({ domains: [], policies: [] }),
   files: z.array(fileCopyEntrySchema).default([]),
+  mounts: z.array(mountEntrySchema).default([]),
   plugins: projectPluginsSchema.default({}),
 });
 
@@ -102,8 +127,7 @@ export async function loadSandboxConfig(
   const userConfig = await loadUserConfig();
   const configPath = sandboxConfigPath(projectDir);
   const raw = await fs.readFile(configPath, 'utf8');
-  const parsed: unknown = JSON.parse(raw);
-  const project = sandboxConfigSchema.parse(parsed);
+  const project = parseConfigFile(configPath, raw, sandboxConfigSchema);
   return { ...project, userPlugins: userConfig.plugins };
 }
 
@@ -115,6 +139,7 @@ export function defaultSandboxConfig(
     resources: { cpu: 4, memoryMb: 8192, diskGb: 50 },
     proxy: { domains: [], policies: [] },
     files: [],
+    mounts: [],
     plugins: {} as ProjectPlugins,
   };
 }

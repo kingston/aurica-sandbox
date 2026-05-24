@@ -17,6 +17,7 @@ import { statDirOrNull } from '#src/utils/path-exists.js';
 import { defaultProvider } from '#src/vm/index.js';
 import { createInitShell } from '#src/vm/init/create-init-shell.js';
 import { resolveFileCopies } from '#src/vm/init/resolve-file-copies.js';
+import { formatMountArg, resolveMounts } from '#src/vm/init/resolve-mounts.js';
 import { runInitPipeline } from '#src/vm/init/run-init.js';
 import { waitForIp } from '#src/vm/wait-for-ip.js';
 
@@ -108,9 +109,16 @@ export async function runCreate(
   // standing up a machine we're about to throw away.
   const fileCopies = await resolveFileCopies(projectDir, config.files);
 
+  // Same fail-fast treatment for `mounts[]` — orbctl only honors `--mount`
+  // at create time, so a bad path must be caught before `createVM`.
+  const mounts = await resolveMounts(projectDir, config.mounts);
+
   const createSpinner = ora(`creating VM ${name}`).start();
   try {
-    await defaultProvider.createVM({ name });
+    await defaultProvider.createVM({
+      name,
+      mounts: mounts.map(formatMountArg),
+    });
   } catch (err) {
     createSpinner.fail();
     if (isAlreadyExistsError(err)) {

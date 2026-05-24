@@ -53,6 +53,13 @@ export interface CreateVMOptions {
   name: string;
   distro?: 'ubuntu' | 'debian';
   arch?: 'amd64' | 'arm64';
+  /**
+   * Pre-formatted host->VM bind-mount arguments in `SOURCE[:DEST]` form,
+   * passed straight to the provider's create command (e.g. `orbctl create
+   * --mount`). Callers are responsible for resolving sources to absolute
+   * host paths before constructing these strings.
+   */
+  mounts?: string[];
 }
 
 /**

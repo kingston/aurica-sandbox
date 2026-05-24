@@ -4,6 +4,7 @@ import { z } from 'zod';
 
 import { userPluginsSchema } from '#src/plugins/index.js';
 
+import { parseConfigFile } from './parse-config-file.js';
 import { userConfigPath } from './paths.js';
 
 /**
@@ -17,7 +18,7 @@ const userConfigSchema = z.object({
       provider: z.literal('orb'),
       distro: z.enum(['ubuntu', 'debian']).default('ubuntu'),
     })
-    .default({ provider: 'orb', distro: 'ubuntu' }),
+    .optional(),
   credentialProviders: z
     .array(
       z.object({
@@ -36,7 +37,6 @@ const userConfigSchema = z.object({
 export type UserConfig = z.infer<typeof userConfigSchema>;
 
 const defaultUserConfig: UserConfig = {
-  vm: { provider: 'orb', distro: 'ubuntu' },
   credentialProviders: [{ provider: 'env' }],
   credentialCache: { idleTimeoutSeconds: 900 },
   plugins: {},
@@ -57,6 +57,5 @@ export async function loadUserConfig(): Promise<UserConfig> {
     }
     throw err;
   }
-  const parsed: unknown = JSON.parse(raw);
-  return userConfigSchema.parse(parsed);
+  return parseConfigFile(configPath, raw, userConfigSchema);
 }

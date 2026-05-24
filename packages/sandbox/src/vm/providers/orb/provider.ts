@@ -79,13 +79,23 @@ export const orbProvider: SandboxVMProvider = {
    *
    * `--isolated` is always passed: sandbox VMs must not share the host
    * filesystem or integrate with macOS networking. Defaults `distro` to
-   * `'ubuntu'` (orbctl requires a distro positional).
+   * `'ubuntu'` (orbctl requires a distro positional). `mounts` entries
+   * are forwarded as repeated `--mount` flags; orbctl requires
+   * `--isolated` for them (already satisfied).
    *
    * Throws if a machine with the same `name` already exists.
    */
-  async createVM({ name, distro, arch }: CreateVMOptions): Promise<SandboxVM> {
+  async createVM({
+    name,
+    distro,
+    arch,
+    mounts,
+  }: CreateVMOptions): Promise<SandboxVM> {
     const args: string[] = ['create', '--isolated', '--isolate-network'];
     if (arch) args.push('-a', arch);
+    if (mounts) {
+      for (const mount of mounts) args.push('--mount', mount);
+    }
     args.push(distro ?? 'ubuntu', name);
     await orbctlText(...args);
     return orbProvider.infoVM(name);

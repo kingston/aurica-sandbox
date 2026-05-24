@@ -1,8 +1,8 @@
 import fs from 'node:fs/promises';
-import os from 'node:os';
-import path from 'node:path';
 
 import type { FileCopyEntry } from '#src/config/sandbox.js';
+
+import { expandHostSrc } from './expand-host-src.js';
 
 /**
  * Host-side resolution of a single `files[]` entry: the source path made
@@ -17,22 +17,6 @@ export interface ResolvedFileCopy {
   isFile: boolean;
   /** Destination string straight from the config (post-validation). */
   dest: string;
-}
-
-/**
- * Expand a `~/`-prefixed path against the host user's home. Anything else
- * is resolved against `projectDir`. A bare `~` (no trailing slash) is
- * intentionally rejected by the caller — only `~/` is meaningful.
- */
-function expandHostSrc(src: string, projectDir: string): string {
-  if (src === '~' || src.startsWith('~/')) {
-    const rest = src === '~' ? '' : src.slice(2);
-    return path.join(os.homedir(), rest);
-  }
-  if (path.isAbsolute(src)) {
-    return src;
-  }
-  return path.resolve(projectDir, src);
 }
 
 /**

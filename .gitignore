@@ -164,3 +164,6 @@ workspace/
 # Aurica
 .aurica/
 .aurica-dev/
+
+# Shared test
+shared-test/
