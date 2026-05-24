@@ -2,6 +2,7 @@
   "name": "@aurica/sandbox",
   "version": "0.0.1",
   "bin": {
+    "asbox": "./dist/bin/aurica-sandbox.js",
     "aurica-sandbox": "./dist/bin/aurica-sandbox.js"
   },
   "files": [

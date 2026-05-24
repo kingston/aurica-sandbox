@@ -11,45 +11,32 @@ Aurica Sandbox spins up disposable Linux VMs (via [OrbStack](https://orbstack.de
 - **Credential injection without checkout.** Tokens are read from your host (env vars, `gh auth token`) and substituted into outbound requests by the proxy — the VM never sees raw secrets on disk.
 - **Pluggable tooling.** Built-in plugins for `github`, `mise`, `docker`, `claude-code`, and `cursor` declare the domains, env, and init steps each needs. Adding a plugin extends the strict config schema automatically.
 
-## Repo layout
-
-```
-packages/sandbox        # the single workspace package (@aurica/sandbox)
-  src/bin               # `aurica-sandbox` CLI entrypoint
-  src/cli/commands      # create / destroy / start / stop / shell / run / proxy / ...
-  src/config            # project + user config schemas (zod)
-  src/credentials       # token providers (env, gh-token) and idle cache
-  src/plugins           # github, mise, docker, claude-code, cursor
-  src/proxy             # mockttp host proxy, CA, policy substitution
-  src/vm                # VM provider abstraction; orb provider lives under providers/orb
-  src/state             # on-disk sandbox registry
-.aurica/sandbox.json    # this repo's own sandbox config (dogfood)
-```
-
 ## Requirements
 
 - macOS with [OrbStack](https://orbstack.dev/) installed and running.
-- [mise](https://mise.jdx.dev/) for toolchain pinning (`mise.toml` pins Node 24 + pnpm 10).
-- `pnpm` for installs.
+- Node.js 22 or newer.
+
+## Install
+
+```sh
+npm install -g @aurica/sandbox
+```
+
+Installs both `aurica-sandbox` and the shorter alias `asbox` on your `PATH`. Use either — they point at the same binary.
 
 ## Getting started
 
 ```sh
-mise trust && mise install
-pnpm install
-
 # Scaffold a config into your project
-pnpm start init
+asbox init
 
 # Run the egress proxy in one terminal (foreground, long-running)
-pnpm start proxy
+asbox proxy
 
 # In another terminal: create + enter a sandbox
-pnpm start create
-pnpm start shell <name>
+asbox create
+asbox shell <name>
 ```
-
-`pnpm start` runs the CLI from source via tsx. Once built (`pnpm build`), the `aurica-sandbox` bin under `packages/sandbox/dist` is the production entrypoint.
 
 ## CLI
 
@@ -57,7 +44,6 @@ pnpm start shell <name>
 | ------------------------------ | ------------------------------------------------------------ |
 | `init`                         | Scaffold `.aurica/sandbox.json`.                             |
 | `proxy`                        | Run the host egress proxy (foreground).                      |
-| `ca`                           | Print the proxy CA certificate (PEM).                        |
 | `create [name]`                | Create a VM and run init. Default name: `<folder>-<branch>`. |
 | `rebuild [name]`               | Destroy and recreate (use after editing `sandbox.json`).     |
 | `start <name>` / `stop <name>` | Resume / pause a VM (disk preserved).                        |
@@ -92,9 +78,35 @@ Project config (`.aurica/sandbox.json`) declares the sandbox name, VM resources,
 
 User-level defaults live in `~/.aurica/sandbox/config.json` (VM provider, distro, credential providers, credential-cache TTL, and per-plugin user defaults). See [packages/sandbox/src/config/user.ts](packages/sandbox/src/config/user.ts).
 
+---
+
+# For contributors
+
+## Repo layout
+
+```
+packages/sandbox        # the single workspace package (@aurica/sandbox)
+  src/bin               # `aurica-sandbox` CLI entrypoint
+  src/cli/commands      # create / destroy / start / stop / shell / run / proxy / ...
+  src/config            # project + user config schemas (zod)
+  src/credentials       # token providers (env, gh-token) and idle cache
+  src/plugins           # github, mise, docker, claude-code, cursor
+  src/proxy             # mockttp host proxy, CA, policy substitution
+  src/vm                # VM provider abstraction; orb provider lives under providers/orb
+  src/state             # on-disk sandbox registry
+.aurica/sandbox.json    # this repo's own sandbox config (dogfood)
+```
+
 ## Development
 
+Toolchain: [mise](https://mise.jdx.dev/) pins Node 24 + pnpm 10 via `mise.toml`.
+
 ```sh
+mise trust && mise install
+pnpm install
+
+pnpm start <cmd>  # run the CLI from source via tsx (no build needed)
+
 pnpm build       # turbo build -> tsc -p tsconfig.build.json per package
 pnpm typecheck   # turbo typecheck
 pnpm check       # oxlint --fix && oxfmt
