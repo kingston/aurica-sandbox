@@ -115,6 +115,17 @@ pnpm --filter @aurica/sandbox test   # vitest
 
 The workspace uses the `@aurica/source` export condition to run TypeScript sources directly during development without a build step.
 
+### Dev env vars (alongside a live install)
+
+`pnpm start` and `pnpm dev` automatically load [.env.development](.env.development) — tracked, shared dev defaults (`AURICA_HOME=./.aurica-dev`, `AURICA_PROXY_PORT=51218`) that keep this checkout isolated from any globally-installed `asbox`. A fresh clone is dev-isolated by default:
+
+```sh
+pnpm start proxy        # dev proxy on its own port + state dir
+pnpm start create --name dev-myproject
+```
+
+Need a one-off override? Either edit `.env.development` locally (don't commit) or set the var in your shell.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

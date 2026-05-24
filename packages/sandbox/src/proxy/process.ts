@@ -19,7 +19,7 @@ import { deriveRulesFromConfig } from './derive-rules.js';
 import { HostProxy } from './host-proxy.js';
 
 /**
- * Fixed port for the singleton host proxy. Pinned (rather than ephemeral) so
+ * Default port for the singleton host proxy. Pinned (rather than ephemeral) so
  * that VMs created against an earlier proxy run still reach the proxy after a
  * restart — their iptables rules and `/etc/environment` bake in the port at
  * creation time and aren't rewritten when the proxy comes back up.
@@ -28,8 +28,28 @@ import { HostProxy } from './host-proxy.js';
  * with well-known services. If this port is busy, `mockttp.start()` will
  * reject and `runProxyProcess` surfaces the error — that's the desired
  * behavior; we don't want to silently land on a different port.
+ *
+ * Override via `AURICA_PROXY_PORT` to run a second instance (e.g. a dev build
+ * alongside a live install) on a different port. Combine with `AURICA_HOME`
+ * to isolate state, certs, and the proxy registry. The port is baked into a
+ * VM's iptables / `/etc/environment` at create time, so changing
+ * `AURICA_PROXY_PORT` after VMs exist will leave those VMs unable to reach
+ * the proxy until they're rebuilt.
  */
-const PROXY_PORT = 51_217;
+const DEFAULT_PROXY_PORT = 51_217;
+
+function resolveProxyPort(log: ProxyLog): number {
+  const raw = process.env.AURICA_PROXY_PORT;
+  if (raw === undefined || raw === '') return DEFAULT_PROXY_PORT;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65_535) {
+    log.error(
+      `AURICA_PROXY_PORT=${raw} is not a valid port (1–65535); using default ${DEFAULT_PROXY_PORT}`,
+    );
+    return DEFAULT_PROXY_PORT;
+  }
+  return parsed;
+}
 
 export interface ProxyProcessHandle {
   host: string;
@@ -83,7 +103,7 @@ export async function runProxyProcess(
   const credentialCache = new CredentialCache({ idleTimeoutSeconds: 900 });
   const proxy = await HostProxy.create({
     resolver: credentialCache,
-    port: PROXY_PORT,
+    port: resolveProxyPort(log),
   });
   const addr = await proxy.listen();
 

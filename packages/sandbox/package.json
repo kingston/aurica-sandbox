@@ -28,7 +28,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "start": "tsx --conditions=@aurica/source src/bin/aurica-sandbox.ts",
+    "start": "tsx --env-file-if-exists=../../.env.development --conditions=@aurica/source src/bin/aurica-sandbox.ts",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json"
   },
