@@ -101,15 +101,19 @@ export function createOrbExec(vmName: string, defaultUser: string): VMExec {
         ? dest
         : `/home/${defaultUser}/${dest}`;
 
-      const tar = spawn('tar', ['--no-mac-metadata', '-cC', localDir, '.'], {
-        env: {
-          ...process.env,
-          // Suppresses macOS AppleDouble (._*) metadata files that would
-          // otherwise litter the destination directory.
-          COPYFILE_DISABLE: '1',
+      const tar = spawn(
+        'tar',
+        ['--no-mac-metadata', '--no-xattrs', '-cC', localDir, '.'],
+        {
+          env: {
+            ...process.env,
+            // Suppresses macOS AppleDouble (._*) metadata files that would
+            // otherwise litter the destination directory.
+            COPYFILE_DISABLE: '1',
+          },
+          stdio: ['ignore', 'pipe', 'inherit'],
         },
-        stdio: ['ignore', 'pipe', 'inherit'],
-      });
+      );
 
       await streamIntoOrb(
         tar,
@@ -135,13 +139,17 @@ export function createOrbExec(vmName: string, defaultUser: string): VMExec {
       // destination names differ, rename after extraction. Preserves mode +
       // mtime; orbctl push isn't usable here (`--isolated` VMs have no
       // shared-folder mount).
-      const tar = spawn('tar', ['--no-mac-metadata', '-cC', srcDir, srcName], {
-        env: {
-          ...process.env,
-          COPYFILE_DISABLE: '1',
+      const tar = spawn(
+        'tar',
+        ['--no-mac-metadata', '--no-xattrs', '-cC', srcDir, srcName],
+        {
+          env: {
+            ...process.env,
+            COPYFILE_DISABLE: '1',
+          },
+          stdio: ['ignore', 'pipe', 'inherit'],
         },
-        stdio: ['ignore', 'pipe', 'inherit'],
-      });
+      );
 
       const renameStep =
         srcName === targetName
@@ -160,12 +168,20 @@ export function createOrbExec(vmName: string, defaultUser: string): VMExec {
       const orbArgv = ['run', '-m', vmName];
       if (user === 'root') orbArgv.push('-u', 'root');
       if (cwd !== undefined) orbArgv.push('-w', cwd);
+      // orbctl doesn't accept `-e KEY=VALUE`; it reads the names listed in
+      // its own `ORBENV` env (colon-separated) and forwards those values
+      // from the host. Set them on the spawned process and point ORBENV at
+      // their names so they appear inside the VM.
+      const execEnv: Record<string, string> = {};
       if (env) {
-        for (const [k, v] of Object.entries(env))
-          orbArgv.push('-e', `${k}=${v}`);
+        for (const [k, v] of Object.entries(env)) execEnv[k] = v;
+        execEnv.ORBENV = Object.keys(env).join(':');
       }
       orbArgv.push(...argv);
-      await execa('orbctl', orbArgv, { stdio: 'inherit' });
+      await execa('orbctl', orbArgv, {
+        stdio: 'inherit',
+        env: { ...process.env, ...execEnv },
+      });
     },
   };
 }

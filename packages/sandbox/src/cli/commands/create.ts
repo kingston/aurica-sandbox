@@ -2,7 +2,6 @@ import { randomBytes } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 
-import { execa } from 'execa';
 import ora from 'ora';
 
 import { loadSandboxConfig } from '#src/config/index.js';
@@ -20,30 +19,6 @@ import { createInitShell } from '#src/vm/init/create-init-shell.js';
 import { resolveFileCopies } from '#src/vm/init/resolve-file-copies.js';
 import { runInitPipeline } from '#src/vm/init/run-init.js';
 import { waitForIp } from '#src/vm/wait-for-ip.js';
-
-/**
- * Default VM name when the user doesn't pass one to `create`. Joins the
- * project directory's basename with the current git branch (slugged to
- * `[a-zA-Z0-9_-]`), or falls back to the basename alone if the directory
- * isn't a git repo or HEAD is detached.
- */
-export async function defaultName(projectDir: string): Promise<string> {
-  const folder = path.basename(projectDir);
-  try {
-    const { stdout } = await execa(
-      'git',
-      ['rev-parse', '--abbrev-ref', 'HEAD'],
-      { cwd: projectDir },
-    );
-    const branch = stdout.trim();
-    if (branch && branch !== 'HEAD') {
-      return `${folder}-${branch.replaceAll(/[^a-zA-Z0-9_-]/g, '-')}`;
-    }
-  } catch {
-    /* not a git repo; fall through */
-  }
-  return folder;
-}
 
 /**
  * Recognise orbctl's "machine already exists" error so we can surface a
@@ -125,8 +100,8 @@ export async function runCreate(
   // Fail fast if proxy isn't running.
   const proxy = await requireRunningProxy();
 
-  const name = nameArg ?? (await defaultName(projectDir));
   const config = await loadSandboxConfig(projectDir);
+  const name = nameArg ?? config.name;
 
   // Resolve declared host->VM file copies before creating the VM. A typo
   // or missing `.env` should fail fast here, not after we've spent 10s

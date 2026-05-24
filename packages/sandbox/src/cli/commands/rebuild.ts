@@ -1,4 +1,6 @@
-import { defaultName, destroyIfExists, runCreate } from './create.js';
+import { loadSandboxConfig } from '#src/config/index.js';
+
+import { destroyIfExists, runCreate } from './create.js';
 
 /**
  * Destroy an existing sandbox VM (if any) and create a fresh one in its
@@ -7,13 +9,18 @@ import { defaultName, destroyIfExists, runCreate } from './create.js';
  * `git clone ~/project`, plugin bootstrap snippets all assume a fresh
  * VM), so destroy-and-recreate is the safe retry path.
  *
- * Defaults the VM name to `<folder>-<branch>` to match `create`.
+ * Defaults the VM name to the `name` field in `.aurica/sandbox.json` to
+ * match `create`.
  */
 export async function runRebuild(
   projectDir: string,
   nameArg: string | undefined,
 ): Promise<void> {
-  const name = nameArg ?? (await defaultName(projectDir));
+  let name = nameArg;
+  if (!name) {
+    const config = await loadSandboxConfig(projectDir);
+    name = config.name;
+  }
   await destroyIfExists(name);
   await runCreate(projectDir, name);
 }

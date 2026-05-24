@@ -14,6 +14,7 @@ import { runRun } from '#src/cli/commands/run.js';
 import { runShell } from '#src/cli/commands/shell.js';
 import { runStart } from '#src/cli/commands/start.js';
 import { runStop } from '#src/cli/commands/stop.js';
+import { runUpdate } from '#src/cli/commands/update.js';
 import { projectEnvPath } from '#src/config/paths.js';
 import { loadUserConfig } from '#src/config/user.js';
 import { logger } from '#src/logger.js';
@@ -52,7 +53,7 @@ program
 program
   .command('create [name]')
   .description(
-    'create a primary sandbox VM and run init (default name: <folder>-<branch>); VM is stopped after init and ready to fork',
+    'create a primary sandbox VM and run init (defaults to the `name` field in .aurica/sandbox.json); VM is stopped after init and ready to fork',
   )
   .option('--start', 'leave the VM running after init instead of stopping it')
   .action(async (name: string | undefined, opts: { start: boolean }) => {
@@ -67,6 +68,15 @@ program
   .option('--branch <branch>', 'branch hint passed to setup-fork.sh hooks', '')
   .action(async (name: string | undefined, opts: { branch: string }) => {
     await runFork(process.cwd(), name, { branch: opts.branch });
+  });
+
+program
+  .command('update [name]')
+  .description(
+    'run update.sh hooks against an existing sandbox to refresh it without rebuilding (defaults to the project primary)',
+  )
+  .action(async (name: string | undefined) => {
+    await runUpdate(process.cwd(), name);
   });
 
 program

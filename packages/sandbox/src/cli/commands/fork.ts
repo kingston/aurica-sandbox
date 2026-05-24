@@ -9,24 +9,13 @@ import {
   signalProxyReload,
   withState,
 } from '#src/state/index.js';
-import type { SandboxEntry, State } from '#src/state/index.js';
+import type { State } from '#src/state/index.js';
 import { statDirOrNull } from '#src/utils/path-exists.js';
 import { defaultProvider } from '#src/vm/index.js';
 import { runForkInitHooks } from '#src/vm/init/run-init.js';
 import { waitForIp } from '#src/vm/wait-for-ip.js';
 
-/**
- * Find the primary entry for a given project directory. Returns `undefined`
- * if no primary exists yet (user needs to run `create` first).
- */
-function findPrimary(
-  state: State,
-  projectDir: string,
-): SandboxEntry | undefined {
-  return Object.values(state.sandboxes).find(
-    (e) => e.kind === 'primary' && e.projectDir === projectDir,
-  );
-}
+import { findPrimary } from './find-primary.js';
 
 /**
  * Pick the lowest unused 1-based concurrency index among existing forks of
