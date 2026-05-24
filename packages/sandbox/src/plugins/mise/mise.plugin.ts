@@ -32,6 +32,19 @@ const MISE_DOMAINS = [
  * so every shell (login or not) finds it on PATH — avoiding the
  * `~/.local/bin not on PATH` foot-gun of the `curl | sh` installer.
  *
+ * Two complementary activations are installed for bash:
+ *   - `~/.bash_profile` runs `mise activate bash --shims`, putting the shims
+ *     directory on PATH for non-interactive login shells (e.g. `bash -l
+ *     script.sh` used by hook scripts). The stock Ubuntu `~/.bashrc`
+ *     interactivity guard would otherwise skip the activation below.
+ *   - `~/.bashrc` runs full `mise activate bash` for interactive shells,
+ *     adding env vars, hooks, and `cd`-based version switching on top of
+ *     the shims.
+ *
+ * `~/.bash_profile` also sources `~/.profile` so the stock Ubuntu chain
+ * (which sources `~/.bashrc` for interactive logins) is preserved — bash
+ * skips `~/.profile` entirely when `~/.bash_profile` exists.
+ *
  * Each rc-file edit is idempotent (`grep -qxF` guards the append), so
  * repeated bootstraps don't stack duplicates.
  *
@@ -60,6 +73,18 @@ apt-get install -y --no-install-recommends mise
 sudo -iu ${user} bash -ls <<'MISE_SHIM_EOF'
 bash_line='eval "$(mise activate bash)"'
 grep -qxF "$bash_line" ~/.bashrc 2>/dev/null || echo "$bash_line" >> ~/.bashrc
+
+# Non-interactive login shells (hook scripts run as \`bash -l script.sh\`)
+# don't reach the interactivity-guarded ~/.bashrc, so put mise shims on
+# PATH via ~/.bash_profile. Source ~/.profile first to preserve the
+# Ubuntu chain (~/.profile sources ~/.bashrc for interactive logins) —
+# bash skips ~/.profile entirely once ~/.bash_profile exists.
+bash_profile="$HOME/.bash_profile"
+touch "$bash_profile"
+profile_source_line='[ -f ~/.profile ] && . ~/.profile'
+grep -qxF "$profile_source_line" "$bash_profile" || echo "$profile_source_line" >> "$bash_profile"
+shim_line='eval "$(mise activate bash --shims)"'
+grep -qxF "$shim_line" "$bash_profile" || echo "$shim_line" >> "$bash_profile"
 
 zsh_line='eval "$(mise activate zsh)"'
 zsh_rc="\${ZDOTDIR-$HOME}/.zshrc"

@@ -24,12 +24,22 @@ async function writeFixture(config: Record<string, unknown>): Promise<string> {
 
 describe('loadSandboxConfig — cross-field invariants', () => {
   let tmpDirs: string[] = [];
+  let originalAuricaHome: string | undefined;
+  let auricaHomeDir: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     tmpDirs = [];
+    auricaHomeDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'aurica-sandbox-config-test-home-'),
+    );
+    originalAuricaHome = process.env.AURICA_HOME;
+    process.env.AURICA_HOME = auricaHomeDir;
   });
 
   afterEach(async () => {
+    if (originalAuricaHome === undefined) delete process.env.AURICA_HOME;
+    else process.env.AURICA_HOME = originalAuricaHome;
+    await fs.rm(auricaHomeDir, { recursive: true, force: true });
     for (const d of tmpDirs) {
       await fs.rm(d, { recursive: true, force: true });
     }
