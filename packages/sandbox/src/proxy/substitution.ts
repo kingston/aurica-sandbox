@@ -37,16 +37,16 @@ function applyTransform(
 
 /**
  * A single mutation that was actually performed against a request, summarised
- * for verbose logging. `value` is the post-resolution, post-transform string
- * that the upstream will see; `redacted` is true when that value originated
- * from a credential source (`env:VAR`) — callers should not echo the raw
- * value to logs in that case.
+ * for verbose logging. The post-resolution value is intentionally omitted:
+ * every `set-header` / `replace-header` value is sourced from
+ * `SubstitutionResolver.resolve`, which today only accepts `<scheme>:<name>`
+ * credential refs — so the value is always a secret and callers should render
+ * a placeholder. Widen this type (add `value` + a discriminator) if the
+ * resolver ever starts accepting literal values.
  */
 export interface AppliedMutation {
   kind: 'set-header' | 'remove-header' | 'replace-header';
   header: string;
-  value?: string;
-  redacted?: boolean;
 }
 
 /**
@@ -59,13 +59,19 @@ export interface AppliedMutation {
  * - `rewrite` — request continues but to `url` instead of its original
  *   destination. Mutations have already been applied to `headers`.
  *
- * `matchedPolicyId` identifies the policy whose match drove the outcome
- * (undefined when no policy matched and the request passes through
- * untouched). `appliedMutations` enumerates the mutations that ran, in
- * order — empty when none ran.
+ * `matchedPolicyId` identifies the policy whose match drove a `pass` or
+ * `rewrite` outcome (undefined for `pass` when no policy matched and the
+ * request fell through untouched). For `block`, read `blockedBy` instead —
+ * it serves the same role and is the field embedded in the 403 body.
+ * `appliedMutations` enumerates the mutations that actually ran, in order —
+ * empty when none ran or when the outcome short-circuited (`block`).
  */
 export type EvaluationOutcome = (
-  | { outcome: 'pass'; headers: Record<string, string | string[] | undefined> }
+  | {
+      outcome: 'pass';
+      headers: Record<string, string | string[] | undefined>;
+      matchedPolicyId?: string;
+    }
   | {
       outcome: 'block';
       headers: Record<string, string | string[] | undefined>;
@@ -75,9 +81,9 @@ export type EvaluationOutcome = (
       outcome: 'rewrite';
       headers: Record<string, string | string[] | undefined>;
       url: string;
+      matchedPolicyId: string;
     }
 ) & {
-  matchedPolicyId?: string;
   appliedMutations: AppliedMutation[];
 };
 
@@ -108,7 +114,6 @@ export async function applyPolicies(
         outcome: 'block',
         headers,
         blockedBy: policy.id,
-        matchedPolicyId: policy.id,
         appliedMutations: [],
       };
     }
@@ -186,14 +191,15 @@ function prefixMatches(path: string, prefix: string): boolean {
 }
 
 /**
- * Apply a mutation in place. Returns a summary of what happened (the header
- * name, plus a value when relevant) so callers can log it, or `null` when
- * the mutation was a no-op (e.g. `remove-header` for a header that isn't
- * present, or `replace-header` whose `from` didn't match).
+ * Apply a mutation in place. Returns a summary of what happened so callers
+ * can log it, or `null` when the mutation was a no-op (e.g. `remove-header`
+ * for a header that isn't present, or `replace-header` whose `from` didn't
+ * match).
  *
- * `value` is omitted for `remove-header`. `redacted` is true when the value
- * was sourced from `resolver.resolve` (i.e. credentials) — callers should
- * not echo it to logs.
+ * Mutations within a single policy must be applied sequentially: they share
+ * the `headers` map by reference, so parallelising would race on writes
+ * (e.g. a later `replace-header` reading the value an earlier `set-header`
+ * just installed).
  */
 async function applyMutation(
   mutation: Mutation,
@@ -204,12 +210,7 @@ async function applyMutation(
     const value = await resolver.resolve(mutation.value);
     const existingKey = findHeaderKey(headers, mutation.header);
     headers[existingKey ?? mutation.header] = value;
-    return {
-      kind: 'set-header',
-      header: mutation.header,
-      value,
-      redacted: true,
-    };
+    return { kind: 'set-header', header: mutation.header };
   }
   if (mutation.kind === 'remove-header') {
     const existingKey = findHeaderKey(headers, mutation.header);
@@ -234,12 +235,7 @@ async function applyMutation(
         v.includes(matchValue) ? v.split(matchValue).join(replacement) : v,
       )
     : original.split(matchValue).join(replacement);
-  return {
-    kind: 'replace-header',
-    header: mutation.header,
-    value: replacement,
-    redacted: true,
-  };
+  return { kind: 'replace-header', header: mutation.header };
 }
 
 function findHeaderKey(

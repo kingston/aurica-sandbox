@@ -19,8 +19,8 @@ import { deriveRulesFromConfig } from './derive-rules.js';
 import {
   HostProxy,
   normalizeRemoteIp,
+  type VerboseDecisionEvent,
   type VerboseDenialLog,
-  type VerboseRequestLog,
 } from './host-proxy.js';
 
 /**
@@ -412,32 +412,34 @@ async function loadAndRegister(
 function logVerbose(
   log: ProxyLog,
   event:
-    | ({ type: 'decision' } & VerboseRequestLog)
+    | ({ type: 'decision' } & VerboseDecisionEvent)
     | ({ type: 'denial' } & VerboseDenialLog),
 ): void {
   if (event.type === 'denial') {
     log.info(
-      `denied [${event.remoteIp}] ${event.method} ${event.host}${event.path} (allowlist)`,
+      `denied [${event.remoteIp}] ${event.method} ${event.host}${event.path} (${event.reason})`,
     );
     return;
   }
-  const policy = event.matchedPolicyId ?? '(no match)';
+  const policyId =
+    event.outcome === 'block'
+      ? event.blockedBy
+      : (event.matchedPolicyId ?? '(no match)');
   const tail =
     event.outcome === 'block'
-      ? ` blockedBy=${event.blockedBy ?? policy}`
-      : event.outcome === 'rewrite' && event.rewriteUrl !== undefined
-        ? ` -> ${event.rewriteUrl}`
+      ? ` blockedBy=${event.blockedBy}`
+      : event.outcome === 'rewrite'
+        ? ` -> ${event.url}`
         : '';
   log.info(
-    `${event.outcome} [${event.remoteIp}] ${event.method} ${event.host}${event.path} policy=${policy}${tail}`,
+    `${event.outcome} [${event.remoteIp}] ${event.method} ${event.host}${event.path} policy=${policyId}${tail}`,
   );
-  for (const m of event.mutations) {
-    const valuePart =
-      m.kind === 'remove-header'
-        ? ''
-        : m.redacted === true
-          ? ' = <redacted>'
-          : ` = ${m.value ?? ''}`;
+  // `set-header` / `replace-header` always carry a credential-sourced value
+  // (the resolver only accepts `<scheme>:<name>` refs), so we render a
+  // placeholder rather than the resolved secret. Revisit when/if literal
+  // values are ever accepted by the resolver.
+  for (const m of event.appliedMutations) {
+    const valuePart = m.kind === 'remove-header' ? '' : ' = <redacted>';
     log.info(`  ${m.kind} ${m.header}${valuePart}`);
   }
 }

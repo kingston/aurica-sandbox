@@ -6,7 +6,11 @@ import { logger } from '#src/logger.js';
 
 import { ensureCA } from './ca.js';
 import { applyPolicies, matchDomain } from './substitution.js';
-import type { SubstitutionResolver } from './substitution.js';
+import type {
+  AppliedMutation,
+  EvaluationOutcome,
+  SubstitutionResolver,
+} from './substitution.js';
 
 interface SandboxRegistration {
   /**
@@ -22,32 +26,45 @@ interface SandboxRegistration {
 }
 
 /**
- * Per-request verbose log payload emitted from `beforeRequest`. Surfaces the
- * details that aren't visible on mockttp's own `response` / `abort` events:
- * which policy matched (if any), the outcome, the rewrite target when
- * applicable, and a redacted list of mutations actually applied to the
- * outgoing request.
- *
- * Emitted before the request leaves the proxy; the matching `response` line
- * follows once the upstream replies, so a single request produces a verbose
- * "decision" line and then a "result" line.
+ * Per-request context for verbose log payloads — the request-side fields
+ * that aren't on mockttp's `response` / `abort` events and so wouldn't
+ * survive into the post-flight log line. The outcome-side fields (which
+ * policy matched, applied mutations, rewrite target) ride along via the
+ * discriminated union in {@link VerboseDecisionEvent}.
  */
-export interface VerboseRequestLog {
+interface VerboseRequestContext {
   method: string;
   host: string;
   path: string;
   remoteIp: string;
-  matchedPolicyId?: string;
-  outcome: 'pass' | 'block' | 'rewrite';
-  blockedBy?: string;
-  rewriteUrl?: string;
-  mutations: {
-    kind: 'set-header' | 'remove-header' | 'replace-header';
-    header: string;
-    value?: string;
-    redacted?: boolean;
-  }[];
 }
+
+/**
+ * Distributive `Omit` — preserves the discriminated-union shape when stripping
+ * a member. Plain `Omit<T, K>` collapses the union into a single intersection
+ * whose discriminants no longer narrow, which is exactly what we don't want
+ * when the formatter discriminates on `outcome`.
+ */
+type DistributiveOmit<T, K extends keyof never> = T extends unknown
+  ? Omit<T, K>
+  : never;
+
+/**
+ * Decision event emitted before the request leaves the proxy: request
+ * context + the {@link EvaluationOutcome} (minus its `headers`, which carry
+ * resolved secrets and have no business in a log payload). The matching
+ * `response` line follows once the upstream replies, so a single request
+ * produces a verbose "decision" line and then a "result" line.
+ *
+ * Composed from `EvaluationOutcome` rather than re-flattened so adding a new
+ * `outcome` variant surfaces here as a type error rather than silently
+ * dropping the new discriminant data.
+ */
+export type VerboseDecisionEvent = VerboseRequestContext &
+  DistributiveOmit<EvaluationOutcome, 'headers'>;
+
+/** Mutation summary as it appears on a verbose decision event. */
+export type { AppliedMutation };
 
 /**
  * Logged when a request is denied because its host wasn't on any matching
@@ -65,7 +82,7 @@ export interface VerboseDenialLog {
 
 export type VerboseLogger = (
   event:
-    | ({ type: 'decision' } & VerboseRequestLog)
+    | ({ type: 'decision' } & VerboseDecisionEvent)
     | ({ type: 'denial' } & VerboseDenialLog),
 ) => void;
 
@@ -253,25 +270,17 @@ export class HostProxy {
             parts.pathWithQuery,
           );
           if (this.verboseLogger) {
-            const decision: { type: 'decision' } & VerboseRequestLog = {
+            // Strip `headers` (carries resolved secrets) before logging;
+            // every other field on `result` is safe to forward.
+            const { headers: _, ...outcomeForLog } = result;
+            this.verboseLogger({
               type: 'decision',
               method: parts.method,
               host: parts.host,
               path: parts.pathWithQuery,
               remoteIp,
-              outcome: result.outcome,
-              mutations: result.appliedMutations,
-            };
-            if (result.matchedPolicyId !== undefined) {
-              decision.matchedPolicyId = result.matchedPolicyId;
-            }
-            if (result.outcome === 'block') {
-              decision.blockedBy = result.blockedBy;
-            }
-            if (result.outcome === 'rewrite') {
-              decision.rewriteUrl = result.url;
-            }
-            this.verboseLogger(decision);
+              ...outcomeForLog,
+            });
           }
           if (result.outcome === 'block') {
             return {
