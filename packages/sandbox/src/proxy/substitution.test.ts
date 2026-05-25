@@ -473,6 +473,7 @@ describe('applyPolicies — first-match-wins and block', () => {
       outcome: 'block',
       headers,
       blockedBy: 'block-secrets',
+      appliedMutations: [],
     });
     // Header was not mutated because block short-circuited.
     expect(headers.Authorization).toBe('Bearer p');
@@ -711,5 +712,142 @@ describe('applyPolicies — rewrite-url', () => {
     expect(result.outcome).toBe('rewrite');
     if (result.outcome !== 'rewrite') throw new Error('unreachable');
     expect(result.url).toBe('http://127.0.0.1:51310/linear/mcp');
+  });
+});
+
+describe('applyPolicies — audit fields', () => {
+  it('pass with no matching policy returns empty audit fields', async () => {
+    const headers = { Authorization: 'Bearer keep-me' };
+    const result = await applyPolicies(
+      [githubPolicy],
+      'example.com',
+      '/',
+      'GET',
+      headers,
+      resolver,
+    );
+    expect(result).toEqual({
+      outcome: 'pass',
+      headers,
+      appliedMutations: [],
+    });
+    expect(headers.Authorization).toBe('Bearer keep-me');
+  });
+
+  it('pass with applied mutations records each one in order, omitting no-ops', async () => {
+    const policy: ProxyPolicy = {
+      id: 'multi-mut',
+      domain: 'api.github.com',
+      action: {
+        type: 'allow',
+        mutations: [
+          { kind: 'set-header', header: 'X-A', value: 'env:A' },
+          { kind: 'remove-header', header: 'X-Absent' },
+          {
+            kind: 'replace-header',
+            header: 'Authorization',
+            from: 'placeholder',
+            to: 'env:T',
+          },
+        ],
+      },
+    };
+    const headers = { Authorization: 'Bearer placeholder' };
+    const result = await applyPolicies(
+      [policy],
+      'api.github.com',
+      '/',
+      'GET',
+      headers,
+      resolver,
+    );
+    expect(result.outcome).toBe('pass');
+    if (result.outcome !== 'pass') throw new Error('unreachable');
+    expect(result.matchedPolicyId).toBe('multi-mut');
+    expect(result.appliedMutations).toEqual([
+      { kind: 'set-header', header: 'X-A' },
+      { kind: 'replace-header', header: 'Authorization' },
+    ]);
+  });
+
+  it('replace-header whose `from` did not match is a no-op and not recorded', async () => {
+    const policy: ProxyPolicy = {
+      id: 'no-match',
+      domain: 'api.github.com',
+      action: {
+        type: 'allow',
+        mutations: [
+          {
+            kind: 'replace-header',
+            header: 'Authorization',
+            from: 'absent-marker',
+            to: 'env:T',
+          },
+        ],
+      },
+    };
+    const headers = { Authorization: 'Bearer something-else' };
+    const result = await applyPolicies(
+      [policy],
+      'api.github.com',
+      '/',
+      'GET',
+      headers,
+      resolver,
+    );
+    expect(result.appliedMutations).toEqual([]);
+    expect(headers.Authorization).toBe('Bearer something-else');
+  });
+
+  it('rewrite outcome carries matchedPolicyId and applied mutations', async () => {
+    const policy: ProxyPolicy = {
+      id: 'mcp-rewrite',
+      domain: 'aurica.mcp.internal',
+      action: {
+        type: 'rewrite-url',
+        target: 'http://127.0.0.1:51310{path}',
+        mutations: [{ kind: 'set-header', header: 'X-Auth', value: 'env:T' }],
+      },
+    };
+    const result = await applyPolicies(
+      [policy],
+      'aurica.mcp.internal',
+      '/linear/mcp',
+      'POST',
+      {},
+      resolver,
+    );
+    expect(result.outcome).toBe('rewrite');
+    if (result.outcome !== 'rewrite') throw new Error('unreachable');
+    expect(result.matchedPolicyId).toBe('mcp-rewrite');
+    expect(result.appliedMutations).toEqual([
+      { kind: 'set-header', header: 'X-Auth' },
+    ]);
+  });
+
+  it('remove-header on a present header is recorded', async () => {
+    const policy: ProxyPolicy = {
+      id: 'strip',
+      domain: 'api.github.com',
+      action: {
+        type: 'allow',
+        mutations: [{ kind: 'remove-header', header: 'X-Drop' }],
+      },
+    };
+    const headers: Record<string, string | string[] | undefined> = {
+      'X-Drop': 'gone',
+    };
+    const result = await applyPolicies(
+      [policy],
+      'api.github.com',
+      '/',
+      'GET',
+      headers,
+      resolver,
+    );
+    expect(result.appliedMutations).toEqual([
+      { kind: 'remove-header', header: 'X-Drop' },
+    ]);
+    expect(headers['X-Drop']).toBeUndefined();
   });
 });

@@ -6,7 +6,11 @@ import { logger } from '#src/logger.js';
 
 import { ensureCA } from './ca.js';
 import { applyPolicies, matchDomain } from './substitution.js';
-import type { SubstitutionResolver } from './substitution.js';
+import type {
+  AppliedMutation,
+  EvaluationOutcome,
+  SubstitutionResolver,
+} from './substitution.js';
 
 interface SandboxRegistration {
   /**
@@ -21,9 +25,78 @@ interface SandboxRegistration {
   policies: readonly ProxyPolicy[];
 }
 
+/**
+ * Per-request context for verbose log payloads — the request-side fields
+ * that aren't on mockttp's `response` / `abort` events and so wouldn't
+ * survive into the post-flight log line. The outcome-side fields (which
+ * policy matched, applied mutations, rewrite target) ride along via the
+ * discriminated union in {@link VerboseDecisionEvent}.
+ */
+interface VerboseRequestContext {
+  method: string;
+  host: string;
+  path: string;
+  remoteIp: string;
+}
+
+/**
+ * Distributive `Omit` — preserves the discriminated-union shape when stripping
+ * a member. Plain `Omit<T, K>` collapses the union into a single intersection
+ * whose discriminants no longer narrow, which is exactly what we don't want
+ * when the formatter discriminates on `outcome`.
+ */
+type DistributiveOmit<T, K extends keyof never> = T extends unknown
+  ? Omit<T, K>
+  : never;
+
+/**
+ * Decision event emitted before the request leaves the proxy: request
+ * context + the {@link EvaluationOutcome} (minus its `headers`, which carry
+ * resolved secrets and have no business in a log payload). The matching
+ * `response` line follows once the upstream replies, so a single request
+ * produces a verbose "decision" line and then a "result" line.
+ *
+ * Composed from `EvaluationOutcome` rather than re-flattened so adding a new
+ * `outcome` variant surfaces here as a type error rather than silently
+ * dropping the new discriminant data.
+ */
+export type VerboseDecisionEvent = VerboseRequestContext &
+  DistributiveOmit<EvaluationOutcome, 'headers'>;
+
+/** Mutation summary as it appears on a verbose decision event. */
+export type { AppliedMutation };
+
+/**
+ * Logged when a request is denied because its host wasn't on any matching
+ * sandbox's allowlist (the `forUnmatchedRequest` sweep). Visible only when
+ * `verbose` is set; without it, only the eventual 403 response shows up via
+ * the normal response logger.
+ */
+export interface VerboseDenialLog {
+  method: string;
+  host: string;
+  path: string;
+  remoteIp: string;
+  reason: 'allowlist';
+}
+
+export type VerboseLogger = (
+  event:
+    | ({ type: 'decision' } & VerboseDecisionEvent)
+    | ({ type: 'denial' } & VerboseDenialLog),
+) => void;
+
 export interface HostProxyOptions {
   resolver: SubstitutionResolver;
   port?: number;
+  /**
+   * Optional sink for verbose, per-request decision logs. When supplied,
+   * the proxy emits a `decision` event from `beforeRequest` for every
+   * allowlisted request (carrying matched policy id, outcome, and applied
+   * mutations) and a `denial` event for every request rejected by the
+   * allowlist sweep. Leave undefined to disable verbose logging.
+   */
+  verboseLogger?: VerboseLogger;
 }
 
 /**
@@ -47,6 +120,7 @@ export class HostProxy {
   private readonly resolver: SubstitutionResolver;
   private readonly registrations = new Map<string, SandboxRegistration>();
   private readonly preferredPort: number;
+  private readonly verboseLogger: VerboseLogger | undefined;
   private listenAddress?: { host: string; port: number };
   private eventSubscriber?: EventSubscriber;
 
@@ -54,6 +128,7 @@ export class HostProxy {
     this.server = server;
     this.resolver = options.resolver;
     this.preferredPort = options.port ?? 0;
+    this.verboseLogger = options.verboseLogger;
   }
 
   /**
@@ -194,6 +269,19 @@ export class HostProxy {
             this.resolver,
             parts.pathWithQuery,
           );
+          if (this.verboseLogger) {
+            // Strip `headers` (carries resolved secrets) before logging;
+            // every other field on `result` is safe to forward.
+            const { headers: _, ...outcomeForLog } = result;
+            this.verboseLogger({
+              type: 'decision',
+              method: parts.method,
+              host: parts.host,
+              path: parts.pathWithQuery,
+              remoteIp,
+              ...outcomeForLog,
+            });
+          }
           if (result.outcome === 'block') {
             return {
               response: {
@@ -223,15 +311,32 @@ export class HostProxy {
         },
       });
 
-    // Sweep: anything that didn't match the allowlist gets 403.
-    await this.server
-      .forUnmatchedRequest()
-      .thenReply(
-        403,
-        'Forbidden',
-        'aurica-sandbox: domain not in allowlist\n',
-        { 'content-type': 'text/plain' },
-      );
+    // Sweep: anything that didn't match the allowlist gets 403. Uses
+    // `thenCallback` (instead of `thenReply`) so verbose mode can surface
+    // each denial with method+host+IP — `thenReply` would hide the request
+    // details from us and only the response-event line would survive.
+    await this.server.forUnmatchedRequest().thenCallback((req) => {
+      if (this.verboseLogger) {
+        const parts = hostAndPathFromRequest(req);
+        const remoteIp = normalizeRemoteIp(req.remoteIpAddress);
+        if (parts !== null && remoteIp !== null) {
+          this.verboseLogger({
+            type: 'denial',
+            method: parts.method,
+            host: parts.host,
+            path: parts.pathWithQuery,
+            remoteIp,
+            reason: 'allowlist',
+          });
+        }
+      }
+      return {
+        statusCode: 403,
+        statusMessage: 'Forbidden',
+        headers: { 'content-type': 'text/plain' },
+        body: 'aurica-sandbox: domain not in allowlist\n',
+      };
+    });
 
     // Mockttp's reset() above also tore down any event listeners; re-attach
     // them now so log streams keep working across reloads.
@@ -293,7 +398,7 @@ function stripHeader(
  * proxy compares equal to its plain v4 form. Mockttp listens on `::` by
  * default, which surfaces incoming v4 connections as `::ffff:x.x.x.x`.
  */
-function normalizeRemoteIp(remoteIp: string | undefined): string | null {
+export function normalizeRemoteIp(remoteIp: string | undefined): string | null {
   if (remoteIp === undefined) return null;
   if (remoteIp.startsWith('::ffff:')) return remoteIp.slice('::ffff:'.length);
   return remoteIp;
