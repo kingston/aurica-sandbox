@@ -154,7 +154,7 @@ export async function runCreate(
   // Plugin expansion. The full result is needed here for the in-VM
   // bootstrap (commands + bootstrapScript); the proxy re-derives just the
   // rules half from disk on every reload.
-  const expanded = deriveFromConfig(config, {
+  const expanded = await deriveFromConfig(config, {
     user: linuxUser,
     sandboxName: name,
     authSecret,

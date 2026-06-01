@@ -16,6 +16,10 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import {
+  writeUpstreamClient,
+  writeUpstreamTokens,
+} from './credentials-store.js';
 import { McpForwarder, type UpstreamCatalogEntry } from './forwarder.js';
 import { McpGateway } from './gateway.js';
 
@@ -143,13 +147,43 @@ async function startFakeUpstream(): Promise<FakeUpstreamHandle> {
   };
 }
 
-async function makeTempCreds(initial: object): Promise<string> {
+/**
+ * Per-test credentials home. Returned tempdir is registered as
+ * `AURICA_HOME` so the slot factory writes here; cleanup is the caller's
+ * responsibility (Harness.close handles it for the standard flow).
+ */
+interface CredsSandbox {
+  dir: string;
+  restore: () => Promise<void>;
+}
+
+async function makeCredsSandbox(seed?: {
+  upstream: string;
+  clientInformation?: unknown;
+  tokens?: unknown;
+}): Promise<CredsSandbox> {
   const dir = await fs.mkdtemp(
     path.join(os.tmpdir(), 'aurica-forwarder-test-'),
   );
-  const p = path.join(dir, 'credentials.json');
-  await fs.writeFile(p, JSON.stringify(initial, null, 2), { mode: 0o600 });
-  return p;
+  const prev = process.env.AURICA_HOME;
+  process.env.AURICA_HOME = dir;
+  if (seed?.clientInformation !== undefined) {
+    await writeUpstreamClient(seed.upstream, seed.clientInformation);
+  }
+  if (seed?.tokens !== undefined) {
+    await writeUpstreamTokens(seed.upstream, seed.tokens);
+  }
+  return {
+    dir,
+    restore: async () => {
+      if (prev === undefined) {
+        delete process.env.AURICA_HOME;
+      } else {
+        process.env.AURICA_HOME = prev;
+      }
+      await fs.rm(dir, { recursive: true, force: true });
+    },
+  };
 }
 
 function catalogEntry(url: string): UpstreamCatalogEntry {
@@ -178,6 +212,7 @@ function bearerCatalogEntry(
 interface Harness {
   client: Client;
   upstream: FakeUpstreamHandle;
+  creds: CredsSandbox;
   close: () => Promise<void>;
 }
 
@@ -195,16 +230,12 @@ async function harness(
   },
 ): Promise<Harness> {
   const upstream = await startFakeUpstream();
-  const credsPath = await makeTempCreds({
-    version: 1,
-    upstreams: {
-      [serverName]: {
-        clientInformation: { client_id: 'test-client' },
-        tokens: { access_token: 'test-token', token_type: 'Bearer' },
-      },
-    },
+  const creds = await makeCredsSandbox({
+    upstream: serverName,
+    clientInformation: { client_id: 'test-client' },
+    tokens: { access_token: 'test-token', token_type: 'Bearer' },
   });
-  const forwarder = new McpForwarder({ credentialsPath: credsPath });
+  const forwarder = new McpForwarder();
   forwarder.setCatalog(new Map([[serverName, catalogEntry(upstream.url)]]));
   const gateway = new McpGateway({ host: '127.0.0.1', forwarder });
   const bound = await gateway.listen();
@@ -238,11 +269,13 @@ async function harness(
   return {
     client,
     upstream,
+    creds,
     close: async () => {
       await client.close();
       await gateway.close();
       await forwarder.close();
       await upstream.close();
+      await creds.restore();
     },
   };
 }
@@ -408,11 +441,11 @@ describe('McpForwarder login-required surfaces', () => {
 
   it('returns an empty tools/list with login_required metadata when no tokens are cached', async () => {
     const upstream = await startFakeUpstream();
-    const credsPath = await makeTempCreds({
-      version: 1,
-      upstreams: { github: { clientInformation: { client_id: 'c1' } } },
+    const creds = await makeCredsSandbox({
+      upstream: 'github',
+      clientInformation: { client_id: 'c1' },
     });
-    const forwarder = new McpForwarder({ credentialsPath: credsPath });
+    const forwarder = new McpForwarder();
     forwarder.setCatalog(new Map([['github', catalogEntry(upstream.url)]]));
     const gateway = new McpGateway({ host: '127.0.0.1', forwarder });
     const bound = await gateway.listen();
@@ -443,11 +476,13 @@ describe('McpForwarder login-required surfaces', () => {
     h = {
       client,
       upstream,
+      creds,
       close: async () => {
         await client.close();
         await gateway.close();
         await forwarder.close();
         await upstream.close();
+        await creds.restore();
       },
     };
 

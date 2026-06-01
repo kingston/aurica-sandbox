@@ -1,24 +1,24 @@
 import type { ProxyPolicy } from '#src/config/proxy-policy.js';
+import { defaultCredentialStore } from '#src/credentials/credential-store.js';
 import { assertSafeShellIdent } from '#src/utils/shell-safety.js';
 
 import type { PluginCommand, SandboxPlugin } from '../types.js';
+import { registerClaudeCommands } from './cli/claude-commands.js';
+import { claudeRecord } from './oauth.js';
 import {
   type ClaudeCodeProjectConfig,
   claudeCodeProjectConfigSchema,
 } from './schema.js';
 
 /**
- * Hosts Claude Code reaches once installed. The first two are the official
- * installer entry point + release artifact bucket (the `claude.ai`
- * bootstrap URL 302s to `downloads.claude.ai`); the third is the inference
- * API where credential injection happens.
+ * Hosts Claude Code reaches in `api-key` / `oauth-token` modes — installer
+ * entry point, release artifact bucket, and the inference API. The
+ * `claude.ai` bootstrap URL 302s to `downloads.claude.ai`; credential
+ * injection happens on `api.anthropic.com`.
  *
- * Auth-flow hosts (`console.anthropic.com`, `claude.ai/oauth/*`) are
- * intentionally NOT in the list — the sandbox must not be able to start its
- * own `/login`. Auth always happens on the host (today via env-var
- * `tokenSource`; in the future via a `claude-oauth` credential provider).
- *
- * Telemetry hosts (`statsig.anthropic.com`, `*.sentry.io`) are also
+ * `subscription` mode adds three OAuth-flow hosts on top
+ * ({@link CLAUDE_SUBSCRIPTION_OAUTH_DOMAINS}); only that mode reaches them.
+ * Telemetry hosts (`statsig.anthropic.com`, `*.sentry.io`) are deliberately
  * omitted; `DISABLE_TELEMETRY=1` in `settings.json.env` keeps Claude Code
  * from reaching for them.
  */
@@ -29,34 +29,61 @@ const CLAUDE_CODE_DOMAINS = [
 ] as const;
 
 /**
+ * Hosts the guest's `claude /login` flow touches end-to-end. Allowed only
+ * for `subscription` mode. The proxy intercepts `platform.claude.com`'s
+ * token-endpoint response and persists tokens to the host slot.
+ */
+const CLAUDE_SUBSCRIPTION_OAUTH_DOMAINS = [
+  'claude.ai',
+  'platform.claude.com',
+] as const;
+
+/**
+ * Record key whose secrets the proxy interceptor writes into when it
+ * captures a token-grant response. Must match {@link claudeRecord}'s key
+ * — kept in sync at compile time via this import.
+ */
+const CLAUDE_RECORD_KEY = claudeRecord.key;
+
+/**
  * Per-`authMode` knobs:
  *
- * - `keepHeader`   — the header Claude Code's auth value should land in for
- *                    this mode. The proxy substitutes the placeholder there.
- * - `dropHeader`   — the *other* header. `apiKeyHelper`'s output is sent in
- *                    BOTH `X-Api-Key` and `Authorization: Bearer`
- *                    simultaneously (per the apiKeyHelper docs at
- *                    https://code.claude.com/docs/en/settings), so the proxy
- *                    must strip the wrong one before forwarding — Anthropic
- *                    would otherwise see two conflicting auth headers and
- *                    pick the wrong shape (e.g. an OAuth token sent under
- *                    X-Api-Key and rejected as malformed).
- * - `defaultEnv`   — env var name the default `tokenSource` resolves from
- *                    when `tokenSource` isn't set explicitly.
+ * - `keepHeader`    — the header Claude Code's auth value should land in for
+ *                     this mode. The proxy substitutes the placeholder there.
+ * - `dropHeader`    — the *other* header. `apiKeyHelper`'s output is sent in
+ *                     BOTH `X-Api-Key` and `Authorization: Bearer`
+ *                     simultaneously (per the apiKeyHelper docs at
+ *                     https://code.claude.com/docs/en/settings), so the proxy
+ *                     must strip the wrong one before forwarding — Anthropic
+ *                     would otherwise see two conflicting auth headers and
+ *                     pick the wrong shape (e.g. an OAuth token sent under
+ *                     X-Api-Key and rejected as malformed).
+ * - `defaultSource` — credential-source string the proxy resolves when the
+ *                     user hasn't set `tokenSource` explicitly. For `env:`
+ *                     modes this is just `env:<VAR>`; for `subscription`
+ *                     it's `vault:<claude-record-key>`, which the
+ *                     `vault` credential provider resolves to whatever the
+ *                     proxy's `oauth-token-response` interceptor most
+ *                     recently persisted under that key.
  */
 const AUTH_MODE: Record<
   ClaudeCodeProjectConfig['authMode'],
-  { keepHeader: string; dropHeader: string; defaultEnv: string }
+  { keepHeader: string; dropHeader: string; defaultSource: string }
 > = {
   'api-key': {
     keepHeader: 'x-api-key',
     dropHeader: 'Authorization',
-    defaultEnv: 'ANTHROPIC_API_KEY',
+    defaultSource: 'env:ANTHROPIC_API_KEY',
   },
   'oauth-token': {
     keepHeader: 'Authorization',
     dropHeader: 'x-api-key',
-    defaultEnv: 'CLAUDE_CODE_OAUTH_TOKEN',
+    defaultSource: 'env:CLAUDE_CODE_OAUTH_TOKEN',
+  },
+  subscription: {
+    keepHeader: 'Authorization',
+    dropHeader: 'x-api-key',
+    defaultSource: `vault:${CLAUDE_RECORD_KEY}#accessToken`,
   },
 };
 
@@ -77,31 +104,29 @@ sudo -iu ${user} bash -lc 'curl -fsSL https://claude.ai/install.sh | bash'`;
 /**
  * Claude Code plugin. Contributes:
  *
- * 1. Proxy domains for the installer + inference API.
- * 2. A single allow policy on `api.anthropic.com` whose mutations
- *    (a) substitute the placeholder for the resolved credential in the
- *    mode-appropriate header (`X-Api-Key` for api-key, `Authorization` for
- *    oauth-token), and (b) drop the *other* header. `apiKeyHelper`'s
- *    output is sent in both `X-Api-Key` and `Authorization: Bearer`
- *    simultaneously (per the settings docs), so without the drop step
- *    Anthropic would see two conflicting auth headers — e.g. an OAuth
- *    token under `X-Api-Key` would be rejected as malformed. Substring
- *    replacement matches just the placeholder, leaving the `Bearer `
- *    prefix on `Authorization` intact.
- * 3. A bootstrap snippet that runs the official installer pre-lockdown.
- * 4. A post-lockdown command that writes `~/.claude/settings.json` with
- *    `apiKeyHelper: "/bin/echo <placeholder>"`. Claude Code runs that
- *    helper on every request, gets the placeholder back as the token, and
- *    sends it on the wire — where the proxy mutations above swap it for
- *    the real credential and strip the wrong header. This mirrors Docker
- *    Sandbox's `apiKeyHelper: "echo proxy-managed"` pattern but uses
- *    aurica's deterministic per-plugin placeholder so multiple plugins
- *    targeting the same host can't collide on resolution.
+ * 1. Proxy domains for the installer + inference API; `subscription` mode
+ *    additionally allowlists the OAuth-flow hosts.
+ * 2. An allow policy on `api.anthropic.com` whose mutations substitute the
+ *    placeholder for the resolved credential in the mode-appropriate header
+ *    and drop the *other* header. (Without the drop step, `apiKeyHelper`'s
+ *    output would land in both headers and Anthropic would reject the
+ *    mismatched pair.)
+ * 3. For `subscription` mode only: an allow policy on
+ *    `platform.claude.com/v1/oauth/token` with an `oauth-token-response`
+ *    response interceptor. The proxy captures the real tokens off the wire,
+ *    persists them to the host slot, and rewrites the response with
+ *    per-sandbox placeholders before forwarding to the guest.
+ * 4. A bootstrap snippet that runs the official installer pre-lockdown.
+ * 5. Post-lockdown commands. For `api-key` / `oauth-token`: writes
+ *    `~/.claude/settings.json` with `apiKeyHelper: "/bin/echo
+ *    <placeholder>"` so Claude Code emits the placeholder on every request.
+ *    For `subscription`: pre-seeds `~/.claude/.credentials.json` with the
+ *    same placeholder pair the proxy interceptor will rewrite real tokens
+ *    onto, plus `subscriptionType: "max"`, so a returning sandbox boots
+ *    pre-authenticated when the host slot already exists.
  *
- * `DISABLE_AUTOUPDATER` and `DISABLE_TELEMETRY` are set in the same
- * settings file so background traffic stays inside the allowlist (no
- * surprise hits to update or telemetry hosts). Auto-updates would also
- * fail under the iptables lockdown if attempted post-init.
+ * `DISABLE_AUTOUPDATER` and `DISABLE_TELEMETRY` are set in the settings
+ * file so background traffic stays inside the allowlist.
  */
 export const claudeCodePlugin: SandboxPlugin<
   undefined,
@@ -110,12 +135,48 @@ export const claudeCodePlugin: SandboxPlugin<
   name: 'claude-code',
   projectConfigSchema: claudeCodeProjectConfigSchema,
   userConfigSchema: undefined,
-  initialize({ project, generatePlaceholder, linuxUser }) {
+  cliCommands(program): void {
+    registerClaudeCommands(program);
+  },
+  async initialize({ project, generatePlaceholder, linuxUser }) {
     assertSafeShellIdent('linuxUser', linuxUser);
 
-    const { keepHeader, dropHeader, defaultEnv } = AUTH_MODE[project.authMode];
-    const tokenSource = project.tokenSource ?? `env:${defaultEnv}`;
-    const placeholder = generatePlaceholder('api');
+    const { keepHeader, dropHeader, defaultSource } =
+      AUTH_MODE[project.authMode];
+    const tokenSource = project.tokenSource ?? defaultSource;
+
+    // Subscription mode rides on two placeholders that the proxy's
+    // `oauth-token-response` policy rewrites into the guest-visible
+    // `~/.claude/.credentials.json`:
+    //
+    //   - `subscriptionAccessToken` — unversioned. Stays the same string
+    //     across the sandbox's lifetime. The proxy's `replace-header`
+    //     mutation substring-matches it on `Authorization: Bearer
+    //     <accessPlaceholder>` and substitutes the real access token from
+    //     the slot. Static so the policy doesn't need a reload on every
+    //     refresh.
+    //
+    //   - `subscriptionRefreshTokenBase` — the BASE of the versioned
+    //     refresh placeholder. The synthesized token Claude Code holds is
+    //     `${subscriptionRefreshTokenBase}:${currentCounter}`; the proxy
+    //     extracts the trailing `:<n>` from inbound refresh requests to
+    //     drive the refresh-race short-circuit. The base is baked into
+    //     the policy because that's what the response interceptor and
+    //     refresh short-circuit need to know to mint the next versioned
+    //     placeholder.
+    //
+    // The `oauth-token` / `api-key` modes don't have an interceptor; they
+    // use a regular `__AURICA_TOKEN_XXX__` placeholder emitted via
+    // `apiKeyHelper` instead.
+    const accessPlaceholder = generatePlaceholder('access');
+    const refreshPlaceholder = generatePlaceholder('refresh');
+    const subscriptionAccessToken = `sk-ant-oat01-aurica-${accessPlaceholder}`;
+    const subscriptionRefreshTokenBase = `sk-ant-ort01-aurica-${refreshPlaceholder}`;
+
+    const apiPlaceholder =
+      project.authMode === 'subscription'
+        ? subscriptionAccessToken
+        : generatePlaceholder('api');
 
     const policies: ProxyPolicy[] = [
       {
@@ -128,11 +189,7 @@ export const claudeCodePlugin: SandboxPlugin<
             {
               kind: 'replace-header',
               header: keepHeader,
-              // Substring match — the placeholder appears verbatim in the
-              // header value (Claude Code's apiKeyHelper emits it as-is).
-              // For `Authorization: Bearer <placeholder>`, replacing just
-              // `<placeholder>` leaves the `Bearer ` prefix untouched.
-              from: placeholder,
+              from: apiPlaceholder,
               to: tokenSource,
             },
             {
@@ -144,33 +201,77 @@ export const claudeCodePlugin: SandboxPlugin<
       },
     ];
 
+    const commands: PluginCommand[] = [];
+    const domains: string[] = [...CLAUDE_CODE_DOMAINS];
+
+    if (project.authMode === 'subscription') {
+      domains.push(...CLAUDE_SUBSCRIPTION_OAUTH_DOMAINS);
+
+      policies.push({
+        id: 'claude-code:oauth-token',
+        description:
+          'Claude OAuth token endpoint. authorization_code grants are forwarded upstream; the response interceptor persists newly-issued tokens to the slot and rewrites the body with per-sandbox placeholders before forwarding to the guest. refresh_token grants are short-circuited on the host (mutex-guarded) so parallel 401-triggered refreshes from the guest do not race the upstream refresh-token rotation.',
+        domain: 'platform.claude.com',
+        matchers: [{ exact: '/v1/oauth/token', methods: ['POST'] }],
+        action: {
+          type: 'allow',
+          interceptResponse: {
+            kind: 'oauth-token-response',
+            recordKey: CLAUDE_RECORD_KEY,
+            placeholders: {
+              accessToken: subscriptionAccessToken,
+              refreshToken: subscriptionRefreshTokenBase,
+            },
+          },
+        },
+      });
+
+      commands.push(
+        settingsJsonCommand({ apiKeyHelper: null }),
+        claudeJsonCommand(),
+      );
+      // Only seed `~/.claude/.credentials.json` when we have real
+      // metadata from a prior login on this host. Without a slot, the
+      // scopes / `subscriptionType` we'd write are guesses — better to
+      // let Claude Code on the guest show its native "not logged in"
+      // state, run `claude /login`, and let the interceptor populate
+      // the slot for the next sandbox.
+      const cachedSlot = await defaultCredentialStore.read(claudeRecord);
+      if (cachedSlot !== undefined) {
+        // Embed the slot's current counter into the refresh placeholder
+        // so the guest's first refresh attempt matches the host's view —
+        // the proxy compares `:<n>` to `currentCounter` and would 400
+        // anything ahead of it.
+        const versionedRefreshToken = `${subscriptionRefreshTokenBase}:${cachedSlot.currentCounter}`;
+        const cachedSubscriptionType =
+          typeof cachedSlot.extras.subscriptionType === 'string'
+            ? cachedSlot.extras.subscriptionType
+            : 'max';
+        commands.push(
+          credentialsJsonCommand({
+            accessToken: subscriptionAccessToken,
+            refreshToken: versionedRefreshToken,
+            scopes: cachedSlot.scopes,
+            subscriptionType: cachedSubscriptionType,
+          }),
+        );
+      }
+    } else {
+      commands.push(
+        settingsJsonCommand({ apiKeyHelper: apiPlaceholder }),
+        claudeJsonCommand(),
+      );
+    }
+
     return {
-      domains: [...CLAUDE_CODE_DOMAINS],
+      domains,
       policies,
-      commands: [settingsJsonCommand(placeholder), claudeJsonCommand()],
+      commands,
       bootstrapScript: claudeCodeBootstrapScript(linuxUser),
     };
   },
 };
 
-/**
- * Write `~/.claude/settings.json` as the default user with `apiKeyHelper`
- * pointing at `/bin/echo <placeholder>`. Claude Code reads this file
- * unconditionally on startup and on every credential refresh (5-minute TTL
- * by default, plus on HTTP 401), so the placeholder propagates cleanly to
- * both interactive and non-interactive invocations — unlike `/etc/environment`,
- * which only works for login shells.
- *
- * `DISABLE_AUTOUPDATER` blocks the in-process update check (which would
- * try `downloads.claude.ai` periodically). `DISABLE_TELEMETRY` keeps
- * Claude Code from reaching for `statsig.anthropic.com` / Sentry, neither
- * of which is in the proxy allowlist.
- *
- * The body is passed through `printf "%s\n" "$@"` so the placeholder is
- * never interpolated by the wrapping shell. `umask 077` keeps perms tight
- * on the credential-bearing file. Truncating on each init keeps re-runs
- * idempotent.
- */
 /**
  * Pre-seed `~/.claude.json` so Claude Code's first launch skips the theme
  * picker, the onboarding wizard, and the per-project "Do you trust the
@@ -200,16 +301,11 @@ export const claudeCodePlugin: SandboxPlugin<
  * later `claude /login` doesn't downgrade the perms.
  */
 function claudeJsonCommand(): PluginCommand {
-  // Embedded Python keeps JSON-escaping correct for paths containing
-  // characters that would otherwise need shell quoting (quotes,
-  // backslashes, spaces). `python3` is preinstalled on Ubuntu/Debian, the
-  // two distros the sandbox supports.
   const script = String.raw`
 set -eu
 project_dir=""
 if [ -r /etc/environment ]; then
-  # Sourcing /etc/environment would execute it; read the value directly so
-  # a malformed line cannot run code.
+  # sed instead of source: avoid executing arbitrary content in /etc/environment
   project_dir=$(sed -n 's/^AURICA_PROJECT_DIR=//p' /etc/environment | tail -n1)
 fi
 umask 077
@@ -244,27 +340,97 @@ chmod 600 "$HOME/.claude.json"
   };
 }
 
-function settingsJsonCommand(placeholder: string): {
-  user: 'default';
-  argv: string[];
-} {
-  const body = JSON.stringify(
-    {
-      apiKeyHelper: `/bin/echo ${placeholder}`,
-      env: {
-        DISABLE_AUTOUPDATER: '1',
-        DISABLE_TELEMETRY: '1',
-      },
+/**
+ * Write `~/.claude/settings.json`. `apiKeyHelper` is set to
+ * `/bin/echo <placeholder>` for `api-key` / `oauth-token` modes — Claude
+ * Code reads this file unconditionally on startup and on every credential
+ * refresh, so the placeholder propagates cleanly to both interactive and
+ * non-interactive invocations.
+ *
+ * For `subscription` mode, `apiKeyHelper` is omitted: Claude Code is
+ * driven by `~/.claude/.credentials.json` instead, and an `apiKeyHelper`
+ * would shadow it (the helper's output wins over the file-based token).
+ *
+ * `DISABLE_AUTOUPDATER` blocks the in-process update check (which would
+ * try `downloads.claude.ai` periodically). `DISABLE_TELEMETRY` keeps
+ * Claude Code from reaching for `statsig.anthropic.com` / Sentry, neither
+ * of which is in the proxy allowlist.
+ */
+function settingsJsonCommand(opts: {
+  apiKeyHelper: string | null;
+}): PluginCommand {
+  const settings: Record<string, unknown> = {
+    env: {
+      DISABLE_AUTOUPDATER: '1',
+      DISABLE_TELEMETRY: '1',
     },
-    null,
-    2,
-  );
+  };
+  if (opts.apiKeyHelper !== null) {
+    settings.apiKeyHelper = `/bin/echo ${opts.apiKeyHelper}`;
+  }
+  const body = JSON.stringify(settings, null, 2);
   return {
     user: 'default',
     argv: [
       'sh',
       '-c',
       String.raw`mkdir -p "$HOME/.claude" && umask 077 && printf "%s\n" "$@" > "$HOME/.claude/settings.json"`,
+      'sh',
+      body,
+    ],
+  };
+}
+
+/**
+ * Pre-seed `~/.claude/.credentials.json` with the placeholder access /
+ * refresh tokens, plus the real `scopes` and `subscriptionType` captured
+ * from the most recent host-side OAuth slot. Claude Code reads this file
+ * on Linux when no `apiKeyHelper` is configured and treats it as a
+ * subscription-tier session.
+ *
+ * Shape mirrors what Claude Code itself writes after a successful
+ * `/login`:
+ *
+ * ```
+ * {
+ *   "claudeAiOauth": {
+ *     "accessToken": "sk-ant-oat01-...",
+ *     "refreshToken": "sk-ant-ort01-...",
+ *     "expiresAt": 1893456000000,
+ *     "scopes": ["user:inference", ...],
+ *     "subscriptionType": "max"
+ *   }
+ * }
+ * ```
+ *
+ * Only emitted when the host slot is already populated — see the
+ * caller in {@link claudeCodePlugin}'s `initialize`. With a fresh
+ * machine, `~/.claude/.credentials.json` is left unwritten so the
+ * guest's `claude /login` is the source of truth for `scopes` /
+ * `subscriptionType`.
+ */
+function credentialsJsonCommand(opts: {
+  accessToken: string;
+  refreshToken: string;
+  scopes: readonly string[];
+  subscriptionType: string;
+}): PluginCommand {
+  const credentials = {
+    claudeAiOauth: {
+      accessToken: opts.accessToken,
+      refreshToken: opts.refreshToken,
+      expiresAt: Date.now() + 365 * 24 * 60 * 60 * 1000,
+      scopes: [...opts.scopes],
+      subscriptionType: opts.subscriptionType,
+    },
+  };
+  const body = JSON.stringify(credentials, null, 2);
+  return {
+    user: 'default',
+    argv: [
+      'sh',
+      '-c',
+      String.raw`mkdir -p "$HOME/.claude" && umask 077 && printf "%s\n" "$@" > "$HOME/.claude/.credentials.json" && chmod 600 "$HOME/.claude/.credentials.json"`,
       'sh',
       body,
     ],

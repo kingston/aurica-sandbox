@@ -91,6 +91,7 @@ describe('HostProxy (mockttp-backed)', () => {
     proxy.register('test', {
       sourceIp: '127.0.0.1',
       domains: ['127.0.0.1'],
+      configDomains: ['127.0.0.1'],
       policies: [
         {
           id: 'test-policy',
@@ -158,14 +159,15 @@ describe('HostProxy (mockttp-backed)', () => {
     proxy.register('other', {
       sourceIp: '127.0.0.1',
       domains: ['127.0.0.1', '*.example.com'],
+      configDomains: ['127.0.0.1', '*.example.com'],
       policies: [],
     });
     await proxy.refresh();
-    const after = proxy.summary().flatMap((e) => e.domains);
+    const after = proxy.summary().flatMap((e) => e.configDomains);
     expect(new Set(after)).toEqual(new Set(['127.0.0.1', '*.example.com']));
     proxy.unregister('other');
     await proxy.refresh();
-    const afterUnregister = proxy.summary().flatMap((e) => e.domains);
+    const afterUnregister = proxy.summary().flatMap((e) => e.configDomains);
     expect(new Set(afterUnregister)).toEqual(new Set(['127.0.0.1']));
   });
 

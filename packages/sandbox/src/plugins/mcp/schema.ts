@@ -25,7 +25,7 @@ const mcpUpstreamAuthSchema = z.discriminatedUnion('type', [
     type: z.literal('bearer'),
     /**
      * Credential-source reference resolved by the existing
-     * {@link CredentialCache}. Plain literals are intentionally NOT
+     * {@link CredentialResolver}. Plain literals are intentionally NOT
      * accepted — putting a PAT into project JSON (which is usually
      * committed) is a foot-gun we'd rather close off entirely. Use
      * `env:VAR`, `gh-token`, or a future provider.

@@ -5,80 +5,75 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
-  deleteUpstreamSlot,
-  readCredentials,
-  readUpstreamSlot,
-  withCredentials,
-  writeUpstreamSlot,
+  deleteUpstreamRecord,
+  readUpstreamRecord,
+  writeUpstreamRecord,
 } from './credentials-store.js';
 
-describe('credentials store', () => {
+describe('mcp credentials store (slot-backed)', () => {
   let dir: string;
-  let file: string;
+  let prevHome: string | undefined;
 
   beforeEach(async () => {
-    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'aurica-creds-'));
-    file = path.join(dir, 'credentials.json');
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'aurica-mcp-creds-'));
+    prevHome = process.env.AURICA_HOME;
+    process.env.AURICA_HOME = dir;
   });
 
   afterEach(async () => {
+    if (prevHome === undefined) {
+      delete process.env.AURICA_HOME;
+    } else {
+      process.env.AURICA_HOME = prevHome;
+    }
     await fs.rm(dir, { recursive: true, force: true });
   });
 
-  it('returns the empty default when the file does not exist', async () => {
-    const f = await readCredentials(file);
-    expect(f).toEqual({ version: 1, upstreams: {} });
+  it('returns undefined when nothing has been written for an upstream', async () => {
+    expect(await readUpstreamRecord('github')).toBeUndefined();
   });
 
-  it('round-trips an upstream slot through withCredentials', async () => {
-    await withCredentials((f) => {
-      f.upstreams.github = {
-        clientInformation: { client_id: 'abc' },
-        tokens: { access_token: 'xyz' },
-      };
-    }, file);
-    const slot = await readUpstreamSlot('github', file);
+  it('round-trips client + tokens through writeUpstreamRecord', async () => {
+    await writeUpstreamRecord('github', {
+      clientInformation: { client_id: 'abc' },
+      tokens: { access_token: 'xyz' },
+    });
+    const slot = await readUpstreamRecord('github');
     expect(slot?.clientInformation).toEqual({ client_id: 'abc' });
     expect(slot?.tokens).toEqual({ access_token: 'xyz' });
   });
 
-  it('writeUpstreamSlot creates the slot atomically', async () => {
-    await writeUpstreamSlot('linear', { tokens: { access_token: 't' } }, file);
-    const slot = await readUpstreamSlot('linear', file);
+  it('writeUpstreamRecord can write tokens alone', async () => {
+    await writeUpstreamRecord('linear', { tokens: { access_token: 't' } });
+    const slot = await readUpstreamRecord('linear');
     expect(slot?.tokens).toEqual({ access_token: 't' });
+    expect(slot?.clientInformation).toBeUndefined();
   });
 
-  it('deleteUpstreamSlot returns true on hit and removes the entry', async () => {
-    await writeUpstreamSlot('sentry', { tokens: { access_token: 't' } }, file);
-    const existed = await deleteUpstreamSlot('sentry', file);
+  it('deleteUpstreamRecord returns true on hit and removes both halves', async () => {
+    await writeUpstreamRecord('sentry', {
+      clientInformation: { client_id: 'c' },
+      tokens: { access_token: 't' },
+    });
+    const existed = await deleteUpstreamRecord('sentry');
     expect(existed).toBe(true);
-    const after = await readUpstreamSlot('sentry', file);
-    expect(after).toBeUndefined();
+    expect(await readUpstreamRecord('sentry')).toBeUndefined();
   });
 
-  it('deleteUpstreamSlot returns false when nothing was there', async () => {
-    const existed = await deleteUpstreamSlot('nope', file);
-    expect(existed).toBe(false);
+  it('deleteUpstreamRecord returns false when nothing was there', async () => {
+    expect(await deleteUpstreamRecord('nope')).toBe(false);
   });
 
-  it('writes the file with mode 0600', async () => {
-    await writeUpstreamSlot('github', { tokens: { access_token: 't' } }, file);
-    const stat = await fs.stat(file);
-    // Mask off type bits, compare just the permission bits.
-    expect(stat.mode & 0o777).toBe(0o600);
-  });
-
-  it('serializes parallel writes so neither is lost', async () => {
+  it('scopes per-upstream: writes to a do not bleed into b', async () => {
     await Promise.all([
-      writeUpstreamSlot('a', { tokens: { access_token: '1' } }, file),
-      writeUpstreamSlot('b', { tokens: { access_token: '2' } }, file),
+      writeUpstreamRecord('a', { tokens: { access_token: '1' } }),
+      writeUpstreamRecord('b', { tokens: { access_token: '2' } }),
     ]);
-    const f = await readCredentials(file);
-    expect(Object.keys(f.upstreams).sort()).toEqual(['a', 'b']);
-  });
-
-  it('rejects malformed JSON', async () => {
-    await fs.writeFile(file, '{ not valid');
-    await expect(readCredentials(file)).rejects.toThrow(/JSON|Unexpected/);
+    const [aSlot, bSlot] = await Promise.all([
+      readUpstreamRecord('a'),
+      readUpstreamRecord('b'),
+    ]);
+    expect(aSlot?.tokens).toEqual({ access_token: '1' });
+    expect(bSlot?.tokens).toEqual({ access_token: '2' });
   });
 });

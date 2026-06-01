@@ -53,8 +53,8 @@ export type UpstreamCatalogEntry =
 export type UpstreamCatalog = ReadonlyMap<string, UpstreamCatalogEntry>;
 
 /**
- * Subset of {@link CredentialCache} the forwarder depends on. Lets the
- * sidecar pass in its own cache (so PAT lookups are shared with the
+ * Subset of {@link CredentialResolver} the forwarder depends on. Lets the
+ * sidecar pass in its own resolver (so PAT lookups are shared with the
  * proxy's `replace-header` resolutions) without dragging the whole
  * class into the test surface.
  */
@@ -64,12 +64,6 @@ export interface BearerTokenResolver {
 
 /** Options for {@link McpForwarder}. */
 export interface McpForwarderOptions {
-  /**
-   * Override the credentials file path. Threaded into every
-   * lazily-created {@link FileOAuthProvider}; tests use this to redirect
-   * to a tempfile.
-   */
-  credentialsPath?: string;
   /**
    * Idle timeout in milliseconds after which an inactive session is
    * dropped. Clients are supposed to send DELETE on shutdown but rarely
@@ -82,7 +76,7 @@ export interface McpForwarderOptions {
    * source (`env:GH_PAT`, `gh-token`, …) into a token string. Required
    * when any `bearer`-auth upstream is registered; calls fail loudly
    * otherwise. The sidecar typically passes the same
-   * {@link CredentialCache} instance the host proxy uses.
+   * {@link CredentialResolver} instance the host proxy uses.
    */
   bearerTokenResolver?: BearerTokenResolver;
 }
@@ -185,13 +179,11 @@ export class McpForwarder {
   #catalog: UpstreamCatalog = new Map();
   readonly #upstreams = new Map<string, UpstreamRecord>();
   readonly #sessions = new Map<string, SessionRecord>();
-  readonly #credentialsPath: string | undefined;
   readonly #sessionIdleMs: number;
   readonly #bearerTokenResolver: BearerTokenResolver | undefined;
   #sweeper: NodeJS.Timeout | null = null;
 
   constructor(opts: McpForwarderOptions = {}) {
-    this.#credentialsPath = opts.credentialsPath;
     this.#sessionIdleMs = opts.sessionIdleMs ?? DEFAULT_SESSION_IDLE_MS;
     this.#bearerTokenResolver = opts.bearerTokenResolver;
   }
@@ -529,7 +521,6 @@ export class McpForwarder {
                   `${name} requires interactive authorization`,
                 );
               },
-              credentialsPath: this.#credentialsPath,
             }),
             client: null,
             connectPromise: null,

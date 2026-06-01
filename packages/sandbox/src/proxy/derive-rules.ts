@@ -10,6 +10,15 @@ import { expandPlugins, type ExpandedPlugins } from '#src/plugins/index.js';
 export interface DerivedRules {
   domains: string[];
   policies: ProxyPolicy[];
+  /**
+   * Domains the user explicitly listed under `proxy.domains` in the sandbox
+   * config (i.e. excluding plugin-contributed domains). Kept separate from
+   * `domains` for logging — the proxy reload banner shows these alongside the
+   * enabled plugin names rather than the full merged allowlist.
+   */
+  configDomains: string[];
+  /** Names of the plugins the project opted into, in registry-declared order. */
+  enabledPlugins: string[];
 }
 
 /** Context required to expand plugins (e.g. the linux user inside the VM). */
@@ -41,11 +50,12 @@ export interface FullDerivation extends ExpandedPlugins {
  * `plugins/index.ts`), so re-running this on every reload yields the same
  * action values that were baked into the VM at create time.
  */
-export function deriveRulesFromConfig(
+export async function deriveRulesFromConfig(
   config: SandboxConfig,
   ctx: DerivationContext,
-): DerivedRules {
-  return deriveFromConfig(config, ctx).rules;
+): Promise<DerivedRules> {
+  const full = await deriveFromConfig(config, ctx);
+  return full.rules;
 }
 
 /**
@@ -53,11 +63,11 @@ export function deriveRulesFromConfig(
  * expansion alongside the rules. Used by `runCreate`, which needs the
  * plugin commands and bootstrap script in addition to the proxy rules.
  */
-export function deriveFromConfig(
+export async function deriveFromConfig(
   config: SandboxConfig,
   ctx: DerivationContext,
-): FullDerivation {
-  const expanded = expandPlugins(config.plugins, config.userPlugins, {
+): Promise<FullDerivation> {
+  const expanded = await expandPlugins(config.plugins, config.userPlugins, {
     linuxUser: ctx.user,
     sandboxName: ctx.sandboxName,
     authSecret: ctx.authSecret,
@@ -71,6 +81,11 @@ export function deriveFromConfig(
 
   return {
     ...expanded,
-    rules: { domains, policies },
+    rules: {
+      domains,
+      policies,
+      configDomains: [...config.proxy.domains],
+      enabledPlugins: expanded.enabledPlugins,
+    },
   };
 }

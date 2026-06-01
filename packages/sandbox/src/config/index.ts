@@ -1,6 +1,7 @@
 export {
   credentialsFilePath,
   sandboxConfigPath,
+  secretsFilePath,
   stateDir,
   stateFilePath,
   userConfigPath,
@@ -23,6 +24,7 @@ export type {
   PolicyAction,
   ProxyPolicy,
   ProxyPolicyTransform,
+  ResponseInterceptor,
   SandboxConfig,
 } from './sandbox.js';
 export { loadUserConfig } from './user.js';

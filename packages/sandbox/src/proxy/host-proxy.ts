@@ -1,10 +1,14 @@
 import { getLocal } from 'mockttp';
 import type { CompletedRequest, Mockttp } from 'mockttp';
 
-import type { ProxyPolicy } from '#src/config/index.js';
+import type { ProxyPolicy, ResponseInterceptor } from '#src/config/index.js';
 import { logger } from '#src/logger.js';
 
 import { ensureCA } from './ca.js';
+import {
+  applyOAuthTokenInterceptor,
+  tryShortCircuitRefresh,
+} from './oauth/intercept.js';
 import { applyPolicies, matchDomain } from './substitution.js';
 import type {
   AppliedMutation,
@@ -23,6 +27,18 @@ interface SandboxRegistration {
   sourceIp: string | null;
   domains: readonly string[];
   policies: readonly ProxyPolicy[];
+  /**
+   * Domains the user explicitly listed under `proxy.domains` (excluding
+   * plugin-contributed domains). Logging-only — surfaced in the reload banner;
+   * `domains` remains the source of truth for allowlist enforcement. Defaults
+   * to empty when omitted.
+   */
+  configDomains?: readonly string[];
+  /**
+   * Names of the plugins the project opted into. Logging-only — surfaced in
+   * the reload banner. Defaults to empty when omitted.
+   */
+  enabledPlugins?: readonly string[];
 }
 
 /**
@@ -33,6 +49,8 @@ interface SandboxRegistration {
  * discriminated union in {@link VerboseDecisionEvent}.
  */
 interface VerboseRequestContext {
+  /** mockttp's per-request id, used to pair this line with its response line. */
+  id: string;
   method: string;
   host: string;
   path: string;
@@ -73,6 +91,8 @@ export type { AppliedMutation };
  * the normal response logger.
  */
 export interface VerboseDenialLog {
+  /** mockttp's per-request id, used to pair this line with its response line. */
+  id: string;
   method: string;
   host: string;
   path: string;
@@ -80,10 +100,25 @@ export interface VerboseDenialLog {
   reason: 'allowlist';
 }
 
+/**
+ * Late-arriving mutations that should be folded into a request's verbose
+ * block under the existing `mutations:` section. Emitted from places that
+ * run after the initial decision event was buffered — e.g. OAuth
+ * intercept handlers firing in `beforeRequest` (refresh short-circuit) or
+ * `beforeResponse` (authorization_code capture). The `process.ts` side
+ * appends these onto the buffered decision's `appliedMutations` array;
+ * the per-request render then includes them automatically.
+ */
+export interface VerboseMutationsAppend {
+  id: string;
+  mutations: readonly AppliedMutation[];
+}
+
 export type VerboseLogger = (
   event:
     | ({ type: 'decision' } & VerboseDecisionEvent)
-    | ({ type: 'denial' } & VerboseDenialLog),
+    | ({ type: 'denial' } & VerboseDenialLog)
+    | ({ type: 'mutations-append' } & VerboseMutationsAppend),
 ) => void;
 
 export interface HostProxyOptions {
@@ -192,11 +227,17 @@ export class HostProxy {
    * the VM's IP is still being allocated) and the domain patterns currently
    * allowlisted for that sandbox.
    */
-  summary(): { name: string; sourceIp: string | null; domains: string[] }[] {
+  summary(): {
+    name: string;
+    sourceIp: string | null;
+    configDomains: string[];
+    enabledPlugins: string[];
+  }[] {
     return [...this.registrations.entries()].map(([name, reg]) => ({
       name,
       sourceIp: reg.sourceIp,
-      domains: [...reg.domains],
+      configDomains: [...(reg.configDomains ?? [])],
+      enabledPlugins: [...(reg.enabledPlugins ?? [])],
     }));
   }
 
@@ -239,6 +280,13 @@ export class HostProxy {
   private async rebuildRules(): Promise<void> {
     this.server.reset();
 
+    // Bridges request-side policy evaluation (which decides whether an
+    // `oauth-token-response` interceptor should fire) to the response-side
+    // hook (which actually rewrites the body + persists tokens). Keyed by
+    // mockttp's per-request `id`; `beforeResponse` deletes its entry on
+    // every reply so the map stays bounded.
+    const pendingInterceptors = new Map<string, ResponseInterceptor>();
+
     // Allowed hosts (scoped to the requesting sandbox's IP): pass through,
     // running policies to mutate headers or short-circuit with 403 when a
     // matching policy's action is `block`.
@@ -267,7 +315,7 @@ export class HostProxy {
             parts.method,
             headers,
             this.resolver,
-            parts.pathWithQuery,
+            { pathWithQuery: parts.pathWithQuery },
           );
           if (this.verboseLogger) {
             // Strip `headers` (carries resolved secrets) before logging;
@@ -275,6 +323,7 @@ export class HostProxy {
             const { headers: _, ...outcomeForLog } = result;
             this.verboseLogger({
               type: 'decision',
+              id: req.id,
               method: parts.method,
               host: parts.host,
               path: parts.pathWithQuery,
@@ -292,6 +341,41 @@ export class HostProxy {
               },
             };
           }
+          if (
+            result.outcome === 'pass' &&
+            result.interceptResponse !== undefined
+          ) {
+            // Refresh short-circuit: if the body is a `grant_type=refresh_token`
+            // request, drive the refresh on the host instead of forwarding.
+            // Solves a race where Claude Code fires parallel 401-triggered
+            // refreshes whose rotated tokens invalidate each other upstream.
+            const bodyText = await req.body.getText();
+            const shortCircuit = await tryShortCircuitRefresh(
+              result.interceptResponse,
+              {
+                url: req.url,
+                headers,
+                bodyText,
+              },
+            );
+            if (shortCircuit !== null) {
+              if (this.verboseLogger && shortCircuit.mutations.length > 0) {
+                this.verboseLogger({
+                  type: 'mutations-append',
+                  id: req.id,
+                  mutations: shortCircuit.mutations,
+                });
+              }
+              return {
+                response: {
+                  statusCode: shortCircuit.statusCode,
+                  headers: shortCircuit.headers,
+                  body: shortCircuit.body,
+                },
+              };
+            }
+            pendingInterceptors.set(req.id, result.interceptResponse);
+          }
           if (result.outcome === 'rewrite') {
             // Strip the guest's Host header so mockttp derives a fresh
             // one from the rewritten URL. Per its docs, passing a
@@ -305,9 +389,41 @@ export class HostProxy {
             let headers = stripHeader(result.headers, 'host');
             headers = stripHeader(headers, 'x-forwarded-for');
             headers['X-Forwarded-For'] = remoteIp;
-            return { url: result.url, headers };
+            return {
+              url: result.url,
+              headers,
+            };
           }
-          return { headers: result.headers };
+          return {
+            headers: result.headers,
+          };
+        },
+        beforeResponse: async (res) => {
+          const interceptor = pendingInterceptors.get(res.id);
+          if (interceptor === undefined) return undefined;
+          pendingInterceptors.delete(res.id);
+          // Use the decoded buffer so gzip/brotli upstreams (Anthropic
+          // serves the token endpoint over a regular HTTPS gateway, but
+          // can negotiate content-encoding) parse correctly.
+          const decoded = await res.body.getDecodedBuffer();
+          const rewritten = await applyOAuthTokenInterceptor(interceptor, {
+            statusCode: res.statusCode,
+            headers: res.headers,
+            body: decoded,
+          });
+          if (rewritten === null) return undefined;
+          if (this.verboseLogger && rewritten.mutations.length > 0) {
+            this.verboseLogger({
+              type: 'mutations-append',
+              id: res.id,
+              mutations: rewritten.mutations,
+            });
+          }
+          return {
+            statusCode: rewritten.statusCode,
+            headers: rewritten.headers,
+            body: rewritten.body,
+          };
         },
       });
 
@@ -322,6 +438,7 @@ export class HostProxy {
         if (parts !== null && remoteIp !== null) {
           this.verboseLogger({
             type: 'denial',
+            id: req.id,
             method: parts.method,
             host: parts.host,
             path: parts.pathWithQuery,

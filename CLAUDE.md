@@ -39,3 +39,4 @@ Stack: TypeScript (Node 24+), pnpm 10, Turbo, oxlint + oxfmt, Vitest, Commander,
   (rewrite if it starts to become too verbose)
 - Do not put logic in `index.ts`. Keep it as a barrel that only re-exports from sibling files.
   Put the implementation in a descriptively-named sibling (e.g. `github.plugin.ts`, `foo.service.ts`).
+- Changesets should be focused on user-facing changes and summarized to a single paragraph.

@@ -157,6 +157,7 @@ export default defineConfig({
     '**/route-tree.gen.ts',
     '.agents/skills/**',
     '.claude/skills/**',
+    '**/__mocks__/**',
   ],
   options: {
     typeAware: true,
@@ -258,6 +259,7 @@ export default defineConfig({
         allowRegExp: false,
       },
     ],
+    'typescript/consistent-type-imports': 'error',
     'react-perf/jsx-no-new-object-as-prop': 'off',
     'react-perf/jsx-no-new-function-as-prop': 'off',
   },
