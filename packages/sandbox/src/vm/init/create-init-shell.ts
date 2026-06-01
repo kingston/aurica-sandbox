@@ -157,7 +157,7 @@ export DEBIAN_FRONTEND=noninteractive
 # 1. Base packages. Network must be open — iptables lockdown comes last.
 apt-get update -y
 apt-get install -y --no-install-recommends \\
-  git iptables iptables-persistent ca-certificates curl sudo gnupg
+  git iptables iptables-persistent ca-certificates curl sudo gnupg jq
 
 # Standard project workspace. Plugins that check out repos (today: github,
 # when a repo has \`checkout: true\`) clone into \`/workspaces/<repo>\` as the
