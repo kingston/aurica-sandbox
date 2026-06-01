@@ -305,6 +305,7 @@ function claudeJsonCommand(): PluginCommand {
 set -eu
 project_dir=""
 if [ -r /etc/environment ]; then
+  # sed instead of source: avoid executing arbitrary content in /etc/environment
   project_dir=$(sed -n 's/^AURICA_PROJECT_DIR=//p' /etc/environment | tail -n1)
 fi
 umask 077
@@ -380,18 +381,6 @@ function settingsJsonCommand(opts: {
   };
 }
 
-/**
- * Far-future `expiresAt` (1 year out) baked into the seed
- * `~/.claude/.credentials.json` so the guest's Claude Code never
- * triggers a refresh on the file's clock. If anything ever forces a
- * refresh anyway (401, manual reauth), the same proxy interceptor catches
- * the new token-grant and rewrites these placeholders again — idempotent.
- *
- * Far-future = `Date.now() + 365 days` evaluated at command-build time on
- * the host. The exact value doesn't matter beyond "well past any real
- * upstream lifetime".
- */
-const PLACEHOLDER_EXPIRES_AT_MS = 365 * 24 * 60 * 60 * 1000;
 
 /**
  * Pre-seed `~/.claude/.credentials.json` with the placeholder access /
@@ -431,7 +420,7 @@ function credentialsJsonCommand(opts: {
     claudeAiOauth: {
       accessToken: opts.accessToken,
       refreshToken: opts.refreshToken,
-      expiresAt: PLACEHOLDER_EXPIRES_AT_MS,
+      expiresAt: Date.now() + 365 * 24 * 60 * 60 * 1000,
       scopes: [...opts.scopes],
       subscriptionType: opts.subscriptionType,
     },

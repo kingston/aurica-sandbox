@@ -107,9 +107,7 @@ export class FileSecretVault implements SecretVault {
 }
 
 /**
- * Process-wide singleton used by {@link './credential-record.js'}'s
- * `defineCredentialRecord` factory when no vault is injected. Tests inject
- * an in-memory fake via {@link defineCredentialRecord}'s `secrets` option
- * instead of mutating this.
+ * Process-wide singleton. Tests inject an in-memory fake via
+ * {@link CredentialStoreOptions.vault}.
  */
 export const defaultSecretVault: SecretVault = new FileSecretVault();

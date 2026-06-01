@@ -47,7 +47,13 @@ async function readUnlocked<T>(
   }
   if (!raw.trim()) return seed;
   const parsed: unknown = JSON.parse(raw);
-  return schema.parse(parsed);
+  try {
+    return schema.parse(parsed);
+  } catch {
+    // Stale or corrupt file (e.g. leftover v1 from a previous schema). Treat
+    // as empty so the next write resets it rather than crashing the process.
+    return seed;
+  }
 }
 
 /**

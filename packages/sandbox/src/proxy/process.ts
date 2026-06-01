@@ -120,7 +120,7 @@ export async function runProxyProcess(
     );
   }
 
-  const credentialCache = new CredentialResolver();
+  const credentialResolver = new CredentialResolver();
   const verbose = options.verbose === true;
 
   // Per-request log state keyed by mockttp's request id. Populated on the
@@ -132,7 +132,7 @@ export async function runProxyProcess(
   const inflight = new Map<string, InflightRequest>();
 
   const proxyOptions: Parameters<typeof HostProxy.create>[0] = {
-    resolver: credentialCache,
+    resolver: credentialResolver,
     port: resolveProxyPort(log),
   };
   if (verbose) {
@@ -297,7 +297,7 @@ export async function runProxyProcess(
       loadUserConfig,
       loadSandboxConfig,
       sandboxes: stream,
-      credentialResolver: credentialCache,
+      credentialResolver: credentialResolver,
     });
     if (sidecar) sidecars.push(sidecar);
   }
