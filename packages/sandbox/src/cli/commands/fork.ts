@@ -4,11 +4,7 @@ import path from 'node:path';
 import ora from 'ora';
 
 import { logger } from '#src/logger.js';
-import {
-  requireRunningProxy,
-  signalProxyReload,
-  withState,
-} from '#src/state/index.js';
+import { signalProxyReload, withState } from '#src/state/index.js';
 import type { State } from '#src/state/index.js';
 import { statDirOrNull } from '#src/utils/path-exists.js';
 import { defaultProvider } from '#src/vm/index.js';
@@ -16,6 +12,7 @@ import { runForkInitHooks } from '#src/vm/init/run-init.js';
 import { waitForIp } from '#src/vm/wait-for-ip.js';
 
 import { findPrimary } from './find-primary.js';
+import { ensureProxyRunning } from './proxy.js';
 
 /**
  * Pick the lowest unused 1-based concurrency index among existing forks of
@@ -57,7 +54,7 @@ export async function runFork(
   nameArg: string | undefined,
   { branch = '' }: { branch?: string } = {},
 ): Promise<void> {
-  await requireRunningProxy();
+  await ensureProxyRunning();
 
   const { result: prepResult } = await withState((state) => {
     const primary = findPrimary(state, projectDir);

@@ -1,14 +1,11 @@
 import ora from 'ora';
 
 import { logger } from '#src/logger.js';
-import {
-  readState,
-  requireRunningProxy,
-  signalProxyReload,
-  withState,
-} from '#src/state/index.js';
+import { readState, signalProxyReload, withState } from '#src/state/index.js';
 import { defaultProvider } from '#src/vm/index.js';
 import { waitForIp } from '#src/vm/wait-for-ip.js';
+
+import { ensureProxyRunning } from './proxy.js';
 
 /**
  * Resume a previously stopped sandbox VM. Requires the proxy to be
@@ -22,7 +19,7 @@ import { waitForIp } from '#src/vm/wait-for-ip.js';
  * allowlist.
  */
 export async function runStart(name: string): Promise<void> {
-  await requireRunningProxy();
+  await ensureProxyRunning();
 
   const state = await readState();
   const entry = state.sandboxes[name];

@@ -6,12 +6,7 @@ import ora from 'ora';
 import { loadSandboxConfig } from '#src/config/index.js';
 import { logger } from '#src/logger.js';
 import { deriveFromConfig } from '#src/proxy/derive-rules.js';
-import {
-  readState,
-  requireRunningProxy,
-  signalProxyReload,
-  withState,
-} from '#src/state/index.js';
+import { readState, signalProxyReload, withState } from '#src/state/index.js';
 import type { SandboxEntry } from '#src/state/index.js';
 import { statDirOrNull } from '#src/utils/path-exists.js';
 import { defaultProvider } from '#src/vm/index.js';
@@ -19,6 +14,7 @@ import { runUpdateHooks } from '#src/vm/init/run-update.js';
 import { waitForIp } from '#src/vm/wait-for-ip.js';
 
 import { findPrimary } from './find-primary.js';
+import { ensureProxyRunning } from './proxy.js';
 
 /**
  * Run `update.sh` hooks against an existing sandbox VM — a lightweight
@@ -44,7 +40,7 @@ export async function runUpdate(
   projectDir: string,
   nameArg?: string,
 ): Promise<void> {
-  await requireRunningProxy();
+  await ensureProxyRunning();
 
   const state = await readState();
   let entry: SandboxEntry | undefined;

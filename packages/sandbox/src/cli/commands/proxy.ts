@@ -29,11 +29,45 @@ const HANDSHAKE_POLL_MS = 100;
 const HANDSHAKE_GRACE_MS = 300;
 /** Lines of the log shown when a daemon fails to come up. */
 const CRASH_LOG_LINES = 20;
+/**
+ * How long autostart polls for a racing winner's proxy after its own start
+ * fails. Short so a genuine boot failure isn't masked by a long wait.
+ */
+const RACE_ADOPT_MS = 2000;
+
+/** A live proxy registration: its PID and listen address. */
+export interface ProxyEndpoint {
+  pid: number;
+  host: string;
+  port: number;
+}
 
 /** Options shared by the foreground and background proxy entry points. */
 export interface ProxyRunOptions {
   /** Log a verbose decision line for every request (see `runProxyProcess`). */
   verbose?: boolean;
+}
+
+/** Options for {@link runProxyStart}. */
+export interface ProxyStartOptions extends ProxyRunOptions {
+  /**
+   * Suppress the `proxy started` success line. Used by autostart, which logs
+   * its own message instead.
+   */
+  quiet?: boolean;
+}
+
+/**
+ * Thrown by {@link runProxyStart} when a live proxy already holds `state.proxy`.
+ * Autostart treats this as success (another process won the race).
+ */
+export class ProxyAlreadyRunningError extends Error {
+  constructor(public readonly pid: number) {
+    super(
+      `aurica-sandbox proxy already running (pid ${pid}); stop it with: aurica-sandbox proxy stop`,
+    );
+    this.name = 'ProxyAlreadyRunningError';
+  }
 }
 
 /** A spawn recipe for the detached daemon, separated out so it can be tested. */
@@ -122,13 +156,11 @@ async function tailLogText(lines: number): Promise<string> {
  * is surfaced as the failure rather than reporting a false success.
  */
 export async function runProxyStart(
-  options: ProxyRunOptions = {},
-): Promise<void> {
+  options: ProxyStartOptions = {},
+): Promise<ProxyEndpoint> {
   const existing = await readState();
   if (existing.proxy && isPidAlive(existing.proxy.pid)) {
-    throw new Error(
-      `aurica-sandbox proxy already running (pid ${existing.proxy.pid}); stop it with: aurica-sandbox proxy stop`,
-    );
+    throw new ProxyAlreadyRunningError(existing.proxy.pid);
   }
 
   const logPath = proxyLogPath();
@@ -177,9 +209,58 @@ export async function runProxyStart(
     );
   }
 
-  logger.success(
-    `proxy started (pid ${ready.pid}) http://${ready.host}:${ready.port}\nlogs: ${logPath}`,
-  );
+  if (options.quiet !== true) {
+    logger.success(
+      `proxy started (pid ${ready.pid}) http://${ready.host}:${ready.port}\nlogs: ${logPath}`,
+    );
+  }
+  return ready;
+}
+
+/** Env var that, when truthy, disables proxy autostart. */
+const NO_AUTOSTART_ENV = 'AURICA_NO_AUTOSTART';
+
+/**
+ * Return the running proxy, autostarting it as a background daemon if none is
+ * live. Commands that require a proxy call this instead of `requireRunningProxy`
+ * so the user doesn't have to start the daemon by hand.
+ *
+ * Set `AURICA_NO_AUTOSTART=1` to opt out — then this behaves like
+ * `requireRunningProxy`, throwing `ProxyNotRunningError` when nothing is up
+ * (useful in CI, where a leaked host-wide daemon would be surprising).
+ *
+ * Concurrency: if two commands autostart at once, only one wins the port. The
+ * loser's child dies on the port bind — which happens before the winner claims
+ * `state.proxy` — so on failure we briefly poll for a live registration and
+ * adopt the winner's daemon rather than erroring.
+ */
+export async function ensureProxyRunning(): Promise<ProxyEndpoint> {
+  const state = await readState();
+  if (state.proxy && isPidAlive(state.proxy.pid)) return state.proxy;
+
+  if (process.env[NO_AUTOSTART_ENV]) {
+    // Opted out: surface the same error a bare `requireRunningProxy` would.
+    return requireRunningProxy();
+  }
+
+  // Notice goes to stderr so it never pollutes a piped `run` command's stdout.
+  process.stderr.write('proxy not running; starting it in the background…\n');
+  try {
+    return await runProxyStart({ quiet: true });
+  } catch (err) {
+    // The bind that failed us happens before the winner's state claim, so a
+    // racing winner may still be mid-boot. Poll briefly for any live proxy and
+    // adopt it. Capped short so a genuine single-command boot failure (e.g. an
+    // unrelated process holding the port) surfaces its real error promptly
+    // rather than after the full handshake timeout.
+    const deadline = Date.now() + RACE_ADOPT_MS;
+    while (Date.now() < deadline) {
+      const after = await readState();
+      if (after.proxy && isPidAlive(after.proxy.pid)) return after.proxy;
+      await delay(HANDSHAKE_POLL_MS);
+    }
+    throw err;
+  }
 }
 
 /**

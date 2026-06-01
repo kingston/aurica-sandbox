@@ -8,11 +8,7 @@ import { loadSandboxConfig } from '#src/config/index.js';
 import { logger } from '#src/logger.js';
 import { deriveFromConfig } from '#src/proxy/derive-rules.js';
 import { ensureCA } from '#src/proxy/index.js';
-import {
-  requireRunningProxy,
-  signalProxyReload,
-  withState,
-} from '#src/state/index.js';
+import { signalProxyReload, withState } from '#src/state/index.js';
 import { statDirOrNull } from '#src/utils/path-exists.js';
 import { defaultProvider } from '#src/vm/index.js';
 import { createInitShell } from '#src/vm/init/create-init-shell.js';
@@ -20,6 +16,8 @@ import { resolveFileCopies } from '#src/vm/init/resolve-file-copies.js';
 import { formatMountArg, resolveMounts } from '#src/vm/init/resolve-mounts.js';
 import { runInitPipeline } from '#src/vm/init/run-init.js';
 import { waitForIp } from '#src/vm/wait-for-ip.js';
+
+import { ensureProxyRunning } from './proxy.js';
 
 /**
  * Recognise orbctl's "machine already exists" error so we can surface a
@@ -98,8 +96,8 @@ export async function runCreate(
   nameArg: string | undefined,
   { start = false }: { start?: boolean } = {},
 ): Promise<void> {
-  // Fail fast if proxy isn't running.
-  const proxy = await requireRunningProxy();
+  // Ensure the proxy is up (autostarting the daemon if needed).
+  const proxy = await ensureProxyRunning();
 
   const config = await loadSandboxConfig(projectDir);
   const name = nameArg ?? config.name;

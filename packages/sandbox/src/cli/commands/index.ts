@@ -5,6 +5,7 @@ export { runInit } from './init.js';
 export { runList } from './list.js';
 export {
   buildDaemonSpawn,
+  ensureProxyRunning,
   runProxyLog,
   runProxyRun,
   runProxyStart,
