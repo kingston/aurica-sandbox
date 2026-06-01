@@ -36,7 +36,8 @@ const infoSchema = z.object({
 
 const listSchema = z.array(recordSchema);
 
-type OrbRecord = z.infer<typeof recordSchema>;
+/** A single VM record as returned by `orbctl list`/`info`. */
+export type OrbRecord = z.infer<typeof recordSchema>;
 
 async function orbctlText(...args: string[]): Promise<string> {
   const { stdout } = await execa('orbctl', args);
@@ -52,17 +53,21 @@ async function orbctlJson<T>(
   return schema.parse(parsed);
 }
 
-function recordToSandboxVM(
+/**
+ * Map an `orbctl` record (plus optional IPs from `info`) to a {@link SandboxVM}.
+ * Carries OrbStack's lifecycle `state` so the registry reconciler can detect
+ * out-of-band start/stop. Exported for unit testing of that mapping.
+ */
+export function recordToSandboxVM(
   record: OrbRecord,
   ip4?: string,
   ip6?: string,
 ): SandboxVM {
-  if (!ip4 && !ip6) {
-    return { name: record.name };
-  }
-  const networkInfo: { ipV4: string; ipV6?: string } = { ipV4: ip4 ?? '' };
-  if (ip6) networkInfo.ipV6 = ip6;
-  return { name: record.name, networkInfo };
+  const vm: SandboxVM = { name: record.name, state: record.state };
+  if (!ip4 && !ip6) return vm;
+  vm.networkInfo = { ipV4: ip4 ?? '' };
+  if (ip6) vm.networkInfo.ipV6 = ip6;
+  return vm;
 }
 
 /**

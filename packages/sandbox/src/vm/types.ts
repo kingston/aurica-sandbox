@@ -1,5 +1,12 @@
 export interface SandboxVM {
   name: string;
+  /**
+   * Provider lifecycle state, when the provider surfaces it (e.g. populated by
+   * `listVMs`/`infoVM`). Omitted by providers or code paths that don't report
+   * it. Used to reconcile the on-disk registry against the provider's actual
+   * VM states.
+   */
+  state?: 'creating' | 'starting' | 'running' | 'stopping' | 'stopped';
   networkInfo?: {
     ipV4: string;
     ipV6?: string;

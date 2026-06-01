@@ -4,7 +4,15 @@ import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
 
 import { HostProxy } from './host-proxy.js';
 
@@ -155,18 +163,16 @@ describe('HostProxy (mockttp-backed)', () => {
     expect(upstream.lastAuth()).toBe('Bearer untouched');
   });
 
-  it('register/unregister hot-reloads the rule set', async () => {
+  it('register/unregister updates the live registration set', () => {
     proxy.register('other', {
       sourceIp: '127.0.0.1',
       domains: ['127.0.0.1', '*.example.com'],
       configDomains: ['127.0.0.1', '*.example.com'],
       policies: [],
     });
-    await proxy.refresh();
     const after = proxy.summary().flatMap((e) => e.configDomains);
     expect(new Set(after)).toEqual(new Set(['127.0.0.1', '*.example.com']));
     proxy.unregister('other');
-    await proxy.refresh();
     const afterUnregister = proxy.summary().flatMap((e) => e.configDomains);
     expect(new Set(afterUnregister)).toEqual(new Set(['127.0.0.1']));
   });
@@ -177,7 +183,6 @@ describe('HostProxy (mockttp-backed)', () => {
       domains: ['null.example.com'],
       policies: [],
     });
-    await proxy.refresh();
     try {
       const res = await fetchViaProxy(
         proxyAddr.host,
@@ -188,7 +193,6 @@ describe('HostProxy (mockttp-backed)', () => {
       expect(res.status).toBe(403);
     } finally {
       proxy.unregister('null-ip');
-      await proxy.refresh();
     }
   });
 
@@ -203,7 +207,6 @@ describe('HostProxy (mockttp-backed)', () => {
       domains: ['127.0.0.1'],
       policies: [],
     });
-    await proxy.refresh();
     try {
       const res = await fetchViaProxy(
         proxyAddr.host,
@@ -235,7 +238,91 @@ describe('HostProxy (mockttp-backed)', () => {
           },
         ],
       });
-      await proxy.refresh();
     }
+  });
+});
+
+describe('HostProxy on-demand reconcile (unregistered IP)', () => {
+  let dir: string;
+  let originalAuricaHome: string | undefined;
+  let upstream: Upstream;
+
+  beforeAll(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'aurica-proxy-unreg-'));
+    originalAuricaHome = process.env.AURICA_HOME;
+    process.env.AURICA_HOME = dir;
+    upstream = await startUpstream();
+  }, 30_000);
+
+  afterAll(async () => {
+    await upstream.close();
+    if (originalAuricaHome === undefined) delete process.env.AURICA_HOME;
+    else process.env.AURICA_HOME = originalAuricaHome;
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  const resolver = { resolve: () => Promise.reject(new Error('unused')) };
+
+  let proxy: HostProxy;
+  let addr: { host: string; port: number };
+
+  afterEach(async () => {
+    await proxy.close();
+  });
+
+  it('passes through after the hook registers the IP', async () => {
+    const hook = vi.fn<(remoteIp: string) => Promise<void>>((remoteIp) => {
+      // Simulate reconcile discovering the VM and registering its IP.
+      proxy.register('healed', {
+        sourceIp: remoteIp,
+        domains: [`127.0.0.1`],
+        policies: [],
+      });
+      return Promise.resolve();
+    });
+    proxy = await HostProxy.create({ resolver, onUnregisteredRequest: hook });
+    addr = await proxy.listen();
+
+    const res = await fetchViaProxy(
+      addr.host,
+      addr.port,
+      `http://127.0.0.1:${upstream.port}/`,
+      {},
+    );
+    expect(hook).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(200);
+    expect(res.body).toBe('ok');
+  });
+
+  it('denies with 403 when the hook leaves the IP unregistered', async () => {
+    const hook = vi.fn<(remoteIp: string) => Promise<void>>(() =>
+      Promise.resolve(),
+    );
+    proxy = await HostProxy.create({ resolver, onUnregisteredRequest: hook });
+    addr = await proxy.listen();
+
+    const res = await fetchViaProxy(
+      addr.host,
+      addr.port,
+      `http://127.0.0.1:${upstream.port}/`,
+      {},
+    );
+    expect(hook).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(403);
+    expect(res.body).toMatch(/unregistered IP/);
+  });
+
+  it('denies with 403 when no hook is configured', async () => {
+    proxy = await HostProxy.create({ resolver });
+    addr = await proxy.listen();
+
+    const res = await fetchViaProxy(
+      addr.host,
+      addr.port,
+      `http://127.0.0.1:${upstream.port}/`,
+      {},
+    );
+    expect(res.status).toBe(403);
+    expect(res.body).toMatch(/unregistered IP/);
   });
 });
