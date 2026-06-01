@@ -4,8 +4,6 @@ import path from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 
-import { execa } from 'execa';
-
 import { proxyLogPath, proxyLogRotatedPath } from '#src/config/index.js';
 import { logger } from '#src/logger.js';
 import { runProxyProcess } from '#src/proxy/index.js';
@@ -217,8 +215,13 @@ export async function runProxyStart(
   return ready;
 }
 
-/** Env var that, when truthy, disables proxy autostart. */
+/** Env var that, when set to `1`/`true`, disables proxy autostart. */
 const NO_AUTOSTART_ENV = 'AURICA_NO_AUTOSTART';
+
+/** Whether `value` is an opt-in flag value (`1`/`true`, case-insensitive). */
+function isEnvEnabled(value: string | undefined): boolean {
+  return value === '1' || value?.toLowerCase() === 'true';
+}
 
 /**
  * Return the running proxy, autostarting it as a background daemon if none is
@@ -238,7 +241,7 @@ export async function ensureProxyRunning(): Promise<ProxyEndpoint> {
   const state = await readState();
   if (state.proxy && isPidAlive(state.proxy.pid)) return state.proxy;
 
-  if (process.env[NO_AUTOSTART_ENV]) {
+  if (isEnvEnabled(process.env[NO_AUTOSTART_ENV])) {
     // Opted out: surface the same error a bare `requireRunningProxy` would.
     return requireRunningProxy();
   }
@@ -283,17 +286,29 @@ async function waitForProxyReady(
   return null;
 }
 
+/** Options for {@link runProxyStop}. */
+export interface ProxyStopOptions {
+  /**
+   * How long to wait for a clean SIGTERM shutdown before escalating to SIGKILL.
+   * Defaults to {@link HANDSHAKE_TIMEOUT_MS}; lowered in tests to exercise the
+   * escalation path without a long wall-clock wait.
+   */
+  timeoutMs?: number;
+}
+
 /**
  * Stop the running proxy daemon. Sends SIGTERM (its handler tears the proxy
  * down and clears `state.proxy`), waits for the entry to clear, then escalates
  * to SIGKILL — clearing `state.proxy` manually in that case since SIGKILL skips
  * the clean-shutdown path. Throws `ProxyNotRunningError` if no live proxy.
  */
-export async function runProxyStop(): Promise<void> {
+export async function runProxyStop(
+  options: ProxyStopOptions = {},
+): Promise<void> {
   const { pid } = await requireRunningProxy();
   await signalProxyStop();
 
-  const deadline = Date.now() + HANDSHAKE_TIMEOUT_MS;
+  const deadline = Date.now() + (options.timeoutMs ?? HANDSHAKE_TIMEOUT_MS);
   while (Date.now() < deadline) {
     const state = await readState();
     if (!state.proxy || state.proxy.pid !== pid || !isPidAlive(pid)) {
@@ -313,48 +328,4 @@ export async function runProxyStop(): Promise<void> {
     if (state.proxy?.pid === pid) state.proxy = null;
   });
   logger.warn(`proxy did not stop cleanly; killed pid ${pid}`);
-}
-
-/** Common options for the log-viewing commands. */
-export interface ProxyLogOptions {
-  /** Number of trailing lines to show. */
-  lines?: number;
-}
-
-/** Default number of trailing log lines for `log` / `tail`. */
-const DEFAULT_LOG_LINES = 100;
-
-/**
- * Stream the proxy log to the terminal via `tail`. When `follow` is set the
- * process stays attached until Ctrl-C; otherwise it prints the tail and exits.
- * Prints a hint instead of erroring when no log exists yet.
- */
-async function streamLog(follow: boolean, lines: number): Promise<void> {
-  const logPath = proxyLogPath();
-  try {
-    await fs.access(logPath);
-  } catch {
-    logger.info(
-      'no proxy log yet — start the proxy with: aurica-sandbox proxy start',
-    );
-    return;
-  }
-  const args = ['-n', String(lines), ...(follow ? ['-f'] : []), logPath];
-  // `tail` is present on macOS/Linux (the only hosts this CLI targets). Inherit
-  // stdio so output streams live and an inherited SIGINT terminates `-f`.
-  await execa('tail', args, { stdio: 'inherit' });
-}
-
-/** Print the tail of the proxy log and exit. */
-export async function runProxyLog(
-  options: ProxyLogOptions = {},
-): Promise<void> {
-  await streamLog(false, options.lines ?? DEFAULT_LOG_LINES);
-}
-
-/** Follow the proxy log live until interrupted. */
-export async function runProxyTail(
-  options: ProxyLogOptions = {},
-): Promise<void> {
-  await streamLog(true, options.lines ?? DEFAULT_LOG_LINES);
 }

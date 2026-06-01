@@ -9,12 +9,11 @@ import { runDestroy } from '#src/cli/commands/destroy.js';
 import { runFork } from '#src/cli/commands/fork.js';
 import { runInit } from '#src/cli/commands/init.js';
 import { runList } from '#src/cli/commands/list.js';
+import { runProxyLog, runProxyTail } from '#src/cli/commands/proxy-log.js';
 import {
-  runProxyLog,
   runProxyRun,
   runProxyStart,
   runProxyStop,
-  runProxyTail,
 } from '#src/cli/commands/proxy.js';
 import { runRebuild } from '#src/cli/commands/rebuild.js';
 import { runRun } from '#src/cli/commands/run.js';

@@ -1,13 +1,20 @@
+import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
+import { setTimeout as delay } from 'node:timers/promises';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { ProxyNotRunningError, withState } from '#src/state/index.js';
+import {
+  isPidAlive,
+  ProxyNotRunningError,
+  readState,
+  withState,
+} from '#src/state/index.js';
 
-import { buildDaemonSpawn, ensureProxyRunning } from './proxy.js';
+import { buildDaemonSpawn, ensureProxyRunning, runProxyStop } from './proxy.js';
 
 describe('buildDaemonSpawn', () => {
   const realArgv = process.argv;
@@ -87,5 +94,109 @@ describe('ensureProxyRunning', () => {
     await expect(ensureProxyRunning()).rejects.toBeInstanceOf(
       ProxyNotRunningError,
     );
+  });
+
+  it('does not treat AURICA_NO_AUTOSTART=0 as opting out', async () => {
+    // `=0` is falsey intent; it must NOT short-circuit to requireRunningProxy.
+    // Record this (alive) process as the proxy so we exercise the live path
+    // without spawning a real daemon.
+    process.env.AURICA_NO_AUTOSTART = '0';
+    await withState((state) => {
+      state.proxy = {
+        pid: process.pid,
+        host: '127.0.0.1',
+        port: 51_218,
+        startedAt: '2026-01-01T00:00:00.000Z',
+      };
+    });
+    const endpoint = await ensureProxyRunning();
+    expect(endpoint.pid).toBe(process.pid);
+  });
+});
+
+describe('runProxyStop', () => {
+  let dir: string;
+  const realHome = process.env.AURICA_HOME;
+  const children: number[] = [];
+
+  /** Spawn a detached node child and record it as `state.proxy`. */
+  async function recordProxyChild(script: string): Promise<number> {
+    const child = spawn(process.execPath, ['-e', script], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    child.unref();
+    const pid = child.pid;
+    if (pid === undefined) throw new Error('failed to spawn test child');
+    children.push(pid);
+    await withState((state) => {
+      state.proxy = {
+        pid,
+        host: '127.0.0.1',
+        port: 51_219,
+        startedAt: '2026-01-01T00:00:00.000Z',
+      };
+    });
+    return pid;
+  }
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'aurica-stop-'));
+    process.env.AURICA_HOME = dir;
+  });
+
+  afterEach(async () => {
+    for (const pid of children) {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        /* already gone */
+      }
+    }
+    children.length = 0;
+    if (realHome === undefined) delete process.env.AURICA_HOME;
+    else process.env.AURICA_HOME = realHome;
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('throws ProxyNotRunningError when no live proxy is recorded', async () => {
+    await expect(runProxyStop()).rejects.toBeInstanceOf(ProxyNotRunningError);
+  });
+
+  it('reports a clean stop when the daemon exits on SIGTERM', async () => {
+    // Default SIGTERM behavior terminates the child; runProxyStop sees the pid
+    // die and returns without escalating.
+    const pid = await recordProxyChild('setInterval(() => {}, 1000)');
+    await runProxyStop();
+    expect(isPidAlive(pid)).toBe(false);
+  });
+
+  it('escalates to SIGKILL and clears state when SIGTERM is ignored', async () => {
+    // Child traps SIGTERM so the clean-stop poll times out; runProxyStop must
+    // SIGKILL it and clear `state.proxy` (SIGKILL skips the daemon's own
+    // clean-up path). The child touches `readyPath` only after its handler is
+    // installed, and we wait for that before signalling — otherwise a SIGTERM
+    // racing the handler registration would kill the child by default and we'd
+    // exercise the clean path instead of escalation. Short timeout keeps it
+    // fast.
+    const readyPath = path.join(dir, 'child-ready');
+    const pid = await recordProxyChild(
+      `process.on('SIGTERM', () => {}); require('node:fs').writeFileSync(${JSON.stringify(readyPath)}, '1'); setInterval(() => {}, 1000)`,
+    );
+    const readyBy = Date.now() + 5000;
+    while (Date.now() < readyBy) {
+      try {
+        await fs.access(readyPath);
+        break;
+      } catch {
+        await delay(20);
+      }
+    }
+    await runProxyStop({ timeoutMs: 300 });
+    // Give the OS a moment to reap the killed process before probing.
+    await delay(100);
+    expect(isPidAlive(pid)).toBe(false);
+    const state = await readState();
+    expect(state.proxy).toBeNull();
   });
 });
