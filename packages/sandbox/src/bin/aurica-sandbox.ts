@@ -9,6 +9,13 @@ import { runDestroy } from '#src/cli/commands/destroy.js';
 import { runFork } from '#src/cli/commands/fork.js';
 import { runInit } from '#src/cli/commands/init.js';
 import { runList } from '#src/cli/commands/list.js';
+import {
+  runProxyLog,
+  runProxyRun,
+  runProxyStart,
+  runProxyStop,
+  runProxyTail,
+} from '#src/cli/commands/proxy.js';
 import { runRebuild } from '#src/cli/commands/rebuild.js';
 import { runRun } from '#src/cli/commands/run.js';
 import { runShell } from '#src/cli/commands/shell.js';
@@ -19,7 +26,6 @@ import { projectEnvPath } from '#src/config/paths.js';
 import { loadUserConfig } from '#src/config/user.js';
 import { logger } from '#src/logger.js';
 import { PLUGINS } from '#src/plugins/index.js';
-import { runProxyProcess } from '#src/proxy/index.js';
 
 const envPath = projectEnvPath(process.cwd());
 if (existsSync(envPath)) {
@@ -33,19 +39,55 @@ program
   .description('Ephemeral coding-agent VMs with restricted egress')
   .showHelpAfterError();
 
-program
-  .command('proxy')
-  .description('run the host proxy (foreground; long-running)')
-  .option(
-    '-v, --verbose',
-    'log every request decision (matched policy, outcome, mutations, originating IP) and allowlist denials',
-    false,
-  )
+const verboseFlag =
+  'log every request decision (matched policy, outcome, mutations, originating IP) and allowlist denials';
+
+const proxy = program.command('proxy').description('manage the host proxy');
+
+proxy
+  .command('run')
+  .description('run the host proxy in the foreground (long-running)')
+  .option('-v, --verbose', verboseFlag, false)
   .action(async (opts: { verbose: boolean }) => {
-    await runProxyProcess({ verbose: opts.verbose });
-    await new Promise<never>(() => {
-      /* run forever */
-    });
+    await runProxyRun({ verbose: opts.verbose });
+  });
+
+proxy
+  .command('start')
+  .description('start the host proxy as a background daemon')
+  .option('-v, --verbose', verboseFlag, false)
+  .action(async (opts: { verbose: boolean }) => {
+    await runProxyStart({ verbose: opts.verbose });
+  });
+
+proxy
+  .command('stop')
+  .description('stop the background proxy daemon')
+  .action(async () => {
+    await runProxyStop();
+  });
+
+proxy
+  .command('log')
+  .description('print the tail of the proxy log and exit')
+  .option('-n, --lines <n>', 'number of trailing lines to show', '100')
+  .action(async (opts: { lines: string }) => {
+    await runProxyLog({ lines: Number(opts.lines) });
+  });
+
+proxy
+  .command('tail')
+  .description('follow the proxy log live (Ctrl-C to stop)')
+  .option('-n, --lines <n>', 'number of trailing lines to show first', '100')
+  .action(async (opts: { lines: string }) => {
+    await runProxyTail({ lines: Number(opts.lines) });
+  });
+
+// Bare `aurica-sandbox proxy` keeps running in the foreground for back-compat.
+proxy
+  .option('-v, --verbose', verboseFlag, false)
+  .action(async (opts: { verbose: boolean }) => {
+    await runProxyRun({ verbose: opts.verbose });
   });
 
 program

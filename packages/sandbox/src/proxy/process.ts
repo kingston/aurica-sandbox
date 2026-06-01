@@ -10,7 +10,7 @@ import type {
   ProxySidecar,
   SandboxRegistrationStream,
 } from '#src/plugins/index.js';
-import { readState, withState } from '#src/state/index.js';
+import { isPidAlive, readState, withState } from '#src/state/index.js';
 import type { SandboxEntry, State } from '#src/state/index.js';
 import { errorMessage } from '#src/utils/error-message.js';
 import { defaultProvider } from '#src/vm/index.js';
@@ -783,23 +783,4 @@ function formatReloadSummary(
     return `  ${e.name} (${ip})\n    domains: ${domains}\n    plugins: ${plugins}`;
   });
   return `proxy reloaded:\n${lines.join('\n')}`;
-}
-
-/**
- * Checks whether a process with the given PID is alive.
- *
- * We use `process.kill(pid, 0)` because, on POSIX platforms,
- * sending signal 0 doesn't actually terminate the process but acts as a way to
- * check if the process exists and if the current user has permission to signal it.
- * If the process doesn't exist, an error is thrown (code 'ESRCH');
- * if it exists but we lack permission, 'EPERM' is thrown (still means "alive").
- * Returns true if the process is running or inaccessible (from our perspective).
- */
-function isPidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return (err as NodeJS.ErrnoException).code === 'EPERM';
-  }
 }

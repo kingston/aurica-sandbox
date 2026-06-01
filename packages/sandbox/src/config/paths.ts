@@ -28,6 +28,19 @@ export function stateFilePath(): string {
   return path.join(stateDir(), 'state.json');
 }
 
+/** Path to the proxy daemon's log file. */
+export function proxyLogPath(): string {
+  return path.join(stateDir(), 'proxy.log');
+}
+
+/**
+ * Path to the previous proxy log, kept by rotating {@link proxyLogPath} aside
+ * on each daemon start so the prior run's output survives one restart.
+ */
+export function proxyLogRotatedPath(): string {
+  return path.join(stateDir(), 'proxy.log.1');
+}
+
 /**
  * Path to the metadata half of the per-plugin credentials store. Holds
  * non-secret record fields keyed by namespace (e.g. `claude-code:oauth`,
