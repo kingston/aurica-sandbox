@@ -85,10 +85,10 @@ export type VerboseDecisionEvent = VerboseRequestContext &
 export type { AppliedMutation };
 
 /**
- * Logged when a request is denied because its host wasn't on any matching
- * sandbox's allowlist (the `forUnmatchedRequest` sweep). Visible only when
- * `verbose` is set; without it, only the eventual 403 response shows up via
- * the normal response logger.
+ * Logged when a request is denied. `allowlist` means a registered sandbox IP
+ * made a request whose host isn't on its allowlist and no policy matched.
+ * `unregistered-ip` means the source IP isn't registered to any sandbox at
+ * all. Visible only when `verbose` is set.
  */
 export interface VerboseDenialLog {
   /** mockttp's per-request id, used to pair this line with its response line. */
@@ -97,7 +97,7 @@ export interface VerboseDenialLog {
   host: string;
   path: string;
   remoteIp: string;
-  reason: 'allowlist';
+  reason: 'allowlist' | 'unregistered-ip';
 }
 
 /**
@@ -287,17 +287,15 @@ export class HostProxy {
     // every reply so the map stays bounded.
     const pendingInterceptors = new Map<string, ResponseInterceptor>();
 
-    // Allowed hosts (scoped to the requesting sandbox's IP): pass through,
-    // running policies to mutate headers or short-circuit with 403 when a
-    // matching policy's action is `block`.
+    // Requests from registered sandbox IPs: evaluate policies first, then
+    // fall back to the allowlist. Requests from unregistered IPs fall through
+    // to the sweep below.
     await this.server
       .forAnyRequest()
       .matching((req: CompletedRequest) => {
-        const parts = hostAndPathFromRequest(req);
-        if (parts === null) return false;
         const remoteIp = normalizeRemoteIp(req.remoteIpAddress);
         if (remoteIp === null) return false;
-        return this.isAllowedFor(parts.host, remoteIp);
+        return this.registrationsForIp(remoteIp).length > 0;
       })
       .thenPassThrough({
         beforeRequest: async (req) => {
@@ -338,6 +336,32 @@ export class HostProxy {
                 statusMessage: 'Forbidden',
                 headers: { 'content-type': 'text/plain' },
                 body: `aurica-sandbox: blocked by policy ${result.blockedBy}\n`,
+              },
+            };
+          }
+          // No policy matched — fall back to the allowlist.
+          if (
+            result.outcome === 'pass' &&
+            result.matchedPolicyId === undefined &&
+            !this.isAllowedFor(parts.host, remoteIp)
+          ) {
+            if (this.verboseLogger) {
+              this.verboseLogger({
+                type: 'denial',
+                id: req.id,
+                method: parts.method,
+                host: parts.host,
+                path: parts.pathWithQuery,
+                remoteIp,
+                reason: 'allowlist',
+              });
+            }
+            return {
+              response: {
+                statusCode: 403,
+                statusMessage: 'Forbidden',
+                headers: { 'content-type': 'text/plain' },
+                body: 'aurica-sandbox: domain not in allowlist\n',
               },
             };
           }
@@ -427,7 +451,7 @@ export class HostProxy {
         },
       });
 
-    // Sweep: anything that didn't match the allowlist gets 403. Uses
+    // Sweep: requests from IPs not registered to any sandbox. Uses
     // `thenCallback` (instead of `thenReply`) so verbose mode can surface
     // each denial with method+host+IP — `thenReply` would hide the request
     // details from us and only the response-event line would survive.
@@ -443,7 +467,7 @@ export class HostProxy {
             host: parts.host,
             path: parts.pathWithQuery,
             remoteIp,
-            reason: 'allowlist',
+            reason: 'unregistered-ip',
           });
         }
       }
@@ -451,7 +475,7 @@ export class HostProxy {
         statusCode: 403,
         statusMessage: 'Forbidden',
         headers: { 'content-type': 'text/plain' },
-        body: 'aurica-sandbox: domain not in allowlist\n',
+        body: 'aurica-sandbox: request from unregistered IP\n',
       };
     });
 

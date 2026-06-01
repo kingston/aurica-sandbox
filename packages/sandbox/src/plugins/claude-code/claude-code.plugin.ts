@@ -12,31 +12,25 @@ import {
 
 /**
  * Hosts Claude Code reaches in `api-key` / `oauth-token` modes — installer
- * entry point, release artifact bucket, and the inference API. The
- * `claude.ai` bootstrap URL 302s to `downloads.claude.ai`; credential
- * injection happens on `api.anthropic.com`.
+ * entry point and release artifact bucket. The `claude.ai` bootstrap URL
+ * 302s to `downloads.claude.ai`.
  *
- * `subscription` mode adds three OAuth-flow hosts on top
- * ({@link CLAUDE_SUBSCRIPTION_OAUTH_DOMAINS}); only that mode reaches them.
+ * `api.anthropic.com` is covered by the `claude-code:api` allow policy and
+ * doesn't need to appear here. `subscription` mode adds `claude.ai` again
+ * (harmless dedup) via {@link CLAUDE_SUBSCRIPTION_OAUTH_DOMAINS}.
+ *
  * Telemetry hosts (`statsig.anthropic.com`, `*.sentry.io`) are deliberately
  * omitted; `DISABLE_TELEMETRY=1` in `settings.json.env` keeps Claude Code
  * from reaching for them.
  */
-const CLAUDE_CODE_DOMAINS = [
-  'claude.ai',
-  'downloads.claude.ai',
-  'api.anthropic.com',
-] as const;
+const CLAUDE_CODE_DOMAINS = ['claude.ai', 'downloads.claude.ai'] as const;
 
 /**
  * Hosts the guest's `claude /login` flow touches end-to-end. Allowed only
- * for `subscription` mode. The proxy intercepts `platform.claude.com`'s
- * token-endpoint response and persists tokens to the host slot.
+ * for `subscription` mode. `platform.claude.com` is covered by the
+ * `claude-code:oauth-token` allow policy.
  */
-const CLAUDE_SUBSCRIPTION_OAUTH_DOMAINS = [
-  'claude.ai',
-  'platform.claude.com',
-] as const;
+const CLAUDE_SUBSCRIPTION_OAUTH_DOMAINS = ['claude.ai'] as const;
 
 /**
  * Record key whose secrets the proxy interceptor writes into when it

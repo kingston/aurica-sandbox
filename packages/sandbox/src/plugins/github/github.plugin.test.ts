@@ -48,13 +48,7 @@ describe('githubPlugin', () => {
     const expanded = await expandPlugins(project, emptyUser, ctx);
 
     expect(new Set(expanded.domains)).toEqual(
-      new Set([
-        'github.com',
-        'api.github.com',
-        'codeload.github.com',
-        '*.githubusercontent.com',
-        'cli.github.com',
-      ]),
+      new Set(['*.githubusercontent.com', 'cli.github.com']),
     );
     expect(expanded.policies).toHaveLength(3);
     const allows = allowPolicies(expanded.policies);

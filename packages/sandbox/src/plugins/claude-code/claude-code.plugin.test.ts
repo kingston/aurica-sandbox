@@ -54,7 +54,7 @@ describe('expandPlugins — claude-code', () => {
     const expanded = await expandPlugins(project, emptyUser, ctx);
 
     expect(new Set(expanded.domains)).toEqual(
-      new Set(['claude.ai', 'downloads.claude.ai', 'api.anthropic.com']),
+      new Set(['claude.ai', 'downloads.claude.ai']),
     );
 
     expect(expanded.policies).toHaveLength(1);
