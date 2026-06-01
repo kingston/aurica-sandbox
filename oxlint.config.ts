@@ -157,6 +157,7 @@ export default defineConfig({
     '**/route-tree.gen.ts',
     '.agents/skills/**',
     '.claude/skills/**',
+    '**/__mocks__/**',
   ],
   options: {
     typeAware: true,

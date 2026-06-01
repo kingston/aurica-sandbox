@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
-import { defaultCredentialStore } from '#src/credentials/credential-store.js';
 import type { CredentialRecord } from '#src/credentials/credential-record.js';
+import { defaultCredentialStore } from '#src/credentials/credential-store.js';
 import { createPluginCredentialRecordFactory } from '#src/credentials/plugin-credential-record.js';
 
 /**

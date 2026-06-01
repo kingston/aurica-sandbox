@@ -333,10 +333,7 @@ function isSlotStillFresh(slot: { expiresAt: number }): boolean {
 function buildReplayResponse(
   recordKey: string,
   inboundCounter: number,
-  slot: Pick<
-    OAuthRecord,
-    'expiresAt' | 'currentCounter' | 'lastResponseBody'
-  >,
+  slot: Pick<OAuthRecord, 'expiresAt' | 'currentCounter' | 'lastResponseBody'>,
 ): RefreshOutcome {
   if (slot.lastResponseBody === undefined) {
     // Defensive — callers already gate on this, so this branch is dead

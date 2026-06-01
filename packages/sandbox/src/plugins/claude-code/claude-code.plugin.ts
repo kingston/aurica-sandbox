@@ -381,7 +381,6 @@ function settingsJsonCommand(opts: {
   };
 }
 
-
 /**
  * Pre-seed `~/.claude/.credentials.json` with the placeholder access /
  * refresh tokens, plus the real `scopes` and `subscriptionType` captured

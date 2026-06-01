@@ -2,8 +2,8 @@ import { vol } from 'memfs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
-import { CredentialStore } from './credential-store.js';
 import { defineCredentialRecord } from './credential-record.js';
+import { CredentialStore } from './credential-store.js';
 
 vi.mock('node:fs');
 vi.mock('node:fs/promises');
@@ -11,7 +11,9 @@ vi.mock('node:fs/promises');
 // directories on disk. Replace with a passthrough no-op so tests stay in-memory.
 vi.mock('proper-lockfile', () => ({
   default: {
-    lock: vi.fn<() => Promise<() => Promise<void>>>().mockResolvedValue(() => Promise.resolve()),
+    lock: vi
+      .fn<() => Promise<() => Promise<void>>>()
+      .mockResolvedValue(() => Promise.resolve()),
   },
 }));
 
@@ -56,7 +58,10 @@ describe('CredentialStore.read', () => {
 
   it('returns the full bundle after a write', async () => {
     const store = new CredentialStore();
-    await store.write(tokenRecord, { label: 'my-label', accessToken: 'tok-abc' });
+    await store.write(tokenRecord, {
+      label: 'my-label',
+      accessToken: 'tok-abc',
+    });
 
     const result = await store.read(tokenRecord);
     expect(result).toEqual({ label: 'my-label', accessToken: 'tok-abc' });
@@ -91,7 +96,11 @@ describe('CredentialStore.read', () => {
     });
 
     const result = await store.read(multiRecord);
-    expect(result).toEqual({ userId: 'u1', accessToken: 'at', refreshToken: 'rt' });
+    expect(result).toEqual({
+      userId: 'u1',
+      accessToken: 'at',
+      refreshToken: 'rt',
+    });
   });
 });
 
@@ -101,7 +110,10 @@ describe('CredentialStore.write', () => {
     await store.write(tokenRecord, { label: 'x', accessToken: 'secret-val' });
 
     const credFile = JSON.parse(
-      vol.readFileSync(`${AURICA_HOME}/sandbox/credentials.json`, 'utf8') as string,
+      vol.readFileSync(
+        `${AURICA_HOME}/sandbox/credentials.json`,
+        'utf8',
+      ) as string,
     ) as { records: Record<string, unknown> };
     const secretFile = JSON.parse(
       vol.readFileSync(`${AURICA_HOME}/sandbox/secrets.json`, 'utf8') as string,
