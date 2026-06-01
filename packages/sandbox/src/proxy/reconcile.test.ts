@@ -195,6 +195,43 @@ describe('reconcileRegistry', () => {
     expect(Object.keys(after.sandboxes)).toEqual(['a']);
   });
 
+  it('drops a change whose entry status flipped between read and commit', async () => {
+    // A drift reconcile plans `ip-changed` for a running entry, but a
+    // concurrent CLI command stops it in the read→commit window. The in-lock
+    // re-validation must drop the change rather than write an IP onto a now-
+    // stopped entry. The seed status flip is driven from `infoVM` (which runs
+    // after the no-lock read, before the locked commit re-reads the file).
+    await seed({ ...baseEntry, status: 'running', ip: '192.168.1.10' });
+    const provider: ReconcileProvider = {
+      listVMs: vi.fn<ReconcileProvider['listVMs']>(() =>
+        Promise.resolve([{ name: 'a', state: 'running' }]),
+      ),
+      infoVM: vi.fn<ReconcileProvider['infoVM']>(async (name) => {
+        // Simulate a concurrent `stop` landing mid-reconcile.
+        await withState((s) => {
+          const entry = s.sandboxes[name];
+          if (entry) {
+            entry.status = 'stopped';
+            entry.ip = null;
+          }
+        }, file);
+        return {
+          name,
+          state: 'running',
+          networkInfo: { ipV4: '192.168.1.99' },
+        };
+      }),
+    };
+
+    const result = await reconcileRegistry({ provider, stateFilePath: file });
+
+    expect(result.changed).toBe(false);
+    expect(result.changes).toEqual([]);
+    const after = await readState(file);
+    // The concurrent stop stands; the stale ip-changed was not applied.
+    expect(after.sandboxes.a).toMatchObject({ status: 'stopped', ip: null });
+  });
+
   it('returns changed:false and skips info when nothing diverges', async () => {
     await seed({ ...baseEntry, status: 'stopped', ip: null });
     const provider = fakeProvider([{ name: 'a', state: 'stopped' }]);

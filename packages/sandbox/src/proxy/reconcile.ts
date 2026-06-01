@@ -107,14 +107,19 @@ export async function reconcileRegistry(
     ...planned.filter((c) => c.kind === 'started').map((c) => c.name),
     ...ipCheck,
   ];
-  for (const name of namesNeedingIp) {
-    try {
-      const info = await deps.provider.infoVM(name);
-      ipByName.set(name, info.networkInfo?.ipV4 ?? null);
-    } catch {
-      // Leave unset; `started` commits ip: null (pending), drift check is skipped.
-    }
-  }
+  // Fetched in parallel: the on-demand heal path runs inside a bounded timeout,
+  // and a serial loop over every running VM's `info` would blow that budget and
+  // 403 the request that triggered the reconcile.
+  await Promise.all(
+    namesNeedingIp.map(async (name) => {
+      try {
+        const info = await deps.provider.infoVM(name);
+        ipByName.set(name, info.networkInfo?.ipV4 ?? null);
+      } catch {
+        // Leave unset; `started` commits ip: null (pending), drift check skipped.
+      }
+    }),
+  );
 
   for (const change of planned) {
     if (change.kind === 'started')
