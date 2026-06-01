@@ -21,8 +21,8 @@ interface SandboxRegistration {
    * Client IP this registration's rules apply to. A request whose
    * `remoteIpAddress` matches `sourceIp` exactly is governed by this
    * registration's `domains` + `policies`. `null` disables the registration
-   * (every request from any IP falls through to the 403 sweep) — used when a
-   * sandbox's IP allocation hasn't completed.
+   * (no IP matches it, so requests fall through to the unregistered-IP 403) —
+   * used when a sandbox's IP allocation hasn't completed.
    */
   sourceIp: string | null;
   domains: readonly string[];
@@ -129,24 +129,40 @@ export interface HostProxyOptions {
    * the proxy emits a `decision` event from `beforeRequest` for every
    * allowlisted request (carrying matched policy id, outcome, and applied
    * mutations) and a `denial` event for every request rejected by the
-   * allowlist sweep. Leave undefined to disable verbose logging.
+   * allowlist or from an unregistered IP. Leave undefined to disable verbose
+   * logging.
    */
   verboseLogger?: VerboseLogger;
+  /**
+   * Optional hook invoked when a request arrives from an IP not registered to
+   * any sandbox. The proxy awaits it (bounded by an internal timeout) before
+   * re-checking the registration map, giving the hook a chance to reconcile
+   * the registry and `register` the now-known sandbox so the request can pass
+   * through instead of being denied. Must resolve once registrations are
+   * up to date. Errors and timeouts are swallowed — the request falls back to
+   * a 403. Never called for already-registered IPs (the hot path).
+   */
+  onUnregisteredRequest?: (remoteIp: string) => Promise<void>;
 }
 
 /**
+ * Max time the proxy waits on {@link HostProxyOptions.onUnregisteredRequest}
+ * before falling back to a 403. Bounds how long a wedged reconcile can hold a
+ * client socket open.
+ */
+const UNREGISTERED_RECONCILE_TIMEOUT_MS = 2500;
+
+/**
  * Forward HTTP/HTTPS proxy with credential substitution and a per-host
- * allowlist, backed by mockttp.
- *
- * Public surface is intentionally unchanged from the previous hand-rolled
- * implementation so `proxy/process.ts` doesn't need rewiring.
+ * allowlist, backed by mockttp. A single passthrough rule, installed once at
+ * `listen()`, reads the registration map live per request — so
+ * register/unregister take effect on the next request with no rule rebuild.
  */
 /**
- * Callback that re-attaches event listeners to the underlying mockttp server
- * after each rule rebuild. Mockttp's `reset()` clears event subscriptions
- * along with rules, so consumers must re-subscribe on every rebuild or they
- * will silently stop receiving `request` / `abort` / `tls-client-error`
- * events after the first reload.
+ * Callback that attaches event listeners to the underlying mockttp server.
+ * Invoked once when registered (and the rules are built once at `listen()`,
+ * which calls `reset()` and clears any prior subscriptions), so a consumer
+ * subscribes here to receive `request` / `abort` / `tls-client-error` events.
  */
 export type EventSubscriber = (server: Mockttp) => Promise<void>;
 
@@ -156,6 +172,9 @@ export class HostProxy {
   private readonly registrations = new Map<string, SandboxRegistration>();
   private readonly preferredPort: number;
   private readonly verboseLogger: VerboseLogger | undefined;
+  private readonly onUnregisteredRequest:
+    | ((remoteIp: string) => Promise<void>)
+    | undefined;
   private listenAddress?: { host: string; port: number };
   private eventSubscriber?: EventSubscriber;
 
@@ -164,6 +183,7 @@ export class HostProxy {
     this.resolver = options.resolver;
     this.preferredPort = options.port ?? 0;
     this.verboseLogger = options.verboseLogger;
+    this.onUnregisteredRequest = options.onUnregisteredRequest;
   }
 
   /**
@@ -181,14 +201,14 @@ export class HostProxy {
   }
 
   /**
-   * Add or replace a sandbox's allowlist + actions. Call `refresh()` after a
-   * batch of register/unregister calls to apply them to the live proxy.
+   * Add or replace a sandbox's allowlist + actions. Takes effect on the next
+   * request — the single rule reads the registration map live.
    */
   register(name: string, registration: SandboxRegistration): void {
     this.registrations.set(name, registration);
   }
 
-  /** Remove a sandbox's registration. See `register` re: needing `refresh()`. */
+  /** Remove a sandbox's registration. Takes effect on the next request. */
   unregister(name: string): void {
     this.registrations.delete(name);
   }
@@ -207,14 +227,6 @@ export class HostProxy {
 
   async close(): Promise<void> {
     await this.server.stop();
-  }
-
-  /**
-   * Re-derive mockttp rules from the current registration set. Call after any
-   * register/unregister.
-   */
-  async refresh(): Promise<void> {
-    if (this.listenAddress) await this.rebuildRules();
   }
 
   address(): { host: string; port: number } | undefined {
@@ -242,10 +254,9 @@ export class HostProxy {
   }
 
   /**
-   * Register a function that re-attaches event listeners to the underlying
-   * mockttp server. Invoked once immediately and again after every rule
-   * rebuild, because mockttp's `reset()` (which we call to swap rules)
-   * also clears event subscriptions.
+   * Register a function that attaches event listeners to the underlying
+   * mockttp server. Invoked once immediately; the listeners persist for the
+   * proxy's lifetime since rules are built once at `listen()` and never rebuilt.
    *
    * Replaces any previously-registered subscriber.
    */
@@ -277,6 +288,27 @@ export class HostProxy {
     );
   }
 
+  /**
+   * Give `onUnregisteredRequest` a bounded chance to reconcile and register the
+   * sandbox behind an unknown IP. Returns once the hook resolves or the timeout
+   * elapses; errors and timeouts are swallowed (the caller re-checks the map
+   * and denies if still unknown). No-op when no hook is configured.
+   */
+  private async tryReconcileUnregistered(remoteIp: string): Promise<void> {
+    if (this.onUnregisteredRequest === undefined) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, UNREGISTERED_RECONCILE_TIMEOUT_MS);
+    });
+    try {
+      await Promise.race([this.onUnregisteredRequest(remoteIp), timeout]);
+    } catch {
+      // Swallow — caller falls back to a 403 if the IP is still unregistered.
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
   private async rebuildRules(): Promise<void> {
     this.server.reset();
 
@@ -287,64 +319,23 @@ export class HostProxy {
     // every reply so the map stays bounded.
     const pendingInterceptors = new Map<string, ResponseInterceptor>();
 
-    // Requests from registered sandbox IPs: evaluate policies first, then
-    // fall back to the allowlist. Requests from unregistered IPs fall through
-    // to the sweep below.
-    await this.server
-      .forAnyRequest()
-      .matching((req: CompletedRequest) => {
+    // A single rule handles every request. The registration map (and each
+    // registration's policies/allowlist) is read live here, so register/
+    // unregister take effect on the next request without rebuilding rules.
+    // Unregistered IPs get one chance to be reconciled (via
+    // `onUnregisteredRequest`) before being denied — this is how a VM started
+    // outside the CLI heals: its first request triggers a reconcile and then
+    // passes through.
+    await this.server.forAnyRequest().thenPassThrough({
+      beforeRequest: async (req) => {
+        const parts = hostAndPathFromRequest(req);
         const remoteIp = normalizeRemoteIp(req.remoteIpAddress);
-        if (remoteIp === null) return false;
-        return this.registrationsForIp(remoteIp).length > 0;
-      })
-      .thenPassThrough({
-        beforeRequest: async (req) => {
-          const parts = hostAndPathFromRequest(req);
-          if (parts === null) return undefined;
-          const remoteIp = normalizeRemoteIp(req.remoteIpAddress);
-          if (remoteIp === null) return undefined;
-          const headers: Record<string, string | string[] | undefined> = {
-            ...req.headers,
-          };
-          const result = await applyPolicies(
-            this.policiesFor(remoteIp),
-            parts.host,
-            parts.path,
-            parts.method,
-            headers,
-            this.resolver,
-            { pathWithQuery: parts.pathWithQuery },
-          );
-          if (this.verboseLogger) {
-            // Strip `headers` (carries resolved secrets) before logging;
-            // every other field on `result` is safe to forward.
-            const { headers: _, ...outcomeForLog } = result;
-            this.verboseLogger({
-              type: 'decision',
-              id: req.id,
-              method: parts.method,
-              host: parts.host,
-              path: parts.pathWithQuery,
-              remoteIp,
-              ...outcomeForLog,
-            });
-          }
-          if (result.outcome === 'block') {
-            return {
-              response: {
-                statusCode: 403,
-                statusMessage: 'Forbidden',
-                headers: { 'content-type': 'text/plain' },
-                body: `aurica-sandbox: blocked by policy ${result.blockedBy}\n`,
-              },
-            };
-          }
-          // No policy matched — fall back to the allowlist.
-          if (
-            result.outcome === 'pass' &&
-            result.matchedPolicyId === undefined &&
-            !this.isAllowedFor(parts.host, remoteIp)
-          ) {
+        if (parts === null || remoteIp === null)
+          return denyResponse('unparseable');
+
+        if (this.registrationsForIp(remoteIp).length === 0) {
+          await this.tryReconcileUnregistered(remoteIp);
+          if (this.registrationsForIp(remoteIp).length === 0) {
             if (this.verboseLogger) {
               this.verboseLogger({
                 type: 'denial',
@@ -353,140 +344,198 @@ export class HostProxy {
                 host: parts.host,
                 path: parts.pathWithQuery,
                 remoteIp,
-                reason: 'allowlist',
+                reason: 'unregistered-ip',
               });
             }
-            return {
-              response: {
-                statusCode: 403,
-                statusMessage: 'Forbidden',
-                headers: { 'content-type': 'text/plain' },
-                body: 'aurica-sandbox: domain not in allowlist\n',
-              },
-            };
+            return denyResponse('unregistered-ip');
           }
-          if (
-            result.outcome === 'pass' &&
-            result.interceptResponse !== undefined
-          ) {
-            // Refresh short-circuit: if the body is a `grant_type=refresh_token`
-            // request, drive the refresh on the host instead of forwarding.
-            // Solves a race where Claude Code fires parallel 401-triggered
-            // refreshes whose rotated tokens invalidate each other upstream.
-            const bodyText = await req.body.getText();
-            const shortCircuit = await tryShortCircuitRefresh(
-              result.interceptResponse,
-              {
-                url: req.url,
-                headers,
-                bodyText,
-              },
-            );
-            if (shortCircuit !== null) {
-              if (this.verboseLogger && shortCircuit.mutations.length > 0) {
-                this.verboseLogger({
-                  type: 'mutations-append',
-                  id: req.id,
-                  mutations: shortCircuit.mutations,
-                });
-              }
-              return {
-                response: {
-                  statusCode: shortCircuit.statusCode,
-                  headers: shortCircuit.headers,
-                  body: shortCircuit.body,
-                },
-              };
-            }
-            pendingInterceptors.set(req.id, result.interceptResponse);
-          }
-          if (result.outcome === 'rewrite') {
-            // Strip the guest's Host header so mockttp derives a fresh
-            // one from the rewritten URL. Per its docs, passing a
-            // headers object with `host` set wins over the URL — which
-            // would route us to the synthetic guest hostname instead of
-            // the loopback target and produce ENOTFOUND. Also inject
-            // X-Forwarded-For so the rewritten target can identify the
-            // originating sandbox by IP (the loopback hop erases
-            // `req.remoteIpAddress`), stripping any guest-supplied
-            // case-variant first so it isn't guest-controllable.
-            let headers = stripHeader(result.headers, 'host');
-            headers = stripHeader(headers, 'x-forwarded-for');
-            headers['X-Forwarded-For'] = remoteIp;
-            return {
-              url: result.url,
-              headers,
-            };
-          }
-          return {
-            headers: result.headers,
-          };
-        },
-        beforeResponse: async (res) => {
-          const interceptor = pendingInterceptors.get(res.id);
-          if (interceptor === undefined) return undefined;
-          pendingInterceptors.delete(res.id);
-          // Use the decoded buffer so gzip/brotli upstreams (Anthropic
-          // serves the token endpoint over a regular HTTPS gateway, but
-          // can negotiate content-encoding) parse correctly.
-          const decoded = await res.body.getDecodedBuffer();
-          const rewritten = await applyOAuthTokenInterceptor(interceptor, {
-            statusCode: res.statusCode,
-            headers: res.headers,
-            body: decoded,
-          });
-          if (rewritten === null) return undefined;
-          if (this.verboseLogger && rewritten.mutations.length > 0) {
-            this.verboseLogger({
-              type: 'mutations-append',
-              id: res.id,
-              mutations: rewritten.mutations,
-            });
-          }
-          return {
-            statusCode: rewritten.statusCode,
-            headers: rewritten.headers,
-            body: rewritten.body,
-          };
-        },
-      });
+        }
 
-    // Sweep: requests from IPs not registered to any sandbox. Uses
-    // `thenCallback` (instead of `thenReply`) so verbose mode can surface
-    // each denial with method+host+IP — `thenReply` would hide the request
-    // details from us and only the response-event line would survive.
-    await this.server.forUnmatchedRequest().thenCallback((req) => {
-      if (this.verboseLogger) {
-        const parts = hostAndPathFromRequest(req);
-        const remoteIp = normalizeRemoteIp(req.remoteIpAddress);
-        if (parts !== null && remoteIp !== null) {
+        const headers: Record<string, string | string[] | undefined> = {
+          ...req.headers,
+        };
+        const result = await applyPolicies(
+          this.policiesFor(remoteIp),
+          parts.host,
+          parts.path,
+          parts.method,
+          headers,
+          this.resolver,
+          { pathWithQuery: parts.pathWithQuery },
+        );
+        if (this.verboseLogger) {
+          // Strip `headers` (carries resolved secrets) before logging;
+          // every other field on `result` is safe to forward.
+          const { headers: _, ...outcomeForLog } = result;
           this.verboseLogger({
-            type: 'denial',
+            type: 'decision',
             id: req.id,
             method: parts.method,
             host: parts.host,
             path: parts.pathWithQuery,
             remoteIp,
-            reason: 'unregistered-ip',
+            ...outcomeForLog,
           });
         }
-      }
-      return {
-        statusCode: 403,
-        statusMessage: 'Forbidden',
-        headers: { 'content-type': 'text/plain' },
-        body: 'aurica-sandbox: request from unregistered IP\n',
-      };
+        if (result.outcome === 'block') {
+          return denyResponse('block', result.blockedBy);
+        }
+        // No policy matched — fall back to the allowlist.
+        if (
+          result.outcome === 'pass' &&
+          result.matchedPolicyId === undefined &&
+          !this.isAllowedFor(parts.host, remoteIp)
+        ) {
+          if (this.verboseLogger) {
+            this.verboseLogger({
+              type: 'denial',
+              id: req.id,
+              method: parts.method,
+              host: parts.host,
+              path: parts.pathWithQuery,
+              remoteIp,
+              reason: 'allowlist',
+            });
+          }
+          return denyResponse('allowlist');
+        }
+        if (
+          result.outcome === 'pass' &&
+          result.interceptResponse !== undefined
+        ) {
+          // Refresh short-circuit: if the body is a `grant_type=refresh_token`
+          // request, drive the refresh on the host instead of forwarding.
+          // Solves a race where Claude Code fires parallel 401-triggered
+          // refreshes whose rotated tokens invalidate each other upstream.
+          const bodyText = await req.body.getText();
+          const shortCircuit = await tryShortCircuitRefresh(
+            result.interceptResponse,
+            {
+              url: req.url,
+              headers,
+              bodyText,
+            },
+          );
+          if (shortCircuit !== null) {
+            if (this.verboseLogger && shortCircuit.mutations.length > 0) {
+              this.verboseLogger({
+                type: 'mutations-append',
+                id: req.id,
+                mutations: shortCircuit.mutations,
+              });
+            }
+            return {
+              response: {
+                statusCode: shortCircuit.statusCode,
+                headers: shortCircuit.headers,
+                body: shortCircuit.body,
+              },
+            };
+          }
+          pendingInterceptors.set(req.id, result.interceptResponse);
+        }
+        if (result.outcome === 'rewrite') {
+          // Strip the guest's Host header so mockttp derives a fresh
+          // one from the rewritten URL. Per its docs, passing a
+          // headers object with `host` set wins over the URL — which
+          // would route us to the synthetic guest hostname instead of
+          // the loopback target and produce ENOTFOUND. Also inject
+          // X-Forwarded-For so the rewritten target can identify the
+          // originating sandbox by IP (the loopback hop erases
+          // `req.remoteIpAddress`), stripping any guest-supplied
+          // case-variant first so it isn't guest-controllable.
+          let headers = stripHeader(result.headers, 'host');
+          headers = stripHeader(headers, 'x-forwarded-for');
+          headers['X-Forwarded-For'] = remoteIp;
+          return {
+            url: result.url,
+            headers,
+          };
+        }
+        return {
+          headers: result.headers,
+        };
+      },
+      beforeResponse: async (res) => {
+        const interceptor = pendingInterceptors.get(res.id);
+        if (interceptor === undefined) return undefined;
+        pendingInterceptors.delete(res.id);
+        // Use the decoded buffer so gzip/brotli upstreams (Anthropic
+        // serves the token endpoint over a regular HTTPS gateway, but
+        // can negotiate content-encoding) parse correctly.
+        const decoded = await res.body.getDecodedBuffer();
+        const rewritten = await applyOAuthTokenInterceptor(interceptor, {
+          statusCode: res.statusCode,
+          headers: res.headers,
+          body: decoded,
+        });
+        if (rewritten === null) return undefined;
+        if (this.verboseLogger && rewritten.mutations.length > 0) {
+          this.verboseLogger({
+            type: 'mutations-append',
+            id: res.id,
+            mutations: rewritten.mutations,
+          });
+        }
+        return {
+          statusCode: rewritten.statusCode,
+          headers: rewritten.headers,
+          body: rewritten.body,
+        };
+      },
     });
 
-    // Mockttp's reset() above also tore down any event listeners; re-attach
-    // them now so log streams keep working across reloads.
+    // The reset() above clears any event listeners; (re-)attach them now. This
+    // runs once at listen(), so a subscriber registered earlier survives it.
     if (this.eventSubscriber) {
       await this.eventSubscriber(this.server);
     }
   }
 }
 
+/** Reason a request was denied, selecting the 403 body text. */
+type DenyReason = 'unparseable' | 'unregistered-ip' | 'allowlist' | 'block';
+
+/**
+ * Build the `{ response }` short-circuit a `beforeRequest` returns to deny a
+ * request with a 403 and a reason-specific plain-text body.
+ */
+function denyResponse(
+  reason: DenyReason,
+  blockedBy?: string,
+): {
+  response: {
+    statusCode: number;
+    statusMessage: string;
+    headers: Record<string, string>;
+    body: string;
+  };
+} {
+  const body = (() => {
+    switch (reason) {
+      case 'unparseable': {
+        return 'aurica-sandbox: unparseable request\n';
+      }
+      case 'unregistered-ip': {
+        return 'aurica-sandbox: request from unregistered IP\n';
+      }
+      case 'allowlist': {
+        return 'aurica-sandbox: domain not in allowlist\n';
+      }
+      default: {
+        return `aurica-sandbox: blocked by policy ${blockedBy ?? 'unknown'}\n`;
+      }
+    }
+  })();
+  return {
+    response: {
+      statusCode: 403,
+      statusMessage: 'Forbidden',
+      headers: { 'content-type': 'text/plain' },
+      body,
+    },
+  };
+}
 function hostAndPathFromRequest(req: CompletedRequest): {
   host: string;
   path: string;

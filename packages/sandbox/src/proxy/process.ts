@@ -13,6 +13,7 @@ import type {
 import { readState, withState } from '#src/state/index.js';
 import type { SandboxEntry, State } from '#src/state/index.js';
 import { errorMessage } from '#src/utils/error-message.js';
+import { defaultProvider } from '#src/vm/index.js';
 
 import { SandboxConfigWatcher } from './config-watcher.js';
 import { deriveRulesFromConfig } from './derive-rules.js';
@@ -23,6 +24,7 @@ import {
   type VerboseDecisionEvent,
   type VerboseDenialLog,
 } from './host-proxy.js';
+import { formatReconcileSummary, reconcileRegistry } from './reconcile.js';
 
 /**
  * Default port for the singleton host proxy. Pinned (rather than ephemeral) so
@@ -43,6 +45,19 @@ import {
  * the proxy until they're rebuilt.
  */
 const DEFAULT_PROXY_PORT = 51_217;
+
+/** Interval between periodic registry↔provider reconciliations. */
+const RECONCILE_INTERVAL_MS = 5 * 60_000;
+
+/**
+ * How long an IP that an on-demand reconcile failed to resolve is suppressed
+ * from re-triggering. Longer than one reconcile so a deleted VM that keeps
+ * knocking doesn't reconcile on every packet.
+ */
+const RECONCILE_COOLDOWN_MS = 5000;
+
+/** Upper bound on the per-IP cooldown map before it's cleared wholesale. */
+const RECONCILE_COOLDOWN_MAX = 1024;
 
 function resolveProxyPort(log: ProxyLog): number {
   const raw = process.env.AURICA_PROXY_PORT;
@@ -179,6 +194,16 @@ export async function runProxyProcess(
       entry.decision = event;
     };
   }
+
+  // On-demand reconcile trigger for requests from unregistered IPs (a VM
+  // started outside the CLI). The proxy awaits this before denying, so a
+  // successful reconcile lets the first request pass through. Defined as a
+  // mutable holder because `runReconcile` is declared after the proxy is
+  // created; the hook is only ever invoked at request time, long after wiring.
+  let triggerReconcile: (remoteIp: string) => Promise<void> = () =>
+    Promise.resolve();
+  proxyOptions.onUnregisteredRequest = (remoteIp) => triggerReconcile(remoteIp);
+
   const proxy = await HostProxy.create(proxyOptions);
   const addr = await proxy.listen();
 
@@ -209,7 +234,6 @@ export async function runProxyProcess(
       if (!entry) return;
       const ok = await loadAndRegister(proxy, watcher, entry, linuxUser, log);
       if (ok) {
-        await proxy.refresh();
         log.info(`proxy reloaded for ${name} from ${path}`);
       }
       // A sandbox.json edit can change plugin opt-ins, so re-publish
@@ -223,8 +247,9 @@ export async function runProxyProcess(
   await publishStreamSnapshot();
 
   // Visibility: mockttp emits structured events for every request lifecycle.
-  // Registered via setEventSubscriber so the listeners get re-attached after
-  // every rule rebuild — mockttp's reset() drops both rules and listeners.
+  // Registered via setEventSubscriber, which attaches the listeners after the
+  // one rule build at listen() (mockttp's reset() there would otherwise drop
+  // them).
   //
   // We render on the terminal event (response/abort), not on request, so each
   // log carries the outcome. In verbose mode the buffered decision is folded
@@ -302,12 +327,60 @@ export async function runProxyProcess(
     if (sidecar) sidecars.push(sidecar);
   }
 
+  // Reconcile once at startup (catches drift from a host reboot — VMs come
+  // back stopped and the registry is stale), then register. Reuses the
+  // returned state so we don't read twice. Falls back to a plain register if
+  // reconcile throws (e.g. `orbctl` missing) so the proxy still boots.
+  let startupState: State;
+  try {
+    const startup = await reconcileRegistry({ provider: defaultProvider });
+    const summary = formatReconcileSummary(startup.changes);
+    if (summary) log.info(summary);
+    startupState = startup.state;
+  } catch (err) {
+    log.error(`startup reconcile failed: ${errorMessage(err)}`);
+    startupState = await readState();
+  }
   // Register sandboxes now that the proxy entry is on disk. Plugins like
   // `mcp` read this state to derive their domains, policies, and
   // post-lockdown commands.
-  await applyRegistrations(proxy, watcher, await readState(), linuxUser, log);
+  await applyRegistrations(proxy, watcher, startupState, linuxUser, log);
 
   log.info(`proxy http://${addr.host}:${addr.port} (pid ${process.pid})`);
+
+  // Reconcile the registry against the provider's actual VM states, then
+  // re-apply registrations and re-publish to sidecars so the allowlist stays
+  // accurate when a VM is stopped/started/deleted outside the CLI. Wrapped in
+  // try/catch — a rejection on the timer or the on-demand path would otherwise
+  // become an unhandled rejection. Shared by the interval and the on-demand
+  // trigger; the on-demand path relies on `applyRegistrations` having run so the
+  // new IP is registered before the awaiting request re-checks.
+  const runReconcile = async (): Promise<void> => {
+    try {
+      const result = await reconcileRegistry({ provider: defaultProvider });
+      if (!result.changed) return;
+      const summary = formatReconcileSummary(result.changes);
+      if (summary) log.info(summary);
+      await applyRegistrations(proxy, watcher, result.state, linuxUser, log);
+      stream.publish(Object.values(result.state.sandboxes));
+    } catch (err) {
+      log.error(`reconcile failed: ${errorMessage(err)}`);
+    }
+  };
+
+  // Periodic reconcile (backstop). Mirrors the MCP idle sweeper: `.unref()` so
+  // it never keeps the process alive; cleared in `stop()`.
+  const reconcileTimer = setInterval(() => {
+    void runReconcile();
+  }, RECONCILE_INTERVAL_MS);
+  reconcileTimer.unref();
+
+  // On-demand reconcile, throttled (see `createReconcileTrigger`).
+  triggerReconcile = createReconcileTrigger({
+    runReconcile,
+    isRegistered: (remoteIp) =>
+      proxy.summary().some((s) => s.sourceIp === remoteIp),
+  });
 
   const onHup = (): void => {
     void (async () => {
@@ -324,6 +397,7 @@ export async function runProxyProcess(
     if (stopping) return;
     stopping = true;
     process.off('SIGHUP', onHup);
+    clearInterval(reconcileTimer);
     // Sidecars first so they can drain in-flight work while the proxy
     // is still up (e.g. log a structured "stopping" line, finish a
     // pending OAuth callback). Awaited in parallel; one failure
@@ -355,6 +429,59 @@ export async function runProxyProcess(
   process.once('SIGTERM', onTerm);
 
   return { host: addr.host, port: addr.port, stop };
+}
+
+/** Dependencies for {@link createReconcileTrigger}. */
+export interface ReconcileTriggerDeps {
+  /**
+   * Runs one reconcile sweep, registering every newly-discovered IP before it
+   * resolves. Shared by the startup/interval paths.
+   */
+  runReconcile: () => Promise<void>;
+  /** Whether `remoteIp` is registered to a sandbox (checked after the sweep). */
+  isRegistered: (remoteIp: string) => boolean;
+  /** Clock, injectable for tests. Defaults to `Date.now`. */
+  now?: () => number;
+  /** Cooldown window in ms. Defaults to {@link RECONCILE_COOLDOWN_MS}. */
+  cooldownMs?: number;
+  /** Cooldown-map cap before it's cleared wholesale. Defaults to {@link RECONCILE_COOLDOWN_MAX}. */
+  cooldownMax?: number;
+}
+
+/**
+ * Build the on-demand reconcile trigger invoked when a request arrives from an
+ * unregistered IP (a VM started outside the CLI). Throttled two ways:
+ *
+ * - **Shared in-flight promise**: a burst of newly-started VMs awaits one
+ *   `runReconcile` sweep rather than each firing its own `orbctl` call. The
+ *   holder is cleared once the sweep settles so the next wave re-triggers.
+ * - **Per-IP cooldown**: an IP still unregistered *after* a sweep (a
+ *   genuinely-deleted VM that keeps knocking) is suppressed for `cooldownMs` so
+ *   it doesn't reconcile on every packet. An IP that registers never reaches
+ *   the cooldown check on its next hit (the caller short-circuits registered
+ *   IPs before awaiting), so the cooldown only ever holds dead IPs.
+ */
+export function createReconcileTrigger(
+  deps: ReconcileTriggerDeps,
+): (remoteIp: string) => Promise<void> {
+  const now = deps.now ?? Date.now;
+  const cooldownMs = deps.cooldownMs ?? RECONCILE_COOLDOWN_MS;
+  const cooldownMax = deps.cooldownMax ?? RECONCILE_COOLDOWN_MAX;
+  let inFlightReconcile: Promise<void> | null = null;
+  const cooldown = new Map<string, number>();
+
+  return async function triggerReconcile(remoteIp: string): Promise<void> {
+    const until = cooldown.get(remoteIp);
+    if (until !== undefined && now() < until) return;
+    inFlightReconcile ??= deps.runReconcile().finally(() => {
+      inFlightReconcile = null;
+    });
+    await inFlightReconcile;
+    if (!deps.isRegistered(remoteIp)) {
+      if (cooldown.size >= cooldownMax) cooldown.clear();
+      cooldown.set(remoteIp, now() + cooldownMs);
+    }
+  };
 }
 
 /**
@@ -398,7 +525,8 @@ class InMemorySandboxRegistrationStream implements SandboxRegistrationStream {
  * Reconcile the proxy's registration set + watcher set against the current
  * `state.sandboxes`. For each newly-present sandbox: load rules from disk
  * and start watching its sandbox.json. For each removed sandbox: unregister
- * + stop watching. Always ends with `proxy.refresh()`.
+ * + stop watching. Registration changes take effect on the next request — the
+ * proxy's single rule reads the registration map live.
  */
 async function applyRegistrations(
   proxy: HostProxy,
@@ -417,7 +545,6 @@ async function applyRegistrations(
   for (const entry of Object.values(state.sandboxes)) {
     await loadAndRegister(proxy, watcher, entry, linuxUser, log);
   }
-  await proxy.refresh();
 }
 
 /**
