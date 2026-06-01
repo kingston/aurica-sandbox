@@ -50,6 +50,15 @@ const DEFAULT_PROXY_PORT = 51_217;
 const RECONCILE_INTERVAL_MS = 5 * 60_000;
 
 /**
+ * How often the running proxy re-asserts ownership of `state.proxy`. The bound
+ * port is the real singleton, so the live port holder is authoritative: if its
+ * pid is missing or has been overwritten (e.g. a racing `start` that died on
+ * the bind clobbered the entry, or a `stop` cleared it), it rewrites the entry
+ * back to itself, keeping state from naming a dead pid while a live proxy runs.
+ */
+const STATE_HEAL_INTERVAL_MS = 5000;
+
+/**
  * How long an IP that an on-demand reconcile failed to resolve is suppressed
  * from re-triggering. Longer than one reconcile so a deleted VM that keeps
  * knocking doesn't reconcile on every packet.
@@ -59,17 +68,30 @@ const RECONCILE_COOLDOWN_MS = 5000;
 /** Upper bound on the per-IP cooldown map before it's cleared wholesale. */
 const RECONCILE_COOLDOWN_MAX = 1024;
 
-function resolveProxyPort(log: ProxyLog): number {
+/**
+ * Resolve the port the proxy will bind: `AURICA_PROXY_PORT` if it's a valid
+ * port, else {@link DEFAULT_PROXY_PORT}. Pure (no logging) so the CLI can report
+ * the target port without booting the proxy.
+ */
+export function resolvedProxyPort(): number {
   const raw = process.env.AURICA_PROXY_PORT;
   if (raw === undefined || raw === '') return DEFAULT_PROXY_PORT;
   const parsed = Number(raw);
   if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65_535) {
-    log.error(
-      `AURICA_PROXY_PORT=${raw} is not a valid port (1–65535); using default ${DEFAULT_PROXY_PORT}`,
-    );
     return DEFAULT_PROXY_PORT;
   }
   return parsed;
+}
+
+function resolveProxyPort(log: ProxyLog): number {
+  const raw = process.env.AURICA_PROXY_PORT;
+  const port = resolvedProxyPort();
+  if (raw !== undefined && raw !== '' && Number(raw) !== port) {
+    log.error(
+      `AURICA_PROXY_PORT=${raw} is not a valid port (1-65535); using default ${DEFAULT_PROXY_PORT}`,
+    );
+  }
+  return port;
 }
 
 export interface ProxyProcessHandle {
@@ -393,11 +415,43 @@ export async function runProxyProcess(
   process.on('SIGHUP', onHup);
 
   let stopping = false;
+
+  // Re-assert ownership of `state.proxy`. The live port holder is authoritative
+  // over the registry entry; if the recorded pid is missing or no longer ours
+  // (a racing `start` or a premature `stop` rewrote it), reclaim it. Skipped
+  // once shutdown begins so it never fights `stop()` clearing the entry.
+  //
+  // Read first and bail when the entry already names us: `withState` writes
+  // unconditionally, so taking the lock on every tick would rewrite the file
+  // (and bump its mtime) for the proxy's whole lifetime. The in-lock re-check
+  // keeps the reclaim correct if the entry changes between this read and the
+  // lock.
+  const healState = async (): Promise<void> => {
+    if (stopping) return;
+    const current = await readState();
+    if (current.proxy?.pid === process.pid) return;
+    await withState((state) => {
+      if (stopping) return;
+      if (state.proxy?.pid === process.pid) return;
+      state.proxy = {
+        pid: process.pid,
+        host: addr.host,
+        port: addr.port,
+        startedAt: new Date().toISOString(),
+      };
+    });
+  };
+  const stateHealTimer = setInterval(() => {
+    void healState();
+  }, STATE_HEAL_INTERVAL_MS);
+  stateHealTimer.unref();
+
   const stop = async (): Promise<void> => {
     if (stopping) return;
     stopping = true;
     process.off('SIGHUP', onHup);
     clearInterval(reconcileTimer);
+    clearInterval(stateHealTimer);
     // Sidecars first so they can drain in-flight work while the proxy
     // is still up (e.g. log a structured "stopping" line, finish a
     // pending OAuth callback). Awaited in parallel; one failure

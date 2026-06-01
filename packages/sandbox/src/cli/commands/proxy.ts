@@ -6,7 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 import { proxyLogPath, proxyLogRotatedPath } from '#src/config/index.js';
 import { logger } from '#src/logger.js';
-import { runProxyProcess } from '#src/proxy/index.js';
+import { resolvedProxyPort, runProxyProcess } from '#src/proxy/index.js';
 import {
   isPidAlive,
   readState,
@@ -65,6 +65,24 @@ export class ProxyAlreadyRunningError extends Error {
       `aurica-sandbox proxy already running (pid ${pid}); stop it with: aurica-sandbox proxy stop`,
     );
     this.name = 'ProxyAlreadyRunningError';
+  }
+}
+
+/**
+ * Thrown when the daemon dies because its port is already bound but no tracked
+ * proxy owns it (an untracked orphan, or an unrelated process). `proxy stop`
+ * can't help — it reads the dead recorded pid — so the guidance is to retry
+ * (a leftover aurica proxy self-heals `state.proxy` within seconds) or free the
+ * port.
+ */
+export class ProxyPortInUseError extends Error {
+  constructor(public readonly port: number) {
+    super(
+      `port ${port} is in use but no tracked proxy owns it.\n` +
+        `If a leftover aurica-sandbox proxy is still running, it will re-register within a few seconds — retry your command.\n` +
+        `Otherwise free port ${port} or set AURICA_PROXY_PORT to an open port.`,
+    );
+    this.name = 'ProxyPortInUseError';
   }
 }
 
@@ -201,6 +219,13 @@ export async function runProxyStart(
   }
   if (!ready || !isPidAlive(childPid)) {
     const tail = await tailLogText(CRASH_LOG_LINES);
+    // A port collision is the one boot failure with a specific recovery story,
+    // so translate it into actionable guidance rather than a raw log dump. The
+    // tail is this boot's log (`rotateLog` ran first); consola logs the bind
+    // error as `listen EADDRINUSE …`, so a string match is the available signal.
+    if (tail.includes('EADDRINUSE')) {
+      throw new ProxyPortInUseError(resolvedProxyPort());
+    }
     const detail = tail ? `\n--- ${logPath} ---\n${tail}` : '';
     throw new Error(
       `proxy daemon did not come up (pid ${childPid}); see ${logPath}${detail}`,
