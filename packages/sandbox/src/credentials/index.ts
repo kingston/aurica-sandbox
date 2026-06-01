@@ -1,5 +1,9 @@
-export { CredentialCache } from './cache.js';
-export type { CredentialCacheOptions } from './cache.js';
+export { CredentialResolver } from './resolver.js';
+export type { CredentialResolverOptions } from './resolver.js';
+export { createPluginCredentialRecordFactory } from './plugin-credential-record.js';
+export type { PluginDefineCredentialRecordOptions } from './plugin-credential-record.js';
+export { CredentialStore, defaultCredentialStore } from './credential-store.js';
+export type { CredentialStoreOptions } from './credential-store.js';
 export {
   defaultCredentialProviders,
   envCredentialProvider,

@@ -1,170 +1,140 @@
-import fs from 'node:fs/promises';
-import path from 'node:path';
-
-import lockfile from 'proper-lockfile';
 import { z } from 'zod';
 
-import { credentialsFilePath } from '#src/config/paths.js';
+import { defaultCredentialStore } from '#src/credentials/credential-store.js';
+import type { CredentialRecord } from '#src/credentials/credential-record.js';
+import { createPluginCredentialRecordFactory } from '#src/credentials/plugin-credential-record.js';
 
 /**
- * On-disk per-upstream slice. Both fields are opaque blobs from the MCP
- * SDK's perspective (the SDK validates them on its way in and out); we
- * store them as `unknown` so the SDK schemas stay the source of truth
- * for shape. Wrapping with our own schema would mean re-deriving the
- * SDK's schemas — fragile and unnecessary.
+ * Per-upstream MCP credentials, split across two slots so a token refresh
+ * (frequent) doesn't have to merge with the client registration blob
+ * (one-time). Both halves are opaque from our side — the MCP SDK
+ * validates `OAuthClientInformationFull` and `OAuthTokens` on its way
+ * in and out — so the metadata side is empty and the actual payload
+ * lives in the secret store as a JSON-stringified blob.
  *
- * `clientInformation` holds the result of Dynamic Client Registration
- * (or a statically-known client) — written by `saveClientInformation`,
- * read by `clientInformation`.
+ * Keys:
+ *   `mcp:upstream:<name>:client` → `OAuthClientInformationFull` JSON
+ *   `mcp:upstream:<name>:tokens` → `OAuthTokens` JSON
  *
- * `tokens` holds the latest access / refresh token bundle — written by
- * `saveTokens`, read by `tokens`. The SDK persists refreshes here
- * automatically.
+ * Routing both through the secret store mirrors the Claude-side split:
+ * anything resembling a credential lives in `secrets.json`, so a future
+ * keychain swap-in covers everything in one move.
  */
-const upstreamSlotSchema = z.object({
-  clientInformation: z.unknown().optional(),
-  tokens: z.unknown().optional(),
-});
+const opaqueMetadataSchema = z.object({});
+const defineRecord = createPluginCredentialRecordFactory('mcp');
 
-const credentialsFileSchema = z.object({
-  version: z.literal(1).default(1),
-  upstreams: z.record(z.string().min(1), upstreamSlotSchema).default({}),
-});
+/** Opaque record type for both client and tokens halves. */
+type OpaqueRecord = CredentialRecord<Record<string, never>, 'blob'>;
 
-/** Validated shape of the credentials file. */
-export type CredentialsFile = z.infer<typeof credentialsFileSchema>;
-/** A single upstream's persisted slot. */
-export type UpstreamSlot = z.infer<typeof upstreamSlotSchema>;
-
-const emptyFile: CredentialsFile = { version: 1, upstreams: {} };
-
-async function ensureFile(filePath: string): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  try {
-    await fs.access(filePath);
-    return;
-  } catch {
-    // fall through to create
-  }
-  try {
-    // `wx` errors if the file exists. Two callers racing through
-    // `ensureFile` are normal under `Promise.all([withCredentials(...),
-    // withCredentials(...)])`; whichever loses the race sees `EEXIST`
-    // and treats the file as already present. The lockfile in
-    // `withCredentials` serializes subsequent reads/writes.
-    const handle = await fs.open(filePath, 'wx', 0o600);
-    try {
-      await handle.writeFile(`${JSON.stringify(emptyFile, null, 2)}\n`);
-    } finally {
-      await handle.close();
-    }
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-  }
-}
-
-async function readUnlocked(filePath: string): Promise<CredentialsFile> {
-  let raw: string;
-  try {
-    raw = await fs.readFile(filePath, 'utf8');
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return emptyFile;
-    throw err;
-  }
-  if (!raw.trim()) return emptyFile;
-  const parsed: unknown = JSON.parse(raw);
-  return credentialsFileSchema.parse(parsed);
-}
-
-async function writeAtomic(
-  filePath: string,
-  data: CredentialsFile,
-): Promise<void> {
-  const tmp = `${filePath}.tmp.${process.pid}`;
-  // `wx` + mode 0600 on the tmp file ensures that even if the rename
-  // somehow lands on a pre-existing path, we don't widen perms. The
-  // final file inherits the tmp's mode through rename.
-  const handle = await fs.open(tmp, 'wx', 0o600);
-  try {
-    await handle.writeFile(`${JSON.stringify(data, null, 2)}\n`);
-  } finally {
-    await handle.close();
-  }
-  await fs.rename(tmp, filePath);
-}
-
-/**
- * Read the credentials file without locking. Returns the empty document
- * when the file is missing. Use for read-only paths (e.g. `mcp list`);
- * mutators must go through {@link withCredentials} for atomicity.
- */
-export async function readCredentials(
-  filePath: string = credentialsFilePath(),
-): Promise<CredentialsFile> {
-  return readUnlocked(filePath);
-}
-
-/**
- * Run `mutator` against the latest credentials file under an exclusive
- * file lock and write the result back atomically. Pattern mirrors
- * `state/store.ts`'s `withState`.
- */
-export async function withCredentials<T>(
-  mutator: (file: CredentialsFile) => T | Promise<T>,
-  filePath: string = credentialsFilePath(),
-): Promise<{ file: CredentialsFile; result: T }> {
-  await ensureFile(filePath);
-  const release = await lockfile.lock(filePath, {
-    retries: { retries: 10, minTimeout: 50, maxTimeout: 500 },
-    stale: 10_000,
+function clientRecord(upstream: string): OpaqueRecord {
+  return defineRecord(`upstream:${upstream}:client`, {
+    metadataSchema: opaqueMetadataSchema,
+    secretFields: ['blob'],
   });
-  try {
-    const current = await readUnlocked(filePath);
-    const result = await mutator(current);
-    await writeAtomic(filePath, current);
-    return { file: current, result };
-  } finally {
-    await release();
-  }
+}
+
+function tokensRecord(upstream: string): OpaqueRecord {
+  return defineRecord(`upstream:${upstream}:tokens`, {
+    metadataSchema: opaqueMetadataSchema,
+    secretFields: ['blob'],
+  });
 }
 
 /**
- * Convenience helpers for single-upstream slot operations. Built on top
- * of {@link withCredentials} so they remain atomic.
+ * Public per-upstream view of the persisted state, recombining both
+ * underlying slots into the legacy shape MCP callers expect.
  */
-export async function readUpstreamSlot(
-  upstream: string,
-  filePath: string = credentialsFilePath(),
-): Promise<UpstreamSlot | undefined> {
-  const file = await readCredentials(filePath);
-  return file.upstreams[upstream];
+export interface UpstreamRecord {
+  clientInformation?: unknown;
+  tokens?: unknown;
 }
 
-export async function writeUpstreamSlot(
+function parse(value: string | undefined): unknown {
+  if (value === undefined) return undefined;
+  return JSON.parse(value) as unknown;
+}
+
+/**
+ * Read the merged client-info + tokens for `upstream`. Returns
+ * `undefined` when neither half exists; returns a partial object when
+ * one half exists and the other doesn't (e.g. registered but not yet
+ * logged in).
+ */
+export async function readUpstreamRecord(
   upstream: string,
-  slot: UpstreamSlot,
-  filePath: string = credentialsFilePath(),
+): Promise<UpstreamRecord | undefined> {
+  const [client, tokens] = await Promise.all([
+    defaultCredentialStore.read(clientRecord(upstream)),
+    defaultCredentialStore.read(tokensRecord(upstream)),
+  ]);
+  if (!client && !tokens) return undefined;
+  const out: UpstreamRecord = {};
+  if (client) out.clientInformation = parse(client.blob);
+  if (tokens) out.tokens = parse(tokens.blob);
+  return out;
+}
+
+/**
+ * Overwrite both halves of `upstream` to match `record`. Fields not
+ * present on `record` are cleared. Used by tests and by callers that
+ * want to write both halves in one go; the file-oauth-provider
+ * prefers {@link writeUpstreamClient} / {@link writeUpstreamTokens}
+ * to avoid clobbering whichever half it isn't touching.
+ */
+export async function writeUpstreamRecord(
+  upstream: string,
+  record: UpstreamRecord,
 ): Promise<void> {
-  await withCredentials((file) => {
-    file.upstreams[upstream] = slot;
-  }, filePath);
+  await (record.clientInformation === undefined
+    ? defaultCredentialStore.delete(clientRecord(upstream))
+    : defaultCredentialStore.write(clientRecord(upstream), {
+        blob: JSON.stringify(record.clientInformation),
+      }));
+  await (record.tokens === undefined
+    ? defaultCredentialStore.delete(tokensRecord(upstream))
+    : defaultCredentialStore.write(tokensRecord(upstream), {
+        blob: JSON.stringify(record.tokens),
+      }));
 }
 
-export async function deleteUpstreamSlot(
+/** Write just the client-information half. */
+export async function writeUpstreamClient(
   upstream: string,
-  filePath: string = credentialsFilePath(),
-): Promise<boolean> {
-  const { result } = await withCredentials((file) => {
-    const existed = upstream in file.upstreams;
-    // The credentials file is a small keyed record (~10 entries)
-    // written once per OAuth event; V8 fast-path concerns about
-    // dictionary mode (per the no-dynamic-delete rule) don't apply.
-    // Use object-spread to delete instead of `delete` to keep the
-    // linter happy without the runtime trade-off it warns about.
-    file.upstreams = Object.fromEntries(
-      Object.entries(file.upstreams).filter(([k]) => k !== upstream),
-    );
-    return existed;
-  }, filePath);
-  return result;
+  clientInformation: unknown,
+): Promise<void> {
+  await defaultCredentialStore.write(clientRecord(upstream), {
+    blob: JSON.stringify(clientInformation),
+  });
+}
+
+/** Write just the tokens half. */
+export async function writeUpstreamTokens(
+  upstream: string,
+  tokens: unknown,
+): Promise<void> {
+  await defaultCredentialStore.write(tokensRecord(upstream), {
+    blob: JSON.stringify(tokens),
+  });
+}
+
+/** Delete just the client-information half. */
+export async function deleteUpstreamClient(upstream: string): Promise<boolean> {
+  return defaultCredentialStore.delete(clientRecord(upstream));
+}
+
+/** Delete just the tokens half. */
+export async function deleteUpstreamTokens(upstream: string): Promise<boolean> {
+  return defaultCredentialStore.delete(tokensRecord(upstream));
+}
+
+/**
+ * Delete both halves for `upstream`. Returns `true` if either half
+ * existed; matches the legacy `deleteUpstreamRecord` semantics.
+ */
+export async function deleteUpstreamRecord(upstream: string): Promise<boolean> {
+  const [clientExisted, tokensExisted] = await Promise.all([
+    deleteUpstreamClient(upstream),
+    deleteUpstreamTokens(upstream),
+  ]);
+  return clientExisted || tokensExisted;
 }

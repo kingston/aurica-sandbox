@@ -119,7 +119,7 @@ export async function runUpdate(
   // the repo without needing `cd $AURICA_PROJECT_DIR`.
   const config = await loadSandboxConfig(projectDir);
   const linuxUser = process.env.USER ?? 'sandbox';
-  const expanded = deriveFromConfig(config, {
+  const expanded = await deriveFromConfig(config, {
     user: linuxUser,
     sandboxName: name,
     authSecret: entry.authSecret,

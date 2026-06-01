@@ -652,7 +652,7 @@ describe('applyPolicies — rewrite-url', () => {
       'POST',
       {},
       resolver,
-      '/github/mcp?x=1',
+      { pathWithQuery: '/github/mcp?x=1' },
     );
     expect(result.outcome).toBe('rewrite');
     if (result.outcome !== 'rewrite') throw new Error('unreachable');
@@ -686,7 +686,7 @@ describe('applyPolicies — rewrite-url', () => {
       'POST',
       headers,
       resolver,
-      '/upstream',
+      { pathWithQuery: '/upstream' },
     );
     expect(result.outcome).toBe('rewrite');
     expect(headers.Authorization).toBe('Bearer <resolved:env:UPSTREAM_TOKEN>');
@@ -734,7 +734,7 @@ describe('applyPolicies — audit fields', () => {
     expect(headers.Authorization).toBe('Bearer keep-me');
   });
 
-  it('pass with applied mutations records each one in order, omitting no-ops', async () => {
+  it('pass records every evaluated mutation in order, applied and skipped alike', async () => {
     const policy: ProxyPolicy = {
       id: 'multi-mut',
       domain: 'api.github.com',
@@ -765,12 +765,18 @@ describe('applyPolicies — audit fields', () => {
     if (result.outcome !== 'pass') throw new Error('unreachable');
     expect(result.matchedPolicyId).toBe('multi-mut');
     expect(result.appliedMutations).toEqual([
-      { kind: 'set-header', header: 'X-A' },
-      { kind: 'replace-header', header: 'Authorization' },
+      { kind: 'set-header', target: 'X-A', status: 'applied' },
+      {
+        kind: 'remove-header',
+        target: 'X-Absent',
+        status: 'skipped',
+        reason: 'header not present',
+      },
+      { kind: 'replace-header', target: 'Authorization', status: 'applied' },
     ]);
   });
 
-  it('replace-header whose `from` did not match is a no-op and not recorded', async () => {
+  it('replace-header whose `from` did not match records a skipped mutation', async () => {
     const policy: ProxyPolicy = {
       id: 'no-match',
       domain: 'api.github.com',
@@ -795,7 +801,14 @@ describe('applyPolicies — audit fields', () => {
       headers,
       resolver,
     );
-    expect(result.appliedMutations).toEqual([]);
+    expect(result.appliedMutations).toEqual([
+      {
+        kind: 'replace-header',
+        target: 'Authorization',
+        status: 'skipped',
+        reason: 'from substring not found in header value',
+      },
+    ]);
     expect(headers.Authorization).toBe('Bearer something-else');
   });
 
@@ -821,7 +834,7 @@ describe('applyPolicies — audit fields', () => {
     if (result.outcome !== 'rewrite') throw new Error('unreachable');
     expect(result.matchedPolicyId).toBe('mcp-rewrite');
     expect(result.appliedMutations).toEqual([
-      { kind: 'set-header', header: 'X-Auth' },
+      { kind: 'set-header', target: 'X-Auth', status: 'applied' },
     ]);
   });
 
@@ -846,7 +859,7 @@ describe('applyPolicies — audit fields', () => {
       resolver,
     );
     expect(result.appliedMutations).toEqual([
-      { kind: 'remove-header', header: 'X-Drop' },
+      { kind: 'remove-header', target: 'X-Drop', status: 'applied' },
     ]);
     expect(headers['X-Drop']).toBeUndefined();
   });

@@ -5,7 +5,7 @@ import path from 'node:path';
 import type { OAuthClientMetadata } from '@modelcontextprotocol/sdk/shared/auth.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { readUpstreamSlot } from './credentials-store.js';
+import { readUpstreamRecord } from './credentials-store.js';
 import { FileOAuthProvider } from './file-oauth-provider.js';
 
 const clientMetadata: OAuthClientMetadata = {
@@ -18,19 +18,22 @@ const clientMetadata: OAuthClientMetadata = {
 
 describe('FileOAuthProvider', () => {
   let dir: string;
-  let file: string;
   let captured: URL[];
   let provider: FileOAuthProvider;
+  let prevHome: string | undefined;
 
   beforeEach(async () => {
     dir = await fs.mkdtemp(path.join(os.tmpdir(), 'aurica-oauth-'));
-    file = path.join(dir, 'credentials.json');
+    // Redirect both metadata.json and secrets.json into the tempdir by
+    // pointing AURICA_HOME at it; `paths.ts` appends `/sandbox` so this
+    // gives us a fully isolated store per test.
+    prevHome = process.env.AURICA_HOME;
+    process.env.AURICA_HOME = dir;
     captured = [];
     provider = new FileOAuthProvider({
       upstream: 'github',
       redirectUrl: 'http://127.0.0.1:54321/callback',
       clientMetadata,
-      credentialsPath: file,
       onAuthorizationUrl: (url) => {
         captured.push(url);
       },
@@ -38,6 +41,11 @@ describe('FileOAuthProvider', () => {
   });
 
   afterEach(async () => {
+    if (prevHome === undefined) {
+      delete process.env.AURICA_HOME;
+    } else {
+      process.env.AURICA_HOME = prevHome;
+    }
     await fs.rm(dir, { recursive: true, force: true });
   });
 
@@ -51,7 +59,7 @@ describe('FileOAuthProvider', () => {
       client_id: 'abc',
       redirect_uris: ['http://127.0.0.1:54321/callback'],
     });
-    const slot = await readUpstreamSlot('github', file);
+    const slot = await readUpstreamRecord('github');
     expect(slot?.clientInformation).toMatchObject({ client_id: 'abc' });
   });
 
@@ -86,7 +94,7 @@ describe('FileOAuthProvider', () => {
       redirect_uris: ['http://127.0.0.1:54321/callback'],
     });
     await provider.invalidateCredentials('all');
-    const slot = await readUpstreamSlot('github', file);
+    const slot = await readUpstreamRecord('github');
     expect(slot).toBeUndefined();
   });
 
@@ -100,7 +108,7 @@ describe('FileOAuthProvider', () => {
       token_type: 'bearer',
     });
     await provider.invalidateCredentials('tokens');
-    const slot = await readUpstreamSlot('github', file);
+    const slot = await readUpstreamRecord('github');
     expect(slot?.clientInformation).toBeDefined();
     expect(slot?.tokens).toBeUndefined();
   });
@@ -110,7 +118,6 @@ describe('FileOAuthProvider', () => {
       upstream: 'linear',
       redirectUrl: 'http://127.0.0.1:54322/callback',
       clientMetadata,
-      credentialsPath: file,
       onAuthorizationUrl: () => undefined,
     });
     await provider.saveTokens({

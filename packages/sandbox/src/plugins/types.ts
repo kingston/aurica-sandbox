@@ -135,7 +135,16 @@ export interface SandboxPlugin<
    * pick out the plugins that do declare a user schema.
    */
   userConfigSchema: U;
-  initialize(ctx: PluginInitContext<U, P>): InitializedPlugin;
+  /**
+   * Plugins may return synchronously or asynchronously. Most do the
+   * former (pure computation over the config block); plugins that need
+   * to read host state — e.g. `claude-code` peeking at its OAuth slot
+   * to decide whether to seed `~/.claude/.credentials.json` — return a
+   * promise. `expandPlugins` awaits both shapes uniformly.
+   */
+  initialize(
+    ctx: PluginInitContext<U, P>,
+  ): InitializedPlugin | Promise<InitializedPlugin>;
 
   /**
    * Register CLI subcommands. Called once at CLI startup, regardless of

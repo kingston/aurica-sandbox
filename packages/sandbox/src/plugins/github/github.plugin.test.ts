@@ -36,8 +36,8 @@ function blockPolicies(policies: readonly ProxyPolicy[]): ProxyPolicy[] {
   return policies.filter((p) => p.action.type === 'block');
 }
 
-describe('expandPlugins — github', () => {
-  it('emits domains, default fetch+push policies, and commands for one github plugin', () => {
+describe('githubPlugin', () => {
+  it('emits domains, default fetch+push policies, and commands for one github plugin', async () => {
     const project: ProjectPlugins = {
       github: {
         username: 'x-access-token',
@@ -45,7 +45,7 @@ describe('expandPlugins — github', () => {
         tokenSource: 'env:GITHUB_TOKEN',
       },
     };
-    const expanded = expandPlugins(project, emptyUser, ctx);
+    const expanded = await expandPlugins(project, emptyUser, ctx);
 
     expect(new Set(expanded.domains)).toEqual(
       new Set([
@@ -172,7 +172,7 @@ describe('expandPlugins — github', () => {
     expect(expanded.bootstrapScript).toMatch(/store\|erase\) exit 0/);
   });
 
-  it('expands multiple repos into per-repo allow policies and one credentials write', () => {
+  it('expands multiple repos into per-repo allow policies and one credentials write', async () => {
     const project: ProjectPlugins = {
       github: {
         username: 'x-access-token',
@@ -180,7 +180,7 @@ describe('expandPlugins — github', () => {
         tokenSource: 'env:GITHUB_TOKEN',
       },
     };
-    const expanded = expandPlugins(project, emptyUser, ctx);
+    const expanded = await expandPlugins(project, emptyUser, ctx);
 
     expect(expanded.policies).toHaveLength(5);
     expect(allowPolicies(expanded.policies)).toHaveLength(5);
@@ -212,7 +212,7 @@ describe('expandPlugins — github', () => {
     ]);
   });
 
-  it('mirrors project.user into the VM as `git config --global user.{name,email}`', () => {
+  it('mirrors project.user into the VM as `git config --global user.{name,email}`', async () => {
     const project: ProjectPlugins = {
       github: {
         username: 'x-access-token',
@@ -221,7 +221,7 @@ describe('expandPlugins — github', () => {
         tokenSource: 'env:GITHUB_TOKEN',
       },
     };
-    const expanded = expandPlugins(project, emptyUser, ctx);
+    const expanded = await expandPlugins(project, emptyUser, ctx);
 
     expect(expanded.commands).toHaveLength(7);
     const nameCmd = expanded.commands.find((c) => c.argv.includes('user.name'));
@@ -238,7 +238,7 @@ describe('expandPlugins — github', () => {
     });
   });
 
-  it('falls back to user-level defaultUser when project omits user', () => {
+  it('falls back to user-level defaultUser when project omits user', async () => {
     const project: ProjectPlugins = {
       github: {
         username: 'x-access-token',
@@ -251,12 +251,12 @@ describe('expandPlugins — github', () => {
         defaultUser: { name: 'Grace Hopper', email: 'grace@example.com' },
       },
     };
-    const expanded = expandPlugins(project, user, ctx);
+    const expanded = await expandPlugins(project, user, ctx);
     const nameCmd = expanded.commands.find((c) => c.argv.includes('user.name'));
     expect(nameCmd?.argv).toContain('Grace Hopper');
   });
 
-  it('emits no user-identity commands when neither layer provides user', () => {
+  it('emits no user-identity commands when neither layer provides user', async () => {
     const project: ProjectPlugins = {
       github: {
         username: 'x-access-token',
@@ -264,7 +264,7 @@ describe('expandPlugins — github', () => {
         tokenSource: 'env:GITHUB_TOKEN',
       },
     };
-    const expanded = expandPlugins(project, emptyUser, ctx);
+    const expanded = await expandPlugins(project, emptyUser, ctx);
     const argvs = expanded.commands.map((c) => c.argv);
     expect(
       argvs.some(
@@ -273,7 +273,7 @@ describe('expandPlugins — github', () => {
     ).toBe(false);
   });
 
-  it('emits no block policies — unmatched paths fall through to the host allowlist', () => {
+  it('emits no block policies — unmatched paths fall through to the host allowlist', async () => {
     const project: ProjectPlugins = {
       github: {
         username: 'x-access-token',
@@ -281,13 +281,59 @@ describe('expandPlugins — github', () => {
         tokenSource: 'env:GITHUB_TOKEN',
       },
     };
-    const expanded = expandPlugins(project, emptyUser, ctx);
+    const expanded = await expandPlugins(project, emptyUser, ctx);
     expect(blockPolicies(expanded.policies)).toHaveLength(0);
+  });
+
+  it('derives a unique placeholder per sandbox (authSecret-scoped)', async () => {
+    const plugins: ProjectPlugins = {
+      github: {
+        username: 'x-access-token',
+        repositories: [{ name: 'foo/bar' }],
+        tokenSource: 'env:GITHUB_TOKEN',
+      },
+    };
+    const a = await expandPlugins(plugins, emptyUser, {
+      ...ctx,
+      authSecret: 'secret-a',
+    });
+    const b = await expandPlugins(plugins, emptyUser, {
+      ...ctx,
+      authSecret: 'secret-b',
+    });
+    const aFirst = allowPolicies(a.policies).find(
+      (p) => p.id !== 'github:api:passthrough:api.github.com',
+    );
+    const bFirst = allowPolicies(b.policies).find(
+      (p) => p.id !== 'github:api:passthrough:api.github.com',
+    );
+    if (!aFirst || !bFirst) throw new Error('expected allow policies');
+    expect(placeholderOf(aFirst)).not.toBe(placeholderOf(bFirst));
+  });
+
+  it('derives the same placeholder across calls for the same sandbox', async () => {
+    const plugins: ProjectPlugins = {
+      github: {
+        username: 'x-access-token',
+        repositories: [{ name: 'foo/bar' }],
+        tokenSource: 'env:GITHUB_TOKEN',
+      },
+    };
+    const a = await expandPlugins(plugins, emptyUser, ctx);
+    const b = await expandPlugins(plugins, emptyUser, ctx);
+    const aFirst = allowPolicies(a.policies).find(
+      (p) => p.id !== 'github:api:passthrough:api.github.com',
+    );
+    const bFirst = allowPolicies(b.policies).find(
+      (p) => p.id !== 'github:api:passthrough:api.github.com',
+    );
+    if (!aFirst || !bFirst) throw new Error('expected allow policies');
+    expect(placeholderOf(aFirst)).toBe(placeholderOf(bFirst));
   });
 });
 
-describe('expandPlugins — github readOnly', () => {
-  it('drops git-receive-pack from the github.com matchers when readOnly is true', () => {
+describe('githubPlugin — readOnly', () => {
+  it('drops git-receive-pack from the github.com matchers when readOnly is true', async () => {
     const project: ProjectPlugins = {
       github: {
         username: 'x-access-token',
@@ -295,7 +341,7 @@ describe('expandPlugins — github readOnly', () => {
         tokenSource: 'env:GITHUB_TOKEN',
       },
     };
-    const expanded = expandPlugins(project, emptyUser, ctx);
+    const expanded = await expandPlugins(project, emptyUser, ctx);
 
     const githubCom = allowPolicies(expanded.policies).find(
       (p) => p.domain === 'github.com',
@@ -315,7 +361,7 @@ describe('expandPlugins — github readOnly', () => {
     ]);
   });
 
-  it('keeps git-receive-pack when readOnly is false (the default)', () => {
+  it('keeps git-receive-pack when readOnly is false (the default)', async () => {
     const project: ProjectPlugins = {
       github: {
         username: 'x-access-token',
@@ -323,7 +369,7 @@ describe('expandPlugins — github readOnly', () => {
         tokenSource: 'env:GITHUB_TOKEN',
       },
     };
-    const expanded = expandPlugins(project, emptyUser, ctx);
+    const expanded = await expandPlugins(project, emptyUser, ctx);
     const githubCom = allowPolicies(expanded.policies).find(
       (p) => p.domain === 'github.com',
     );
@@ -338,8 +384,8 @@ describe('expandPlugins — github readOnly', () => {
   });
 });
 
-describe('expandPlugins — github api', () => {
-  it('emits a broad api.github.com allow policy when api is true', () => {
+describe('githubPlugin — api mode', () => {
+  it('emits a broad api.github.com allow policy when api is true', async () => {
     const project: ProjectPlugins = {
       github: {
         username: 'x-access-token',
@@ -348,7 +394,7 @@ describe('expandPlugins — github api', () => {
         api: true,
       },
     };
-    const expanded = expandPlugins(project, emptyUser, ctx);
+    const expanded = await expandPlugins(project, emptyUser, ctx);
 
     const allows = allowPolicies(expanded.policies);
     expect(allows).toHaveLength(3);
@@ -369,7 +415,7 @@ describe('expandPlugins — github api', () => {
     expect(hostsYamlCmd?.argv).toContain('github.com:');
   });
 
-  it('emits an unauthenticated api.github.com passthrough when api is false (the default)', () => {
+  it('emits an unauthenticated api.github.com passthrough when api is false (the default)', async () => {
     const project: ProjectPlugins = {
       github: {
         username: 'x-access-token',
@@ -377,7 +423,7 @@ describe('expandPlugins — github api', () => {
         tokenSource: 'env:GITHUB_TOKEN',
       },
     };
-    const expanded = expandPlugins(project, emptyUser, ctx);
+    const expanded = await expandPlugins(project, emptyUser, ctx);
     const apiAllow = allowPolicies(expanded.policies).find(
       (p) => p.domain === 'api.github.com',
     );
@@ -387,7 +433,7 @@ describe('expandPlugins — github api', () => {
     expect(apiAllow.action).toEqual({ type: 'allow' });
   });
 
-  it('does NOT write ~/.config/gh/hosts.yml when api is false (the default)', () => {
+  it('does NOT write ~/.config/gh/hosts.yml when api is false (the default)', async () => {
     const project: ProjectPlugins = {
       github: {
         username: 'x-access-token',
@@ -395,12 +441,181 @@ describe('expandPlugins — github api', () => {
         tokenSource: 'env:GITHUB_TOKEN',
       },
     };
-    const expanded = expandPlugins(project, emptyUser, ctx);
+    const expanded = await expandPlugins(project, emptyUser, ctx);
     const hostsYamlCmd = expanded.commands.find((c) =>
       c.argv.some(
         (s) => typeof s === 'string' && s.includes('.config/gh/hosts.yml'),
       ),
     );
     expect(hostsYamlCmd).toBeUndefined();
+  });
+});
+
+describe('githubPlugin — user-config fallback', () => {
+  it('uses user-level defaultTokenSource when project omits tokenSource', async () => {
+    const project: ProjectPlugins = {
+      github: {
+        username: 'x-access-token',
+        repositories: [{ name: 'a/b' }],
+      },
+    };
+    const user: UserPlugins = {
+      github: { defaultTokenSource: 'env:USER_TOKEN' },
+    };
+    const expanded = await expandPlugins(project, user, ctx);
+    const allowed = allowPolicies(expanded.policies).find(
+      (p) => p.id !== 'github:api:passthrough:api.github.com',
+    );
+    if (allowed?.action.type !== 'allow') {
+      throw new Error('expected allow policy');
+    }
+    const mut = allowed.action.mutations?.[0];
+    if (mut?.kind !== 'replace-header') {
+      throw new Error('expected replace-header mutation');
+    }
+    expect(mut.to).toBe('env:USER_TOKEN');
+  });
+
+  it('uses user-level defaultUsername when project omits username', async () => {
+    const project: ProjectPlugins = {
+      github: {
+        repositories: [{ name: 'a/b' }],
+        tokenSource: 'env:GH_TOKEN',
+      },
+    };
+    const user: UserPlugins = {
+      github: { defaultUsername: 'x-access-token' },
+    };
+    const expanded = await expandPlugins(project, user, ctx);
+    const credsCmd = expanded.commands.find((c) =>
+      c.argv.some((a) => a.includes('.git-credentials')),
+    );
+    expect(
+      credsCmd?.argv.some((a) => a.startsWith('https://x-access-token:')),
+    ).toBe(true);
+  });
+
+  it('project overrides user-level defaults', async () => {
+    const project: ProjectPlugins = {
+      github: {
+        username: 'project-user',
+        repositories: [{ name: 'a/b' }],
+        tokenSource: 'env:PROJECT_TOKEN',
+      },
+    };
+    const user: UserPlugins = {
+      github: {
+        defaultUsername: 'user-default',
+        defaultTokenSource: 'env:USER_TOKEN',
+      },
+    };
+    const expanded = await expandPlugins(project, user, ctx);
+    const allowed = allowPolicies(expanded.policies).find(
+      (p) => p.id !== 'github:api:passthrough:api.github.com',
+    );
+    if (allowed?.action.type !== 'allow') {
+      throw new Error('expected allow policy');
+    }
+    const mut = allowed.action.mutations?.[0];
+    if (mut?.kind !== 'replace-header') {
+      throw new Error('expected replace-header mutation');
+    }
+    expect(mut.to).toBe('env:PROJECT_TOKEN');
+  });
+
+  it('throws when neither project nor user provides tokenSource', async () => {
+    const project: ProjectPlugins = {
+      github: {
+        username: 'x-access-token',
+        repositories: [{ name: 'a/b' }],
+      },
+    };
+    await expect(expandPlugins(project, emptyUser, ctx)).rejects.toThrow(
+      /tokenSource/,
+    );
+  });
+
+  it('throws when neither project nor user provides username', async () => {
+    const project: ProjectPlugins = {
+      github: {
+        repositories: [{ name: 'a/b' }],
+        tokenSource: 'env:GH_TOKEN',
+      },
+    };
+    await expect(expandPlugins(project, emptyUser, ctx)).rejects.toThrow(
+      /username/,
+    );
+  });
+
+  it('user-level github defaults do NOT activate the plugin when the project omits it', async () => {
+    const project: ProjectPlugins = {};
+    const user: UserPlugins = {
+      github: { defaultTokenSource: 'env:USER_TOKEN' },
+    };
+    const expanded = await expandPlugins(project, user, ctx);
+    expect(expanded.domains).toEqual([]);
+    expect(expanded.policies).toEqual([]);
+    expect(expanded.commands).toEqual([]);
+  });
+});
+
+describe('githubPlugin — checkout / projectInitCwdOverride', () => {
+  it('clones every listed repo to /workspaces/<repo>, writes AURICA_PROJECT_DIR to /etc/environment, and sets projectInitCwdOverride to the first repo', async () => {
+    const project: ProjectPlugins = {
+      github: {
+        username: 'x-access-token',
+        repositories: [{ name: 'foo/bar' }],
+        tokenSource: 'env:GITHUB_TOKEN',
+      },
+    };
+    const expanded = await expandPlugins(project, emptyUser, ctx);
+
+    const cloneCmd = expanded.commands.find((c) =>
+      c.argv.some((a) => a.includes('git clone')),
+    );
+    expect(cloneCmd).toEqual({
+      user: 'default',
+      argv: [
+        'sh',
+        '-c',
+        'test -d "$2/.git" || git clone "$1" "$2"',
+        'sh',
+        'https://github.com/foo/bar.git',
+        '/workspaces/bar',
+      ],
+    });
+
+    const envCmd = expanded.commands.find((c) =>
+      c.argv.some((a) => a.includes('AURICA_PROJECT_DIR')),
+    );
+    expect(envCmd?.user).toBe('root');
+    expect(envCmd?.argv.at(-1)).toBe('/workspaces/bar');
+
+    expect(expanded.projectInitCwdOverride).toBe('/workspaces/bar');
+  });
+
+  it('clones all repositories in order and picks the first entry as the primary', async () => {
+    const project: ProjectPlugins = {
+      github: {
+        username: 'x-access-token',
+        repositories: [
+          { name: 'a/primary' },
+          { name: 'a/secondary' },
+          { name: 'a/tertiary' },
+        ],
+        tokenSource: 'env:GITHUB_TOKEN',
+      },
+    };
+    const expanded = await expandPlugins(project, emptyUser, ctx);
+
+    const cloneDests = expanded.commands
+      .filter((c) => c.argv.some((a) => a.includes('git clone')))
+      .map((c) => c.argv.at(-1));
+    expect(cloneDests).toEqual([
+      '/workspaces/primary',
+      '/workspaces/secondary',
+      '/workspaces/tertiary',
+    ]);
+    expect(expanded.projectInitCwdOverride).toBe('/workspaces/primary');
   });
 });

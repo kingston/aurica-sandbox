@@ -44,10 +44,6 @@ export function defaultProductJsonCandidates(): string[] {
  * missing/invalid `commit`, or unsupported host arch. Callers treat `null`
  * as "skip pre-warm" — domain allowlisting alone keeps remote-SSH working.
  *
- * Synchronous because the plugin-expansion pipeline (`expandPlugins`) is
- * synchronous and runs on the host at sandbox-create / proxy-reload time —
- * a brief blocking read of a small JSON file is acceptable there.
- *
  * `candidates` and `hostArch` are injectable for unit tests; defaults read
  * the real filesystem and `process.arch`.
  */

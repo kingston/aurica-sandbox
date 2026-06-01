@@ -69,6 +69,12 @@ export interface ExpandedPlugins {
   commands: PluginCommand[];
   bootstrapScript: string;
   projectInitCwdOverride?: string;
+  /**
+   * Names of the plugins the project opted into, in registry-declared order.
+   * Intended for logging (e.g. the proxy reload banner) so the domains a
+   * plugin contributed can be attributed to the plugin without listing them.
+   */
+  enabledPlugins: string[];
 }
 
 /** Context passed to `expandPlugins` and threaded into each plugin's init. */
@@ -94,15 +100,16 @@ export interface ExpandContext {
  * Throws when more than one plugin contributes a `projectInitCwdOverride`
  * — the project layer is singular by design.
  */
-export function expandPlugins(
+export async function expandPlugins(
   projectPlugins: ProjectPlugins,
   userPlugins: UserPlugins,
   ctx: ExpandContext,
-): ExpandedPlugins {
+): Promise<ExpandedPlugins> {
   const domains = new Set<string>();
   const policies: ProxyPolicy[] = [];
   const commands: PluginCommand[] = [];
   const bootstrapSnippets: string[] = [];
+  const enabledPlugins: string[] = [];
   let projectInitCwdOverride: string | undefined;
 
   for (const plugin of PLUGINS) {
@@ -110,10 +117,11 @@ export function expandPlugins(
       plugin.name
     ];
     if (projectConfig === undefined) continue;
+    enabledPlugins.push(plugin.name);
 
     const userConfig = (userPlugins as Record<string, unknown>)[plugin.name];
 
-    const initialized = plugin.initialize({
+    const initialized = await plugin.initialize({
       // The framework has already validated both blocks against the
       // plugin's schemas via `projectPluginsSchema` / `userPluginsSchema`,
       // so the casts here are sound — the plugin's `initialize` signature
@@ -147,6 +155,7 @@ export function expandPlugins(
     policies,
     commands,
     bootstrapScript: bootstrapSnippets.join('\n\n'),
+    enabledPlugins,
     ...(projectInitCwdOverride !== undefined ? { projectInitCwdOverride } : {}),
   };
 }

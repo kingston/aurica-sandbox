@@ -15,8 +15,8 @@ import { signalProxyReload } from '#src/state/signal.js';
 
 import type { CliCommandContext } from '../../types.js';
 import {
-  deleteUpstreamSlot,
-  readUpstreamSlot,
+  deleteUpstreamRecord,
+  readUpstreamRecord,
 } from '../gateway/credentials-store.js';
 import { FileOAuthProvider } from '../gateway/file-oauth-provider.js';
 import {
@@ -123,11 +123,6 @@ export async function runMcpLogin(
     loadUserConfig: CliCommandContext['loadUserConfig'];
     /** Override the default `open` browser launcher. Useful in tests. */
     openUrl?: (url: URL) => void | Promise<void>;
-    /**
-     * Override the credentials.json path. Used by tests; production
-     * callers should leave unset.
-     */
-    credentialsPath?: string;
   },
 ): Promise<void> {
   const userConfig = await options.loadUserConfig();
@@ -159,7 +154,6 @@ export async function runMcpLogin(
       upstream,
       redirectUrl: callback.url,
       clientMetadata,
-      credentialsPath: options.credentialsPath,
       onAuthorizationUrl: async (url) => {
         launchedUrl.resolve(url);
         // Echo the URL before launching the browser so the user can
@@ -217,7 +211,6 @@ export async function runMcpLogin(
  */
 export async function runMcpList(options: {
   loadUserConfig: CliCommandContext['loadUserConfig'];
-  credentialsPath?: string;
 }): Promise<void> {
   const userConfig = await options.loadUserConfig();
   const mcp = readMcpUserConfig(userConfig);
@@ -234,7 +227,7 @@ export async function runMcpList(options: {
     if (canonical.auth.type === 'bearer') {
       status = `static bearer (${canonical.auth.tokenSource})`;
     } else {
-      const slot = await readUpstreamSlot(name, options.credentialsPath);
+      const slot = await readUpstreamRecord(name);
       status = slot?.tokens
         ? 'logged in'
         : slot?.clientInformation
@@ -251,11 +244,8 @@ export async function runMcpList(options: {
  * follow-up `mcp revoke` could implement OAuth 2.0 revocation per RFC
  * 7009 if needed.
  */
-export async function runMcpLogout(
-  upstream: string,
-  options: { credentialsPath?: string } = {},
-): Promise<void> {
-  const existed = await deleteUpstreamSlot(upstream, options.credentialsPath);
+export async function runMcpLogout(upstream: string): Promise<void> {
+  const existed = await deleteUpstreamRecord(upstream);
   if (existed) {
     logger.info(`MCP upstream "${upstream}": credentials cleared`);
     // Nudge the running proxy so the relay drops any in-memory tokens it

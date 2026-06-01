@@ -29,12 +29,25 @@ export function stateFilePath(): string {
 }
 
 /**
- * Path to the file holding cached OAuth client information and access /
- * refresh tokens for upstream MCP servers. Owned by the MCP gateway; mode
- * 600.
+ * Path to the metadata half of the per-plugin credentials store. Holds
+ * non-secret record fields keyed by namespace (e.g. `claude-code:oauth`,
+ * `mcp:upstream:github`). The on-disk shape is `{ version: 2, records:
+ * Record<string, unknown> }` — record contents are opaque to the store
+ * itself; the record factory validates per-namespace.
  */
 export function credentialsFilePath(): string {
   return path.join(stateDir(), 'credentials.json');
+}
+
+/**
+ * Path to the secrets half of the per-plugin credentials store. Holds
+ * only secret material (access tokens, refresh tokens, MCP SDK token
+ * blobs) keyed by `<record-key>:<field>`. Always mode 0600 so a
+ * `KeychainSecretVault` swap-in later only relocates the same logical
+ * bytes off disk.
+ */
+export function secretsFilePath(): string {
+  return path.join(stateDir(), 'secrets.json');
 }
 
 /** Path to the per-project sandbox manifest, relative to a project dir. */

@@ -73,19 +73,21 @@ export type MatcherEntry = z.infer<typeof matcherEntrySchema>;
 
 /**
  * One mutation applied when an `allow` policy matches. Mutations are an
- * ordered array; multiple mutations on the same header run in order.
+ * ordered array; multiple mutations on the same header / body field run
+ * in order.
  *
- * - `set-header`     overwrites the header with `value` (creates if missing).
- *                    `value` may be a credential source (e.g. `env:GH_TOKEN`)
- *                    which the resolver expands at request time.
- * - `remove-header`  drops the header entirely.
- * - `replace-header` substring substitution inside the existing header
- *                    value: `from` is matched literally; `to` may be a
- *                    credential source. Optional symmetric `transform` is
- *                    applied to both `from` and `to` before
- *                    matching/substituting (preserves the existing
- *                    `Authorization: Basic <base64(user:tok)>` flow).
- *                    No-op if `from` is not present in the header value.
+ * - `set-header`        overwrites the header with `value` (creates if
+ *                       missing). `value` may be a credential source
+ *                       (e.g. `env:GH_TOKEN`) which the resolver expands
+ *                       at request time.
+ * - `remove-header`     drops the header entirely.
+ * - `replace-header`    substring substitution inside the existing header
+ *                       value: `from` is matched literally; `to` may be a
+ *                       credential source. Optional symmetric `transform`
+ *                       is applied to both `from` and `to` before
+ *                       matching/substituting (preserves the existing
+ *                       `Authorization: Basic <base64(user:tok)>` flow).
+ *                       No-op if `from` is not present in the header.
  */
 export const mutationSchema = z.discriminatedUnion('kind', [
   z.object({
@@ -110,11 +112,46 @@ export const mutationSchema = z.discriminatedUnion('kind', [
 export type Mutation = z.infer<typeof mutationSchema>;
 
 /**
+ * Response-side interceptor: capture the upstream response body of a
+ * matched request and rewrite it before forwarding to the guest. The
+ * proxy registers a `beforeResponse` hook on the matching rule when
+ * this is present.
+ *
+ * Today only one variant exists: `oauth-token-response` recognises an
+ * RFC 6749 token-grant JSON body, persists the real `access_token` /
+ * `refresh_token` into the host credential record named by `recordKey`,
+ * and rewrites the body so the guest sees `placeholders.accessToken` /
+ * `placeholders.refreshToken` + a far-future `expires_in` instead. The
+ * placeholders are the same per-sandbox strings the request-side
+ * `replace-header` swaps back to a real token on outbound requests, so
+ * the guest stays in placeholder-land permanently.
+ *
+ * `recordKey` is the namespaced record key used by the credentials store
+ * (e.g. `claude-code:oauth`). The interceptor calls
+ * `defineCredentialRecord` on that key with the same schema the
+ * consuming plugin uses.
+ */
+export const responseInterceptorSchema = z.object({
+  kind: z.literal('oauth-token-response'),
+  recordKey: z.string().min(1),
+  placeholders: z.object({
+    accessToken: z.string().min(1),
+    refreshToken: z.string().min(1),
+  }),
+});
+
+/** A response-side interceptor — see {@link responseInterceptorSchema}. */
+export type ResponseInterceptor = z.infer<typeof responseInterceptorSchema>;
+
+/**
  * Discriminated union over the actions a policy can take when it matches.
  *
  * - `allow` (default-shaped) lets the request through, optionally applying
  *   an ordered list of header mutations. Credential injection is just an
- *   `allow` policy with a single `replace-header` mutation.
+ *   `allow` policy with a single `replace-header` mutation. An optional
+ *   `interceptResponse` registers a response-side rewrite hook — used by
+ *   `subscription` mode to capture Anthropic-issued OAuth tokens off the
+ *   wire and persist them to the host store.
  * - `block` short-circuits with a 403 response. The proxy mentions the
  *   policy id in the body for audit.
  * - `rewrite-url` lets the request through but redirects it to a different
@@ -128,6 +165,7 @@ export const policyActionSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('allow'),
     mutations: z.array(mutationSchema).optional(),
+    interceptResponse: responseInterceptorSchema.optional(),
   }),
   z.object({
     type: z.literal('block'),

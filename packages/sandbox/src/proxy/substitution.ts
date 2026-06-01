@@ -3,6 +3,7 @@ import type {
   Mutation,
   ProxyPolicy,
   ProxyPolicyTransform,
+  ResponseInterceptor,
 } from '#src/config/index.js';
 
 /**
@@ -36,17 +37,53 @@ function applyTransform(
 }
 
 /**
- * A single mutation that was actually performed against a request, summarised
- * for verbose logging. The post-resolution value is intentionally omitted:
- * every `set-header` / `replace-header` value is sourced from
- * `SubstitutionResolver.resolve`, which today only accepts `<scheme>:<name>`
- * credential refs — so the value is always a secret and callers should render
- * a placeholder. Widen this type (add `value` + a discriminator) if the
- * resolver ever starts accepting literal values.
+ * A single mutation evaluated against a request, summarised for verbose
+ * logging. `status: 'applied'` means the request was actually changed;
+ * `status: 'skipped'` means the mutation matched its policy but was a
+ * no-op (typically a `replace-header` whose `from` substring wasn't
+ * present in the header value, or a `remove-header` for a missing
+ * header). Surfacing skips is load-bearing for debugging: a silent skip
+ * on a credential-substituting `replace-header` is what makes the
+ * placeholder reach the upstream as-is and 401 the request.
+ *
+ * `target` distinguishes per-kind context the log surfaces: for header
+ * mutations it's the header name.
  */
 export interface AppliedMutation {
-  kind: 'set-header' | 'remove-header' | 'replace-header';
-  header: string;
+  kind:
+    | 'set-header'
+    | 'remove-header'
+    | 'replace-header'
+    /**
+     * OAuth response-interceptor outcomes — emitted by the OAuth modules
+     * (`oauth/intercept.ts` / `oauth/refresh.ts`) and appended to the
+     * normal request's `appliedMutations` array so the verbose-mode
+     * per-request block shows what happened. `target` is the recordKey;
+     * `status` + `reason` distinguish the variants:
+     *
+     *   - `oauth-token-captured`         — applied; authorization_code response
+     *                                       was captured into the slot.
+     *   - `oauth-refresh-leader`         — applied; we minted a new placeholder
+     *                                       counter, POSTed upstream, persisted.
+     *                                       `reason` carries the new counter.
+     *   - `oauth-refresh-replay`         — applied; replayed cached body.
+     *                                       `reason` carries the inbound counter.
+     *   - `oauth-refresh-skipped`        — skipped; future-counter / slot-empty /
+     *                                       upstream-failure. `reason` explains.
+     */
+    | 'oauth-token-captured'
+    | 'oauth-refresh-leader'
+    | 'oauth-refresh-replay'
+    | 'oauth-refresh-skipped';
+  /** Header name for `*-header` kinds, slot key for OAuth kinds. */
+  target: string;
+  status: 'applied' | 'skipped';
+  /**
+   * Free-form reason for a `skipped` status, intended for verbose logs.
+   * Examples: `"header not present"`, `"from substring not found"`,
+   * `"body is not JSON"`. Omitted for `applied`.
+   */
+  reason?: string;
 }
 
 /**
@@ -71,6 +108,12 @@ export type EvaluationOutcome = (
       outcome: 'pass';
       headers: Record<string, string | string[] | undefined>;
       matchedPolicyId?: string;
+      /**
+       * Response-side interceptor declared on the matched `allow` action,
+       * if any. The host proxy hooks this into mockttp's `beforeResponse`
+       * to rewrite the upstream JSON body before forwarding to the guest.
+       */
+      interceptResponse?: ResponseInterceptor | undefined;
     }
   | {
       outcome: 'block';
@@ -96,6 +139,16 @@ export type EvaluationOutcome = (
  * Within a matching `allow` policy, mutations run in array order against
  * the same headers map.
  */
+/**
+ * Optional inputs to `applyPolicies` beyond the request line. Plain
+ * object (rather than positional args) so future additions don't churn
+ * the signature.
+ */
+export interface ApplyPoliciesOptions {
+  /** Path including query string, for `rewrite-url` target interpolation. */
+  pathWithQuery?: string;
+}
+
 export async function applyPolicies(
   policies: readonly ProxyPolicy[],
   host: string,
@@ -103,8 +156,9 @@ export async function applyPolicies(
   method: string,
   headers: Record<string, string | string[] | undefined>,
   resolver: SubstitutionResolver,
-  pathWithQuery: string = path,
+  options: ApplyPoliciesOptions = {},
 ): Promise<EvaluationOutcome> {
+  const pathWithQuery = options.pathWithQuery ?? path;
   for (const policy of policies) {
     if (!matchDomain(policy.domain, host)) continue;
     if (policy.matchers && !matchesAny(policy.matchers, path, method)) continue;
@@ -121,8 +175,9 @@ export async function applyPolicies(
     if (policy.action.type === 'rewrite-url') {
       if (policy.action.mutations) {
         for (const mutation of policy.action.mutations) {
-          const applied = await applyMutation(mutation, headers, resolver);
-          if (applied) appliedMutations.push(applied);
+          appliedMutations.push(
+            await applyMutation(mutation, headers, resolver),
+          );
         }
       }
       const url = policy.action.target.split('{path}').join(pathWithQuery);
@@ -137,8 +192,7 @@ export async function applyPolicies(
     // type === 'allow'
     if (policy.action.mutations) {
       for (const mutation of policy.action.mutations) {
-        const applied = await applyMutation(mutation, headers, resolver);
-        if (applied) appliedMutations.push(applied);
+        appliedMutations.push(await applyMutation(mutation, headers, resolver));
       }
     }
     return {
@@ -146,6 +200,7 @@ export async function applyPolicies(
       headers,
       matchedPolicyId: policy.id,
       appliedMutations,
+      interceptResponse: policy.action.interceptResponse,
     };
   }
   return { outcome: 'pass', headers, appliedMutations: [] };
@@ -191,10 +246,13 @@ function prefixMatches(path: string, prefix: string): boolean {
 }
 
 /**
- * Apply a mutation in place. Returns a summary of what happened so callers
- * can log it, or `null` when the mutation was a no-op (e.g. `remove-header`
- * for a header that isn't present, or `replace-header` whose `from` didn't
- * match).
+ * Apply a mutation in place. Always returns an {@link AppliedMutation}
+ * — `status: 'applied'` when the request was changed, `status: 'skipped'`
+ * with a `reason` when the mutation was a no-op (e.g. `remove-header`
+ * for a header that isn't present, or `replace-header` whose `from`
+ * substring wasn't found). Skips surface in the verbose log so silent
+ * substitution failures — the kind that send placeholder bearers
+ * straight to an upstream and 401 — are visible without a tcpdump.
  *
  * Mutations within a single policy must be applied sequentially: they share
  * the `headers` map by reference, so parallelising would race on writes
@@ -205,37 +263,69 @@ async function applyMutation(
   mutation: Mutation,
   headers: Record<string, string | string[] | undefined>,
   resolver: SubstitutionResolver,
-): Promise<AppliedMutation | null> {
+): Promise<AppliedMutation> {
   if (mutation.kind === 'set-header') {
     const value = await resolver.resolve(mutation.value);
     const existingKey = findHeaderKey(headers, mutation.header);
     headers[existingKey ?? mutation.header] = value;
-    return { kind: 'set-header', header: mutation.header };
+    return { kind: 'set-header', target: mutation.header, status: 'applied' };
   }
   if (mutation.kind === 'remove-header') {
     const existingKey = findHeaderKey(headers, mutation.header);
-    if (!existingKey) return null;
+    if (!existingKey) {
+      return {
+        kind: 'remove-header',
+        target: mutation.header,
+        status: 'skipped',
+        reason: 'header not present',
+      };
+    }
     headers[existingKey] = undefined;
-    return { kind: 'remove-header', header: mutation.header };
+    return {
+      kind: 'remove-header',
+      target: mutation.header,
+      status: 'applied',
+    };
   }
   // replace-header
   const headerKey = findHeaderKey(headers, mutation.header);
-  if (!headerKey) return null;
+  if (!headerKey) {
+    return {
+      kind: 'replace-header',
+      target: mutation.header,
+      status: 'skipped',
+      reason: 'header not present',
+    };
+  }
   const original = headers[headerKey];
-  if (original === undefined) return null;
+  if (original === undefined) {
+    return {
+      kind: 'replace-header',
+      target: mutation.header,
+      status: 'skipped',
+      reason: 'header not present',
+    };
+  }
   const matchValue = applyTransform(mutation.from, mutation.transform);
   const resolved = await resolver.resolve(mutation.to);
   const replacement = applyTransform(resolved, mutation.transform);
   const didReplace = Array.isArray(original)
     ? original.some((v) => v.includes(matchValue))
     : original.includes(matchValue);
-  if (!didReplace) return null;
+  if (!didReplace) {
+    return {
+      kind: 'replace-header',
+      target: mutation.header,
+      status: 'skipped',
+      reason: 'from substring not found in header value',
+    };
+  }
   headers[headerKey] = Array.isArray(original)
     ? original.map((v) =>
         v.includes(matchValue) ? v.split(matchValue).join(replacement) : v,
       )
     : original.split(matchValue).join(replacement);
-  return { kind: 'replace-header', header: mutation.header };
+  return { kind: 'replace-header', target: mutation.header, status: 'applied' };
 }
 
 function findHeaderKey(

@@ -36,8 +36,8 @@ export function parseCredentialSource(value: string): CredentialSource {
 
 /**
  * Resolves a {@link CredentialSource} to a secret string. Each provider
- * declares the single scheme it handles; the {@link CredentialCache} dispatches
- * to the matching provider.
+ * declares the single scheme it handles; the {@link CredentialResolver}
+ * dispatches to the matching provider.
  */
 export interface CredentialProvider {
   scheme: string;

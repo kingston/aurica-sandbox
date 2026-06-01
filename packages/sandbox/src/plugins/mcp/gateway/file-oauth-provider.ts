@@ -8,16 +8,21 @@ import type {
 import { logger } from '#src/logger.js';
 
 import {
-  deleteUpstreamSlot,
-  readUpstreamSlot,
-  withCredentials,
+  deleteUpstreamClient,
+  deleteUpstreamRecord,
+  deleteUpstreamTokens,
+  readUpstreamRecord,
+  writeUpstreamClient,
+  writeUpstreamTokens,
 } from './credentials-store.js';
 
 /**
  * Options for {@link FileOAuthProvider}.
  *
- * `upstream` is the key in `credentials.json`'s `upstreams` block — one
- * provider instance is scoped to exactly one upstream.
+ * `upstream` is the slot-key suffix (e.g. `github`) — one provider
+ * instance is scoped to exactly one upstream. Translates to
+ * `mcp:upstream:<upstream>:client` and `mcp:upstream:<upstream>:tokens`
+ * keys in the underlying credentials + secrets stores.
  *
  * `redirectUrl` is the host-side OAuth callback URL handed to the
  * authorization server. The login command stands up a one-shot localhost
@@ -31,15 +36,15 @@ import {
  * visit an authorization URL. In `mcp login` we open the URL in the
  * host's browser via `open`; in tests we capture it for assertion.
  *
- * `credentialsPath` overrides the default credentials.json path (used
- * exclusively by tests).
+ * The credentials + secrets store locations come from `paths.ts` via
+ * `AURICA_HOME`; tests redirect them by exporting a fresh `AURICA_HOME`
+ * in `beforeEach`.
  */
 export interface FileOAuthProviderOptions {
   upstream: string;
   redirectUrl: string;
   clientMetadata: OAuthClientMetadata;
   onAuthorizationUrl: (url: URL) => void | Promise<void>;
-  credentialsPath?: string | undefined;
 }
 
 /**
@@ -64,7 +69,6 @@ export class FileOAuthProvider implements OAuthClientProvider {
   readonly #redirectUrl: string;
   readonly #clientMetadata: OAuthClientMetadata;
   readonly #onAuthorizationUrl: (url: URL) => void | Promise<void>;
-  readonly #credentialsPath: string | undefined;
   #codeVerifier: string | undefined;
 
   constructor(opts: FileOAuthProviderOptions) {
@@ -72,7 +76,6 @@ export class FileOAuthProvider implements OAuthClientProvider {
     this.#redirectUrl = opts.redirectUrl;
     this.#clientMetadata = opts.clientMetadata;
     this.#onAuthorizationUrl = opts.onAuthorizationUrl;
-    this.#credentialsPath = opts.credentialsPath;
   }
 
   get redirectUrl(): string {
@@ -84,7 +87,7 @@ export class FileOAuthProvider implements OAuthClientProvider {
   }
 
   async clientInformation(): Promise<OAuthClientInformationMixed | undefined> {
-    const slot = await readUpstreamSlot(this.#upstream, this.#credentialsPath);
+    const slot = await readUpstreamRecord(this.#upstream);
     // Stored as `unknown` (we trust the SDK to validate when it reads).
     // Returning `undefined` triggers Dynamic Client Registration.
     return slot?.clientInformation as OAuthClientInformationMixed | undefined;
@@ -93,24 +96,16 @@ export class FileOAuthProvider implements OAuthClientProvider {
   async saveClientInformation(
     clientInformation: OAuthClientInformationMixed,
   ): Promise<void> {
-    await withCredentials((file) => {
-      const slot = file.upstreams[this.#upstream] ?? {};
-      slot.clientInformation = clientInformation;
-      file.upstreams[this.#upstream] = slot;
-    }, this.#credentialsPath);
+    await writeUpstreamClient(this.#upstream, clientInformation);
   }
 
   async tokens(): Promise<OAuthTokens | undefined> {
-    const slot = await readUpstreamSlot(this.#upstream, this.#credentialsPath);
+    const slot = await readUpstreamRecord(this.#upstream);
     return slot?.tokens as OAuthTokens | undefined;
   }
 
   async saveTokens(tokens: OAuthTokens): Promise<void> {
-    await withCredentials((file) => {
-      const slot = file.upstreams[this.#upstream] ?? {};
-      slot.tokens = tokens;
-      file.upstreams[this.#upstream] = slot;
-    }, this.#credentialsPath);
+    await writeUpstreamTokens(this.#upstream, tokens);
   }
 
   async redirectToAuthorization(authorizationUrl: URL): Promise<void> {
@@ -145,20 +140,19 @@ export class FileOAuthProvider implements OAuthClientProvider {
   ): Promise<void> {
     logger.debug(`MCP upstream ${this.#upstream}: invalidate ${scope}`);
     if (scope === 'all') {
-      await deleteUpstreamSlot(this.#upstream, this.#credentialsPath);
+      await deleteUpstreamRecord(this.#upstream);
       return;
     }
     if (scope === 'verifier') {
       this.#codeVerifier = undefined;
       return;
     }
-    if (scope === 'tokens' || scope === 'client') {
-      await withCredentials((file) => {
-        const slot = file.upstreams[this.#upstream];
-        if (!slot) return;
-        if (scope === 'tokens') slot.tokens = undefined;
-        else slot.clientInformation = undefined;
-      }, this.#credentialsPath);
+    if (scope === 'tokens') {
+      await deleteUpstreamTokens(this.#upstream);
+      return;
+    }
+    if (scope === 'client') {
+      await deleteUpstreamClient(this.#upstream);
     }
   }
 }
