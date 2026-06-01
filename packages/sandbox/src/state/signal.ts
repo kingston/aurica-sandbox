@@ -4,13 +4,22 @@ import { readState } from './store.js';
 export class ProxyNotRunningError extends Error {
   constructor() {
     super(
-      'aurica-sandbox proxy is not running. Start it with: aurica-sandbox proxy',
+      'aurica-sandbox proxy is not running. Start it with: aurica-sandbox proxy start',
     );
     this.name = 'ProxyNotRunningError';
   }
 }
 
-function isPidAlive(pid: number): boolean {
+/**
+ * Check whether a process with the given PID is alive.
+ *
+ * Uses `process.kill(pid, 0)`: on POSIX, signal 0 doesn't terminate the
+ * process but probes for its existence and our permission to signal it. If the
+ * process doesn't exist, `ESRCH` is thrown (dead); if it exists but we lack
+ * permission, `EPERM` is thrown (still alive). Returns true when the process is
+ * running or merely inaccessible to us.
+ */
+export function isPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
@@ -34,6 +43,25 @@ export async function signalProxyReload(): Promise<void> {
       /* race: process exited between alive check and kill */
     }
   }
+}
+
+/**
+ * Send SIGTERM to the running proxy so it shuts down cleanly (its handler
+ * tears down the proxy and clears `state.proxy`). Returns the PID signalled, or
+ * null if no live proxy is recorded. The caller is responsible for waiting for
+ * `state.proxy` to clear and escalating to SIGKILL if it doesn't.
+ */
+export async function signalProxyStop(): Promise<number | null> {
+  const state = await readState();
+  const pid = state.proxy?.pid;
+  if (!pid || !isPidAlive(pid)) return null;
+  try {
+    process.kill(pid, 'SIGTERM');
+  } catch {
+    /* race: process exited between alive check and kill */
+    return null;
+  }
+  return pid;
 }
 
 /**

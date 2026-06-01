@@ -1,5 +1,7 @@
 export {
   credentialsFilePath,
+  proxyLogPath,
+  proxyLogRotatedPath,
   sandboxConfigPath,
   secretsFilePath,
   stateDir,
