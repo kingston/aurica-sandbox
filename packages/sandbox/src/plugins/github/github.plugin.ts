@@ -15,22 +15,15 @@ import {
 } from './schema.js';
 
 /**
- * Hosts that github traffic legitimately reaches. The first four are auth /
- * git data hosts; `cli.github.com` is reached during the pre-lockdown
- * bootstrap to fetch the apt keyring and again when apt resolves the gh
- * package list. `*.githubusercontent.com` and `cli.github.com` are
- * intentionally excluded from per-repo authentication: paths there are
- * content hashes / package mirrors, not repo identifiers, so per-repo
- * scoping isn't meaningful. They stay in `domains` so requests aren't
- * blocked, but no token is attached.
+ * Hosts that github traffic reaches without per-repo authentication.
+ * `*.githubusercontent.com` is content-addressed (hashes / package mirrors),
+ * so per-repo scoping isn't meaningful. `cli.github.com` is only reached
+ * during pre-lockdown bootstrap and package resolution.
+ *
+ * `github.com`, `api.github.com`, and `codeload.github.com` are covered by
+ * allow policies, so they don't need to appear here.
  */
-const GITHUB_DOMAINS = [
-  'github.com',
-  'api.github.com',
-  'codeload.github.com',
-  '*.githubusercontent.com',
-  'cli.github.com',
-] as const;
+const GITHUB_DOMAINS = ['*.githubusercontent.com', 'cli.github.com'] as const;
 
 /**
  * Absolute path to the custom git credential helper installed by this

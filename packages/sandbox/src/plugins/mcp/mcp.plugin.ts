@@ -190,7 +190,7 @@ function buildInitializedPlugin(
   }));
 
   return {
-    domains: [MCP_INTERNAL_DOMAIN],
+    domains: [],
     policies,
     commands: [
       registerInternalHostCommand(),
