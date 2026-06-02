@@ -7,13 +7,12 @@ import { loadSandboxConfig } from '#src/config/index.js';
 import { logger } from '#src/logger.js';
 import { deriveFromConfig } from '#src/proxy/derive-rules.js';
 import { readState, signalProxyReload, withState } from '#src/state/index.js';
-import type { SandboxEntry } from '#src/state/index.js';
 import { statDirOrNull } from '#src/utils/path-exists.js';
 import { defaultProvider } from '#src/vm/index.js';
 import { runUpdateHooks } from '#src/vm/init/run-update.js';
 import { waitForIp } from '#src/vm/wait-for-ip.js';
 
-import { findPrimary } from './find-primary.js';
+import { resolveTarget } from './find-primary.js';
 import { ensureProxyRunning } from './proxy.js';
 
 /**
@@ -43,22 +42,7 @@ export async function runUpdate(
   await ensureProxyRunning();
 
   const state = await readState();
-  let entry: SandboxEntry | undefined;
-  if (nameArg) {
-    entry = state.sandboxes[nameArg];
-    if (!entry) {
-      throw new Error(
-        `Sandbox ${nameArg} not found. Run \`aurica-sandbox list\` to see registered sandboxes.`,
-      );
-    }
-  } else {
-    entry = findPrimary(state, projectDir);
-    if (!entry) {
-      throw new Error(
-        `No primary sandbox found for ${projectDir}. Run \`aurica-sandbox create\` first, or pass an explicit name.`,
-      );
-    }
-  }
+  const entry = resolveTarget(state, projectDir, nameArg);
 
   const name = entry.name;
   const wasStopped = entry.status === 'stopped';

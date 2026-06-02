@@ -5,6 +5,7 @@ import { readState, signalProxyReload, withState } from '#src/state/index.js';
 import { defaultProvider } from '#src/vm/index.js';
 import { waitForIp } from '#src/vm/wait-for-ip.js';
 
+import { resolveTarget } from './find-primary.js';
 import { ensureProxyRunning } from './proxy.js';
 
 /**
@@ -14,20 +15,21 @@ import { ensureProxyRunning } from './proxy.js';
  * since its init pipeline never completed (the user should re-run
  * `create --force` to destroy and recreate).
  *
+ * When `nameArg` is omitted, targets the project's primary sandbox.
+ *
  * Calls `orbctl start`, polls for an IPv4, then updates state to
  * `'running'` with the fresh IP and signals the proxy to reload its
  * allowlist.
  */
-export async function runStart(name: string): Promise<void> {
+export async function runStart(
+  projectDir: string,
+  nameArg?: string,
+): Promise<void> {
   await ensureProxyRunning();
 
   const state = await readState();
-  const entry = state.sandboxes[name];
-  if (!entry) {
-    throw new Error(
-      `Sandbox ${name} not found. Use \`aurica-sandbox create ${name}\` to create it.`,
-    );
-  }
+  const entry = resolveTarget(state, projectDir, nameArg);
+  const name = entry.name;
   if (entry.status === 'running') {
     logger.info(`${name} is already running`);
     return;
