@@ -64,10 +64,26 @@ describe('runDestroy', () => {
     await withState((s) => {
       s.sandboxes.proj = primary('proj');
     });
-    await runDestroy('proj', false);
+    await runDestroy('/tmp/proj', 'proj', false);
     const after = await readState();
     expect(after.sandboxes.proj).toBeUndefined();
     expect(defaultProvider.destroyVM).toHaveBeenCalledWith('proj');
+  });
+
+  it('defaults to the project primary when no name is given', async () => {
+    await withState((s) => {
+      s.sandboxes.proj = primary('proj');
+    });
+    await runDestroy('/tmp/proj', undefined, false);
+    const after = await readState();
+    expect(after.sandboxes.proj).toBeUndefined();
+    expect(defaultProvider.destroyVM).toHaveBeenCalledWith('proj');
+  });
+
+  it('throws when no name given and no primary exists', async () => {
+    await expect(runDestroy('/tmp/proj', undefined, false)).rejects.toThrow(
+      /No primary sandbox/,
+    );
   });
 
   it('refuses to destroy a primary with live forks without --cascade', async () => {
@@ -75,7 +91,7 @@ describe('runDestroy', () => {
       s.sandboxes.proj = primary('proj');
       s.sandboxes['proj-fork-1'] = fork('proj-fork-1', 'proj', 1);
     });
-    await expect(runDestroy('proj', false)).rejects.toThrow(
+    await expect(runDestroy('/tmp/proj', 'proj', false)).rejects.toThrow(
       /fork\(s\) still exist/,
     );
     // Nothing destroyed — the refusal happens before any VM is touched.
@@ -91,7 +107,7 @@ describe('runDestroy', () => {
       s.sandboxes['proj-fork-1'] = fork('proj-fork-1', 'proj', 1);
       s.sandboxes['proj-fork-2'] = fork('proj-fork-2', 'proj', 2);
     });
-    await runDestroy('proj', false, true);
+    await runDestroy('/tmp/proj', 'proj', false, true);
 
     const after = await readState();
     expect(after.sandboxes).toEqual({});
@@ -110,7 +126,7 @@ describe('runDestroy', () => {
       s.sandboxes.proj = primary('proj');
       s.sandboxes['proj-fork-1'] = fork('proj-fork-1', 'proj', 1);
     });
-    await runDestroy('proj-fork-1', false);
+    await runDestroy('/tmp/proj', 'proj-fork-1', false);
 
     const after = await readState();
     expect(after.sandboxes['proj-fork-1']).toBeUndefined();
@@ -120,6 +136,8 @@ describe('runDestroy', () => {
   });
 
   it('throws on an unregistered sandbox without --force', async () => {
-    await expect(runDestroy('nope', false)).rejects.toThrow(/not found/);
+    await expect(runDestroy('/tmp/proj', 'nope', false)).rejects.toThrow(
+      /not found/,
+    );
   });
 });

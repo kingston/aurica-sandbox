@@ -46,10 +46,20 @@ describe('runStop', () => {
     await withState((s) => {
       s.sandboxes.a = { ...sampleSandbox };
     });
-    await runStop('a');
+    await runStop('/tmp/proj', 'a');
     const after = await readState();
     expect(after.sandboxes.a?.status).toBe('stopped');
     expect(after.sandboxes.a?.ip).toBeNull();
+    expect(defaultProvider.stopVM).toHaveBeenCalledWith('a');
+  });
+
+  it('defaults to the project primary when no name is given', async () => {
+    await withState((s) => {
+      s.sandboxes.a = { ...sampleSandbox };
+    });
+    await runStop('/tmp/proj');
+    const after = await readState();
+    expect(after.sandboxes.a?.status).toBe('stopped');
     expect(defaultProvider.stopVM).toHaveBeenCalledWith('a');
   });
 
@@ -57,11 +67,15 @@ describe('runStop', () => {
     await withState((s) => {
       s.sandboxes.a = { ...sampleSandbox, status: 'stopped', ip: null };
     });
-    await runStop('a');
+    await runStop('/tmp/proj', 'a');
     expect(defaultProvider.stopVM).not.toHaveBeenCalled();
   });
 
   it('throws on unknown sandbox', async () => {
-    await expect(runStop('nope')).rejects.toThrow(/not found/);
+    await expect(runStop('/tmp/proj', 'nope')).rejects.toThrow(/not found/);
+  });
+
+  it('throws when no name given and no primary exists', async () => {
+    await expect(runStop('/tmp/proj')).rejects.toThrow(/No primary sandbox/);
   });
 });

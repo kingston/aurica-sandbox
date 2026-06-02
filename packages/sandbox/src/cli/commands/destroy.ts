@@ -1,7 +1,9 @@
 import ora from 'ora';
 
-import { signalProxyReload, withState } from '#src/state/index.js';
+import { readState, signalProxyReload, withState } from '#src/state/index.js';
 import { defaultProvider } from '#src/vm/index.js';
+
+import { resolveTarget } from './find-primary.js';
 
 async function destroyOne(name: string, force: boolean): Promise<void> {
   const { result: registered } = await withState((state) => {
@@ -35,19 +37,32 @@ async function destroyOne(name: string, force: boolean): Promise<void> {
 }
 
 /**
- * Unregister `name` from state and destroy the underlying VM.
+ * Unregister a sandbox from state and destroy the underlying VM.
  *
- * If `name` is a primary with live forks, the destroy is refused unless
+ * When `nameArg` is omitted, targets the project's primary sandbox. If
+ * the target is a primary with live forks, the destroy is refused unless
  * `cascade` is true, in which case all forks are destroyed first.
  *
  * With `force` true, missing state entries and VM-destroy failures are
- * tolerated — useful when state and the VM provider have drifted out of sync.
+ * tolerated — useful when state and the VM provider have drifted out of
+ * sync. In that mode an explicit `nameArg` is destroyed directly even if
+ * it isn't registered.
  */
 export async function runDestroy(
-  name: string,
+  projectDir: string,
+  nameArg: string | undefined,
   force: boolean,
   cascade = false,
 ): Promise<void> {
+  // Resolve the target. With an explicit name, keep using it verbatim so
+  // `--force` can still destroy a VM that isn't registered in state.
+  // Without a name, default to the project's primary.
+  let name = nameArg;
+  if (!name) {
+    const state = await readState();
+    name = resolveTarget(state, projectDir).name;
+  }
+
   // Check for live forks before touching anything.
   const { result: forkNames } = await withState((state) => {
     const entry = state.sandboxes[name];

@@ -135,25 +135,27 @@ program
   });
 
 program
-  .command('start <name>')
-  .description('resume a previously stopped sandbox VM')
-  .action(async (name: string) => {
-    await runStart(name);
-  });
-
-program
-  .command('stop <name>')
+  .command('start [name]')
   .description(
-    'pause a running sandbox VM (preserves disk; resume with `start`)',
+    'resume a previously stopped sandbox VM (defaults to the project primary)',
   )
-  .action(async (name: string) => {
-    await runStop(name);
+  .action(async (name: string | undefined) => {
+    await runStart(process.cwd(), name);
   });
 
 program
-  .command('destroy <name>')
+  .command('stop [name]')
   .description(
-    'destroy a sandbox (primaries with live forks require --cascade)',
+    'pause a running sandbox VM (preserves disk; resume with `start`; defaults to the project primary)',
+  )
+  .action(async (name: string | undefined) => {
+    await runStop(process.cwd(), name);
+  });
+
+program
+  .command('destroy [name]')
+  .description(
+    'destroy a sandbox (defaults to the project primary; primaries with live forks require --cascade)',
   )
   .option('-f, --force', 'destroy even if not registered', false)
   .option(
@@ -161,9 +163,14 @@ program
     'also destroy all forks when destroying a primary',
     false,
   )
-  .action(async (name: string, opts: { force: boolean; cascade: boolean }) => {
-    await runDestroy(name, opts.force, opts.cascade);
-  });
+  .action(
+    async (
+      name: string | undefined,
+      opts: { force: boolean; cascade: boolean },
+    ) => {
+      await runDestroy(process.cwd(), name, opts.force, opts.cascade);
+    },
+  );
 
 program
   .command('list')
@@ -173,22 +180,39 @@ program
   });
 
 program
-  .command('shell <name>')
-  .description('ssh into the sandbox')
-  .action(async (name: string) => {
-    const code = await runShell(name);
+  .command('shell [name]')
+  .description('ssh into the sandbox (defaults to the project primary)')
+  .action(async (name: string | undefined) => {
+    const code = await runShell(process.cwd(), name);
     process.exit(code);
   });
 
 program
-  .command('run <name> [args...]')
-  .description('run a command inside the sandbox (use -- to separate args)')
+  .command('run [name] [args...]')
+  .description(
+    'run a command inside the sandbox (defaults to the project primary; use -- to separate args)',
+  )
   .allowUnknownOption(true)
-  .action(async (name: string, args: string[]) => {
-    if (args.length === 0) {
-      throw new Error('usage: aurica-sandbox run <name> -- <cmd...>');
+  .action(async () => {
+    // Resolve name vs command from the raw argv rather than Commander's
+    // bound positionals: Commander strips `--` before binding, which makes
+    // `run -- cmd` indistinguishable from `run cmd` at the action layer.
+    // A name is recognized only when a token precedes `--`; otherwise the
+    // whole tail is the command, run against the project primary
+    // (`run -- cmd` and `run cmd` both target the primary).
+    const tail = process.argv.slice(process.argv.indexOf('run') + 1);
+    const dashIdx = tail.indexOf('--');
+    if (dashIdx > 1) {
+      throw new Error(
+        'usage: aurica-sandbox run [name] -- <cmd...> (only one name may precede `--`)',
+      );
     }
-    const code = await runRun(name, args);
+    const targetName = dashIdx > 0 ? tail[0] : undefined;
+    const commandArgv = dashIdx === -1 ? tail : tail.slice(dashIdx + 1);
+    if (commandArgv.length === 0) {
+      throw new Error('usage: aurica-sandbox run [name] -- <cmd...>');
+    }
+    const code = await runRun(process.cwd(), targetName, commandArgv);
     process.exit(code);
   });
 
