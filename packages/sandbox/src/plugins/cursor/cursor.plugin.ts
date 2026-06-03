@@ -8,6 +8,9 @@ import { cursorProjectConfigSchema } from './schema.js';
  * serves the per-commit REH tarball; `api*.cursor.sh` / `repo42.cursor.sh`
  * are the Cursor backend the REH calls at runtime; the marketplace + VS Code
  * fallback hosts cover extension installs from inside the remote window.
+ * `marketplace.cursorapi.com` resolves the extension manifest, then 302s the
+ * asset fetch to `cursor-cdn.com` (content-addressed `/openvsx_v0/...` hashes),
+ * so both are needed to install extensions like the GitHub PR extension.
  *
  * Deliberately omitted: `mobile.events.data.microsoft.com` and
  * `default.exp-tas.com`. Those carry telemetry/experiments and are expected
@@ -20,6 +23,7 @@ const CURSOR_DOMAINS = [
   'api3.cursor.sh',
   'repo42.cursor.sh',
   'marketplace.cursorapi.com',
+  'cursor-cdn.com',
   'update.code.visualstudio.com',
   'vscode.download.prss.microsoft.com',
 ] as const;
