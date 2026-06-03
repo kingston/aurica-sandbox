@@ -11,11 +11,18 @@ import { miseProjectConfigSchema } from './schema.js';
  * works out of the box without each project having to enumerate them in
  * `proxy.domains`. Opinionated by design — anyone using mise is implicitly
  * asking for these.
+ *
+ * `github.com` + `*.githubusercontent.com` back mise's aqua/github backends:
+ * tools like `pnpm` are pulled from `github.com/<org>/<repo>/releases/download/...`,
+ * which 302-redirects to `*.githubusercontent.com` (`objects.`,
+ * `release-assets.`).
  */
 const MISE_DOMAINS = [
   'mise.en.dev',
   'mise.jdx.dev',
   'mise-versions.jdx.dev',
+  'github.com',
+  '*.githubusercontent.com',
   'nodejs.org',
   'registry.npmjs.org',
   'pypi.org',
