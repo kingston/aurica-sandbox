@@ -28,6 +28,16 @@ export function stateFilePath(): string {
   return path.join(stateDir(), 'state.json');
 }
 
+/**
+ * Directory holding the host-global proxy response cache. Entries are keyed
+ * by a hash of method + URL and shared across all sandboxes, so a download
+ * pulled by one VM is served from disk to the next. No size cap or eviction
+ * today — clear this directory manually to reclaim space.
+ */
+export function cacheDir(): string {
+  return path.join(stateDir(), 'cache');
+}
+
 /** Path to the proxy daemon's log file. */
 export function proxyLogPath(): string {
   return path.join(stateDir(), 'proxy.log');

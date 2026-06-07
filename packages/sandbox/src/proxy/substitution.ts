@@ -3,6 +3,7 @@ import type {
   Mutation,
   ProxyPolicy,
   ProxyPolicyTransform,
+  ResponseCache,
   ResponseInterceptor,
 } from '#src/config/index.js';
 
@@ -74,8 +75,20 @@ export interface AppliedMutation {
     | 'oauth-token-captured'
     | 'oauth-refresh-leader'
     | 'oauth-refresh-replay'
-    | 'oauth-refresh-skipped';
-  /** Header name for `*-header` kinds, slot key for OAuth kinds. */
+    | 'oauth-refresh-skipped'
+    /**
+     * Response-cache outcomes — emitted by the host proxy when an `allow`
+     * policy carries a `cacheResponse`. `target` is the request URL.
+     *
+     *   - `cache-hit`   — applied; the body was served from the disk cache
+     *                      instead of going upstream.
+     *   - `cache-store` — applied; the upstream 200 body was written to the
+     *                      cache for the next sandbox to reuse.
+     */
+    | 'cache-hit'
+    | 'cache-store';
+  /** Header name for `*-header` kinds, slot key for OAuth kinds, URL for
+   * cache kinds. */
   target: string;
   status: 'applied' | 'skipped';
   /**
@@ -114,6 +127,12 @@ export type EvaluationOutcome = (
        * to rewrite the upstream JSON body before forwarding to the guest.
        */
       interceptResponse?: ResponseInterceptor | undefined;
+      /**
+       * Response cache directive declared on the matched `allow` action, if
+       * any. The host proxy serves a cached body on a GET hit, or stores the
+       * upstream 200 response for reuse on a miss.
+       */
+      cacheResponse?: ResponseCache | undefined;
     }
   | {
       outcome: 'block';
@@ -201,6 +220,7 @@ export async function applyPolicies(
       matchedPolicyId: policy.id,
       appliedMutations,
       interceptResponse: policy.action.interceptResponse,
+      cacheResponse: policy.action.cacheResponse,
     };
   }
   return { outcome: 'pass', headers, appliedMutations: [] };

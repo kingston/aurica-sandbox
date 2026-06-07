@@ -1,4 +1,5 @@
 export {
+  cacheDir,
   credentialsFilePath,
   proxyLogPath,
   proxyLogRotatedPath,
@@ -17,6 +18,7 @@ export {
   policyActionSchema,
   proxyPolicySchema,
   proxyPolicyTransformSchema,
+  responseCacheSchema,
   sandboxConfigSchema,
 } from './sandbox.js';
 export type {
@@ -26,6 +28,7 @@ export type {
   PolicyAction,
   ProxyPolicy,
   ProxyPolicyTransform,
+  ResponseCache,
   ResponseInterceptor,
   SandboxConfig,
 } from './sandbox.js';

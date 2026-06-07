@@ -1,7 +1,24 @@
-import type { PluginCommand, SandboxPlugin } from '../types.js';
-import * as hostCursor from './host-cursor.js';
-import type { HostCursor } from './host-cursor.js';
+import type { ProxyPolicy } from '#src/config/index.js';
+
+import type { SandboxPlugin } from '../types.js';
 import { cursorProjectConfigSchema } from './schema.js';
+
+/**
+ * Cache the Cursor REH tarball host-globally across sandboxes. The download
+ * URL is content-addressed (a 40-hex commit hash in the path under
+ * `/production/`), so the bytes are immutable, public, and unauthenticated —
+ * safe to serve from a shared cache. The in-VM pre-warm and the user's first
+ * remote-SSH connect both go through the proxy, so the first sandbox populates
+ * the cache and every later one serves the ~80 MB tarball from disk.
+ */
+const CURSOR_REH_CACHE_POLICY: ProxyPolicy = {
+  id: 'cursor:reh-download-cache',
+  description:
+    'Cache the content-addressed Cursor REH tarball across sandboxes',
+  domain: 'downloads.cursor.com',
+  matchers: [{ prefix: '/production/', methods: ['GET'] }],
+  action: { type: 'allow', cacheResponse: { ttlSeconds: 7 * 24 * 60 * 60 } },
+};
 
 /**
  * Hosts Cursor remote-SSH reaches from inside the VM. `downloads.cursor.com`
@@ -29,57 +46,11 @@ const CURSOR_DOMAINS = [
 ] as const;
 
 /**
- * Build the post-lockdown command that pre-warms
- * `~/.cursor-server/bin/<commit>/` with the matching REH tarball so the
- * user's first remote-SSH connect skips the ~80 MB download.
- *
- * Runs as the default user (the REH server lives in the user's home, not
- * a root-owned location) and goes through the proxy — `downloads.cursor.com`
- * is in the plugin's domain allowlist, and the VM's CA bundle already
- * trusts the proxy. The download is skipped when the per-commit cache dir
- * is already populated, so re-running init on an existing VM is cheap.
- *
- * `commit` and `arch` flow in as positional args (`$1`, `$2`), so the
- * shell snippet never interpolates either value into its body. `commit`
- * is strictly validated as 40 hex chars and `arch` is a closed enum, so
- * neither is attacker-controlled in any case.
- */
-function cursorRehPrewarmCommand(host: HostCursor): PluginCommand {
-  return {
-    user: 'default',
-    argv: [
-      'sh',
-      '-c',
-      [
-        'set -eu',
-        'commit="$1"',
-        'arch="$2"',
-        'dest="$HOME/.cursor-server/bin/$commit"',
-        // Skip when the binary's already there — re-init is idempotent.
-        'if [ -x "$dest/bin/cursor-server" ]; then exit 0; fi',
-        'mkdir -p "$dest"',
-        'tmp=$(mktemp -d)',
-        'trap \'rm -rf "$tmp"\' EXIT',
-        'curl -fsSL "https://downloads.cursor.com/production/$commit/linux/$arch/cursor-reh-linux-$arch.tar.gz" -o "$tmp/reh.tar.gz"',
-        'tar -xzf "$tmp/reh.tar.gz" -C "$dest" --strip-components=1',
-      ].join(' && '),
-      'sh',
-      host.commit,
-      host.arch,
-    ],
-  };
-}
-
-/**
- * Cursor plugin. Always contributes the Cursor remote-SSH domain
- * allowlist. When a host `Cursor.app` is detectable at sandbox-create
- * time, additionally emits a post-lockdown command that pre-warms the
- * matching REH server inside the VM (running as the default user, via
- * the proxy).
- *
- * Detection failure (no Cursor installed, unsupported host arch, etc.)
- * is not an error — remote-SSH still works on first connect via the
- * `downloads.cursor.com` allowlist; pre-warm is a latency optimization.
+ * Cursor plugin. Contributes the Cursor remote-SSH domain allowlist plus a
+ * response-cache policy for the REH tarball, so the first sandbox to connect
+ * populates the host-global cache and every later one serves the ~80 MB
+ * download from disk. The user's first remote-SSH connect fetches the REH
+ * server on demand through the proxy (cached after the first download).
  */
 export const cursorPlugin: SandboxPlugin<
   undefined,
@@ -89,11 +60,10 @@ export const cursorPlugin: SandboxPlugin<
   projectConfigSchema: cursorProjectConfigSchema,
   userConfigSchema: undefined,
   initialize() {
-    const host = hostCursor.readHostCursor();
     return {
       domains: [...CURSOR_DOMAINS],
-      policies: [],
-      commands: host ? [cursorRehPrewarmCommand(host)] : [],
+      policies: [CURSOR_REH_CACHE_POLICY],
+      commands: [],
     };
   },
 };
