@@ -20,6 +20,7 @@ export {
   policyActionSchema,
   proxyPolicySchema,
   proxyPolicyTransformSchema,
+  responseCacheSchema,
   responseInterceptorSchema,
 } from './proxy-policy.js';
 export type {
@@ -29,6 +30,7 @@ export type {
   PolicyAction,
   ProxyPolicy,
   ProxyPolicyTransform,
+  ResponseCache,
   ResponseInterceptor,
 } from './proxy-policy.js';
 

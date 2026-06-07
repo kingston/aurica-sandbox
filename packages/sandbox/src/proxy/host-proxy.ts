@@ -1,7 +1,11 @@
 import { getLocal } from 'mockttp';
 import type { CompletedRequest, Mockttp } from 'mockttp';
 
-import type { ProxyPolicy, ResponseInterceptor } from '#src/config/index.js';
+import type {
+  ProxyPolicy,
+  ResponseCache,
+  ResponseInterceptor,
+} from '#src/config/index.js';
 import { logger } from '#src/logger.js';
 
 import { ensureCA } from './ca.js';
@@ -9,6 +13,7 @@ import {
   applyOAuthTokenInterceptor,
   tryShortCircuitRefresh,
 } from './oauth/intercept.js';
+import { readCache, writeCache } from './response-cache.js';
 import { applyPolicies, matchDomain } from './substitution.js';
 import type {
   AppliedMutation,
@@ -319,6 +324,16 @@ export class HostProxy {
     // every reply so the map stays bounded.
     const pendingInterceptors = new Map<string, ResponseInterceptor>();
 
+    // Bridges a request-side cache miss (an `allow` policy carried a
+    // `cacheResponse` and no fresh entry existed) to the response-side hook
+    // that stores the upstream 200 body. Keyed by mockttp's per-request `id`;
+    // `beforeResponse` deletes its entry on every reply so the map stays
+    // bounded. Stores the request URL + TTL so the response side has both.
+    const pendingCaches = new Map<
+      string,
+      { url: string; cacheResponse: ResponseCache }
+    >();
+
     // A single rule handles every request. The registration map (and each
     // registration's policies/allowlist) is read live here, so register/
     // unregister take effect on the next request without rebuilding rules.
@@ -434,6 +449,44 @@ export class HostProxy {
           }
           pendingInterceptors.set(req.id, result.interceptResponse);
         }
+        if (
+          result.outcome === 'pass' &&
+          result.cacheResponse !== undefined &&
+          parts.method.toUpperCase() === 'GET'
+        ) {
+          // Hit: serve the stored bytes verbatim and skip upstream. `rawBody`
+          // is sent without re-encoding, and the stored headers carry the
+          // original `content-encoding`, so the guest decodes correctly.
+          const hit = await readCache('GET', req.url);
+          if (hit !== null) {
+            if (this.verboseLogger) {
+              this.verboseLogger({
+                type: 'mutations-append',
+                id: req.id,
+                mutations: [
+                  {
+                    kind: 'cache-hit',
+                    target: req.url,
+                    status: 'applied',
+                    reason: `${hit.body.length} bytes`,
+                  },
+                ],
+              });
+            }
+            return {
+              response: {
+                statusCode: hit.statusCode,
+                headers: hit.headers,
+                rawBody: hit.body,
+              },
+            };
+          }
+          // Miss: forward upstream and store the 200 in `beforeResponse`.
+          pendingCaches.set(req.id, {
+            url: req.url,
+            cacheResponse: result.cacheResponse,
+          });
+        }
         if (result.outcome === 'rewrite') {
           // Strip the guest's Host header so mockttp derives a fresh
           // one from the rewritten URL. Per its docs, passing a
@@ -457,6 +510,45 @@ export class HostProxy {
         };
       },
       beforeResponse: async (res) => {
+        const pendingCache = pendingCaches.get(res.id);
+        if (pendingCache !== undefined) {
+          pendingCaches.delete(res.id);
+          // Store the raw on-the-wire bytes + headers verbatim so a later hit
+          // replays them without re-encoding. `writeCache` is GET + 200 only,
+          // so a non-200 miss simply isn't cached and the guest still gets it.
+          if (res.statusCode === 200) {
+            try {
+              await writeCache('GET', pendingCache.url, {
+                statusCode: res.statusCode,
+                headers: res.headers,
+                body: res.body.buffer,
+                ttlSeconds: pendingCache.cacheResponse.ttlSeconds,
+              });
+              if (this.verboseLogger) {
+                this.verboseLogger({
+                  type: 'mutations-append',
+                  id: res.id,
+                  mutations: [
+                    {
+                      kind: 'cache-store',
+                      target: pendingCache.url,
+                      status: 'applied',
+                      reason: `${res.body.buffer.length} bytes`,
+                    },
+                  ],
+                });
+              }
+            } catch (err) {
+              // A failed store must never break the response the guest gets;
+              // log and forward unchanged.
+              logger.warn(
+                `response-cache: failed to store ${pendingCache.url}: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            }
+          }
+          // The cache never rewrites the body the guest receives.
+        }
+
         const interceptor = pendingInterceptors.get(res.id);
         if (interceptor === undefined) return undefined;
         pendingInterceptors.delete(res.id);

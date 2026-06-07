@@ -143,6 +143,34 @@ export const responseInterceptorSchema = z.object({
 /** A response-side interceptor — see {@link responseInterceptorSchema}. */
 export type ResponseInterceptor = z.infer<typeof responseInterceptorSchema>;
 
+/** Default cache TTL: 7 days. Content-addressed URLs never change, so a long
+ * TTL is safe and maximises hits across sandbox runs. */
+const DEFAULT_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60;
+
+/**
+ * Response cache directive on an `allow` action. When present and the request
+ * is a `GET`, the proxy serves a previously-cached body from the host-global
+ * disk cache instead of going upstream; on a miss, it stores the upstream
+ * `200` response (raw bytes + headers) for the next sandbox to reuse.
+ *
+ * The cache is keyed by method + full URL and is **shared across all
+ * sandboxes** — VM #2 serves the bytes VM #1 downloaded. Because of that,
+ * only attach this to policies whose responses are **public, unauthenticated,
+ * and immutable** (ideally content-addressed, e.g. a hash in the path). A
+ * response that varies by `Authorization` or per-user state would leak across
+ * sandboxes. Only `GET` requests with a `200` status are ever cached.
+ *
+ * `ttlSeconds` bounds staleness; defaults to 7 days. There is no size cap or
+ * eviction today — the cache grows unbounded under the state dir; clear it
+ * manually if needed.
+ */
+export const responseCacheSchema = z.object({
+  ttlSeconds: z.number().int().positive().default(DEFAULT_CACHE_TTL_SECONDS),
+});
+
+/** A response cache directive — see {@link responseCacheSchema}. */
+export type ResponseCache = z.infer<typeof responseCacheSchema>;
+
 /**
  * Discriminated union over the actions a policy can take when it matches.
  *
@@ -151,7 +179,9 @@ export type ResponseInterceptor = z.infer<typeof responseInterceptorSchema>;
  *   `allow` policy with a single `replace-header` mutation. An optional
  *   `interceptResponse` registers a response-side rewrite hook — used by
  *   `subscription` mode to capture Anthropic-issued OAuth tokens off the
- *   wire and persist them to the host store.
+ *   wire and persist them to the host store. An optional `cacheResponse`
+ *   serves/stores the response from a host-global disk cache (GET + 200
+ *   only) — see {@link responseCacheSchema}.
  * - `block` short-circuits with a 403 response. The proxy mentions the
  *   policy id in the body for audit.
  * - `rewrite-url` lets the request through but redirects it to a different
@@ -166,6 +196,7 @@ export const policyActionSchema = z.discriminatedUnion('type', [
     type: z.literal('allow'),
     mutations: z.array(mutationSchema).optional(),
     interceptResponse: responseInterceptorSchema.optional(),
+    cacheResponse: responseCacheSchema.optional(),
   }),
   z.object({
     type: z.literal('block'),

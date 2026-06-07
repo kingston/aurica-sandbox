@@ -15,6 +15,7 @@ import {
 } from 'vitest';
 
 import { HostProxy } from './host-proxy.js';
+import { readCache } from './response-cache.js';
 
 interface Upstream {
   port: number;
@@ -239,6 +240,173 @@ describe('HostProxy (mockttp-backed)', () => {
         ],
       });
     }
+  });
+});
+
+describe('HostProxy response cache', () => {
+  let dir: string;
+  let originalAuricaHome: string | undefined;
+  let proxy: HostProxy;
+  let addr: { host: string; port: number };
+  let hits: number;
+  let server: http.Server;
+  let upstreamPort: number;
+
+  beforeAll(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'aurica-proxy-cache-'));
+    originalAuricaHome = process.env.AURICA_HOME;
+    process.env.AURICA_HOME = dir;
+
+    // Upstream that counts requests and returns a body unique per call, so a
+    // cache hit is detectable both by the unchanged hit count and the stable
+    // body across calls.
+    hits = 0;
+    server = http.createServer((_req, res) => {
+      hits += 1;
+      res.writeHead(200, { 'content-type': 'application/octet-stream' });
+      res.end(`body-${hits}`);
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    upstreamPort = (server.address() as AddressInfo).port;
+
+    proxy = await HostProxy.create({
+      resolver: { resolve: () => Promise.reject(new Error('unused')) },
+    });
+    proxy.register('cache-test', {
+      sourceIp: '127.0.0.1',
+      domains: ['127.0.0.1'],
+      policies: [
+        {
+          id: 'cache-policy',
+          domain: '127.0.0.1',
+          matchers: [{ prefix: '/dl', methods: ['GET'] }],
+          action: { type: 'allow', cacheResponse: { ttlSeconds: 3600 } },
+        },
+      ],
+    });
+    addr = await proxy.listen();
+  }, 30_000);
+
+  afterAll(async () => {
+    await proxy.close();
+    await new Promise<void>((r) => {
+      server.close(() => {
+        r();
+      });
+    });
+    if (originalAuricaHome === undefined) delete process.env.AURICA_HOME;
+    else process.env.AURICA_HOME = originalAuricaHome;
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('serves the second matching GET from cache without re-hitting upstream', async () => {
+    const url = `http://127.0.0.1:${upstreamPort}/dl/artifact`;
+    const first = await fetchViaProxy(addr.host, addr.port, url, {});
+    expect(first.status).toBe(200);
+    expect(first.body).toBe('body-1');
+    expect(hits).toBe(1);
+
+    const second = await fetchViaProxy(addr.host, addr.port, url, {});
+    expect(second.status).toBe(200);
+    // Same bytes as the first call, and upstream was not hit again.
+    expect(second.body).toBe('body-1');
+    expect(hits).toBe(1);
+  });
+
+  it('does not cache a non-matching path', async () => {
+    const url = `http://127.0.0.1:${upstreamPort}/other`;
+    const first = await fetchViaProxy(addr.host, addr.port, url, {});
+    const second = await fetchViaProxy(addr.host, addr.port, url, {});
+    expect(first.body).not.toBe(second.body);
+    expect(first.body).toMatch(/^body-\d+$/);
+  });
+});
+
+describe('HostProxy response cache (gzip content-encoding)', () => {
+  let dir: string;
+  let originalAuricaHome: string | undefined;
+  let proxy: HostProxy;
+  let addr: { host: string; port: number };
+  let hits: number;
+  let server: http.Server;
+  let upstreamPort: number;
+  const payload = 'the-real-decoded-payload';
+
+  beforeAll(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'aurica-proxy-gz-'));
+    originalAuricaHome = process.env.AURICA_HOME;
+    process.env.AURICA_HOME = dir;
+
+    // Upstream that gzip-encodes its body, so the cache must store the raw
+    // encoded bytes + the `content-encoding: gzip` header and replay both
+    // verbatim for the guest to decode correctly on a hit.
+    const { gzipSync } = await import('node:zlib');
+    const encoded = gzipSync(Buffer.from(payload));
+    hits = 0;
+    server = http.createServer((_req, res) => {
+      hits += 1;
+      res.writeHead(200, {
+        'content-type': 'text/plain',
+        'content-encoding': 'gzip',
+      });
+      res.end(encoded);
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    upstreamPort = (server.address() as AddressInfo).port;
+
+    proxy = await HostProxy.create({
+      resolver: { resolve: () => Promise.reject(new Error('unused')) },
+    });
+    proxy.register('gz-test', {
+      sourceIp: '127.0.0.1',
+      domains: ['127.0.0.1'],
+      policies: [
+        {
+          id: 'gz-cache-policy',
+          domain: '127.0.0.1',
+          matchers: [{ prefix: '/dl', methods: ['GET'] }],
+          action: { type: 'allow', cacheResponse: { ttlSeconds: 3600 } },
+        },
+      ],
+    });
+    addr = await proxy.listen();
+  }, 30_000);
+
+  afterAll(async () => {
+    await proxy.close();
+    await new Promise<void>((r) => {
+      server.close(() => {
+        r();
+      });
+    });
+    if (originalAuricaHome === undefined) delete process.env.AURICA_HOME;
+    else process.env.AURICA_HOME = originalAuricaHome;
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('stores the raw gzip bytes + content-encoding and serves the hit from cache', async () => {
+    const { gunzipSync } = await import('node:zlib');
+    const url = `http://127.0.0.1:${upstreamPort}/dl/gz`;
+
+    // Miss: forwards upstream and stores the entry.
+    const first = await fetchViaProxy(addr.host, addr.port, url, {});
+    expect(first.status).toBe(200);
+    expect(hits).toBe(1);
+
+    // The stored body is the raw gzip bytes (decompress to the original), and
+    // the stored metadata preserves `content-encoding: gzip` so a replay
+    // remains self-consistent for the guest to decode.
+    const hit = await readCache('GET', url);
+    expect(hit).not.toBeNull();
+    expect(gunzipSync(hit?.body ?? Buffer.alloc(0)).toString('utf8')).toBe(
+      payload,
+    );
+    expect(hit?.headers['content-encoding']).toBe('gzip');
+
+    // Second request is served from cache without re-hitting upstream.
+    const second = await fetchViaProxy(addr.host, addr.port, url, {});
+    expect(second.status).toBe(200);
+    expect(hits).toBe(1);
   });
 });
 
