@@ -4,7 +4,12 @@ export { HostProxy } from './host-proxy.js';
 export type { HostProxyOptions } from './host-proxy.js';
 export { resolvedProxyPort, runProxyProcess } from './process.js';
 export type { ProxyProcessHandle } from './process.js';
-export { applyPolicies, matchDomain } from './substitution.js';
+export {
+  BYPASS_ALL,
+  DOMAIN_PRESETS,
+  expandDomainTokens,
+} from './domain-presets.js';
+export { applyPolicies, matchDomain, policyId } from './substitution.js';
 export type {
   EvaluationOutcome,
   SubstitutionResolver,

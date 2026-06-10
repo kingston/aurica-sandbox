@@ -8,18 +8,29 @@ import type {
 } from '#src/config/index.js';
 
 /**
- * Match a host against a pattern. `*.example.com` matches `example.com` and
+ * Match a host against a pattern. The bare pattern `*` matches every host
+ * (the allowlist-bypass token). `*.example.com` matches `example.com` and
  * any subdomain (`api.example.com`, `a.b.example.com`); plain patterns must
  * match exactly. Case-insensitive.
  */
 export function matchDomain(pattern: string, host: string): boolean {
   const p = pattern.toLowerCase();
   const h = host.toLowerCase();
+  if (p === '*') return true;
   if (p.startsWith('*.')) {
     const suffix = p.slice(1);
     return h === p.slice(2) || h.endsWith(suffix);
   }
   return p === h;
+}
+
+/**
+ * Deterministic id for a policy that omitted one in config. Derived from the
+ * policy's `domain` and action type so audit logs and 403 bodies stay
+ * meaningful. Returns the explicit `id` unchanged when present.
+ */
+export function policyId(policy: ProxyPolicy): string {
+  return policy.id ?? `${policy.domain}:${policy.action.type}`;
 }
 
 /** Resolves credential-source strings (`env:VAR`) to concrete values. */
@@ -186,7 +197,7 @@ export async function applyPolicies(
       return {
         outcome: 'block',
         headers,
-        blockedBy: policy.id,
+        blockedBy: policyId(policy),
         appliedMutations: [],
       };
     }
@@ -204,7 +215,7 @@ export async function applyPolicies(
         outcome: 'rewrite',
         headers,
         url,
-        matchedPolicyId: policy.id,
+        matchedPolicyId: policyId(policy),
         appliedMutations,
       };
     }
@@ -217,7 +228,7 @@ export async function applyPolicies(
     return {
       outcome: 'pass',
       headers,
-      matchedPolicyId: policy.id,
+      matchedPolicyId: policyId(policy),
       appliedMutations,
       interceptResponse: policy.action.interceptResponse,
       cacheResponse: policy.action.cacheResponse,

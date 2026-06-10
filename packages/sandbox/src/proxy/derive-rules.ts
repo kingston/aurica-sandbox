@@ -1,6 +1,9 @@
 import type { ProxyPolicy, SandboxConfig } from '#src/config/index.js';
 import { expandPlugins, type ExpandedPlugins } from '#src/plugins/index.js';
 
+import { expandDomainTokens } from './domain-presets.js';
+import { policyId } from './substitution.js';
+
 /**
  * The proxy-relevant subset of a sandbox's rules: the host allowlist and the
  * credential-substitution policies. Everything else `expandPlugins` produces
@@ -73,11 +76,16 @@ export async function deriveFromConfig(
     authSecret: ctx.authSecret,
   });
 
-  const domains = [...config.proxy.domains, ...expanded.domains];
+  const domains = [
+    ...new Set([
+      ...expandDomainTokens(config.proxy.domains),
+      ...expanded.domains,
+    ]),
+  ];
   const policies: ProxyPolicy[] = [
     ...config.proxy.policies,
     ...expanded.policies,
-  ];
+  ].map((p) => ({ ...p, id: policyId(p) }));
 
   return {
     ...expanded,
