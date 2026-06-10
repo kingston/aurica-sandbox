@@ -1,6 +1,9 @@
 import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
+  test: {
+    setupFiles: ['./vitest.setup.ts'],
+  },
   ssr: {
     resolve: {
       // Vitest's default node environment uses Vite's ssr environment, so SSR
