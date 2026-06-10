@@ -9,6 +9,7 @@ import type { State } from '#src/state/index.js';
 import { statDirOrNull } from '#src/utils/path-exists.js';
 import { defaultProvider } from '#src/vm/index.js';
 import { runForkInitHooks } from '#src/vm/init/run-init.js';
+import { assertPlatformSupported } from '#src/vm/platform.js';
 import { waitForIp } from '#src/vm/wait-for-ip.js';
 
 import { findPrimary } from './find-primary.js';
@@ -34,7 +35,9 @@ export function nextConcurrencyIndex(
 }
 
 /**
- * Clone the project's primary VM into a new running fork.
+ * Clone the project's primary VM into a new running fork. The primary may be
+ * running or stopped — `orbctl clone` snapshots the source and restores it to
+ * its prior state, so forking never disturbs a running primary's session.
  *
  * Fast path — skips the full init pipeline. The fork inherits the primary's
  * entire disk state (OS, tools, proxy config, baked credentials) and its
@@ -43,7 +46,7 @@ export function nextConcurrencyIndex(
  * Steps:
  *   1. Find the primary for `projectDir` in state.
  *   2. Assign a `concurrencyIndex` (lowest unused positive integer among siblings).
- *   3. Clone the primary VM (stopped → stopped clone).
+ *   3. Clone the primary VM (the clone always starts stopped).
  *   4. Register fork in state, signal proxy.
  *   5. Start the clone and wait for its IP.
  *   6. Run `setup-fork.sh` hooks (user-level then project-level).
@@ -54,6 +57,7 @@ export async function runFork(
   nameArg: string | undefined,
   { branch = '' }: { branch?: string } = {},
 ): Promise<void> {
+  assertPlatformSupported();
   await ensureProxyRunning();
 
   const { result: prepResult } = await withState((state) => {

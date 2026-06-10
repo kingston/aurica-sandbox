@@ -3,6 +3,7 @@ import ora from 'ora';
 import { logger } from '#src/logger.js';
 import { readState, signalProxyReload, withState } from '#src/state/index.js';
 import { defaultProvider } from '#src/vm/index.js';
+import { assertPlatformSupported } from '#src/vm/platform.js';
 import { waitForIp } from '#src/vm/wait-for-ip.js';
 
 import { resolveTarget } from './find-primary.js';
@@ -25,6 +26,7 @@ export async function runStart(
   projectDir: string,
   nameArg?: string,
 ): Promise<void> {
+  assertPlatformSupported();
   await ensureProxyRunning();
 
   const state = await readState();

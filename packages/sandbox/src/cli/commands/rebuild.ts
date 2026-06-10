@@ -1,4 +1,5 @@
 import { loadSandboxConfig } from '#src/config/index.js';
+import { assertPlatformSupported } from '#src/vm/platform.js';
 
 import { destroyIfExists, runCreate } from './create.js';
 
@@ -16,6 +17,7 @@ export async function runRebuild(
   projectDir: string,
   nameArg: string | undefined,
 ): Promise<void> {
+  assertPlatformSupported();
   let name = nameArg;
   if (!name) {
     const config = await loadSandboxConfig(projectDir);

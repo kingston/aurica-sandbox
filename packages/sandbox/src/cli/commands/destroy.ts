@@ -2,6 +2,7 @@ import ora from 'ora';
 
 import { readState, signalProxyReload, withState } from '#src/state/index.js';
 import { defaultProvider } from '#src/vm/index.js';
+import { assertPlatformSupported } from '#src/vm/platform.js';
 
 import { resolveTarget } from './find-primary.js';
 
@@ -54,6 +55,7 @@ export async function runDestroy(
   force: boolean,
   cascade = false,
 ): Promise<void> {
+  assertPlatformSupported();
   // Resolve the target. With an explicit name, keep using it verbatim so
   // `--force` can still destroy a VM that isn't registered in state.
   // Without a name, default to the project's primary.

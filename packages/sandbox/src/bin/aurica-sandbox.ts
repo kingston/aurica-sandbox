@@ -6,6 +6,7 @@ import { Command } from 'commander';
 
 import { runCreate } from '#src/cli/commands/create.js';
 import { runDestroy } from '#src/cli/commands/destroy.js';
+import { runDoctor } from '#src/cli/commands/doctor.js';
 import { runFork } from '#src/cli/commands/fork.js';
 import { runInit } from '#src/cli/commands/init.js';
 import { runList } from '#src/cli/commands/list.js';
@@ -36,7 +37,22 @@ const program = new Command();
 program
   .name('aurica-sandbox')
   .description('Ephemeral coding-agent VMs with restricted egress')
-  .showHelpAfterError();
+  .showHelpAfterError()
+  .addHelpText(
+    'after',
+    `
+Examples:
+  $ asbox doctor                 check prerequisites before you start
+  $ asbox init                   scaffold .aurica/sandbox.json, then edit it
+  $ asbox create                 create a sandbox (left running) — proxy autostarts
+  $ asbox shell                  open a shell in the sandbox
+  $ asbox run -- npm test        run a one-off command inside the sandbox
+  $ asbox destroy                tear it down
+
+For a single sandbox, that's all you need. To run several from one base
+image — e.g. one per parallel agent — build the base once with
+\`asbox create --stopped\`, then \`asbox fork\` cheap copy-on-write clones.`,
+  );
 
 const verboseFlag =
   'log every request decision (matched policy, outcome, mutations, originating IP) and allowlist denials';
@@ -90,20 +106,33 @@ proxy
   });
 
 program
+  .command('doctor')
+  .description(
+    'check prerequisites for creating sandboxes (OrbStack, proxy, CA, config)',
+  )
+  .action(async () => {
+    process.exit(await runDoctor(process.cwd()));
+  });
+
+program
   .command('init')
   .description('scaffold .aurica/sandbox.json')
-  .action(async () => {
-    await runInit(process.cwd());
+  .option('--force', 'overwrite an existing config', false)
+  .action(async (opts: { force: boolean }) => {
+    await runInit(process.cwd(), { force: opts.force });
   });
 
 program
   .command('create [name]')
   .description(
-    'create a primary sandbox VM and run init (defaults to the `name` field in .aurica/sandbox.json); VM is stopped after init and ready to fork',
+    'create a primary sandbox VM and run init (defaults to the `name` field in .aurica/sandbox.json); VM is left running so you can `shell` straight in',
   )
-  .option('--start', 'leave the VM running after init instead of stopping it')
-  .action(async (name: string | undefined, opts: { start: boolean }) => {
-    await runCreate(process.cwd(), name, { start: opts.start });
+  .option(
+    '--stopped',
+    'stop the VM after init instead of leaving it running (base image to fork from)',
+  )
+  .action(async (name: string | undefined, opts: { stopped: boolean }) => {
+    await runCreate(process.cwd(), name, { stopped: opts.stopped });
   });
 
 program

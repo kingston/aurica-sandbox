@@ -14,7 +14,56 @@ import {
   withState,
 } from '#src/state/index.js';
 
-import { buildDaemonSpawn, ensureProxyRunning, runProxyStop } from './proxy.js';
+import {
+  buildDaemonSpawn,
+  classifyDaemonCrash,
+  ensureProxyRunning,
+  ProxyPortInUseError,
+  ProxyPortPermissionError,
+  runProxyStop,
+} from './proxy.js';
+
+describe('classifyDaemonCrash', () => {
+  it('maps EADDRINUSE to ProxyPortInUseError', () => {
+    const err = classifyDaemonCrash(
+      'listen EADDRINUSE: address already in use 0.0.0.0:51217',
+      51_217,
+      123,
+      '/tmp/proxy.log',
+    );
+    expect(err).toBeInstanceOf(ProxyPortInUseError);
+    expect(err.message).toContain('51217');
+  });
+
+  it('maps EACCES to ProxyPortPermissionError', () => {
+    const err = classifyDaemonCrash(
+      'listen EACCES: permission denied 0.0.0.0:80',
+      80,
+      123,
+      '/tmp/proxy.log',
+    );
+    expect(err).toBeInstanceOf(ProxyPortPermissionError);
+    expect(err.message).toContain('1024');
+  });
+
+  it('falls back to a log dump for an unrecognized crash', () => {
+    const err = classifyDaemonCrash(
+      'TypeError: something unexpected',
+      51_217,
+      123,
+      '/tmp/proxy.log',
+    );
+    expect(err).not.toBeInstanceOf(ProxyPortInUseError);
+    expect(err.message).toContain('/tmp/proxy.log');
+    expect(err.message).toContain('something unexpected');
+  });
+
+  it('omits the log section when the tail is empty', () => {
+    const err = classifyDaemonCrash('', 51_217, 123, '/tmp/proxy.log');
+    expect(err.message).toContain('did not come up');
+    expect(err.message).not.toContain('---');
+  });
+});
 
 describe('buildDaemonSpawn', () => {
   const realArgv = process.argv;
