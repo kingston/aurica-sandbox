@@ -243,6 +243,68 @@ describe('HostProxy (mockttp-backed)', () => {
   });
 });
 
+describe('HostProxy bypass-all (*) allowlist', () => {
+  let dir: string;
+  let originalAuricaHome: string | undefined;
+  let proxy: HostProxy;
+  let proxyAddr: { host: string; port: number };
+  let upstream: Upstream;
+
+  beforeAll(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), 'aurica-proxy-star-'));
+    originalAuricaHome = process.env.AURICA_HOME;
+    process.env.AURICA_HOME = dir;
+    upstream = await startUpstream();
+    proxy = await HostProxy.create({
+      resolver: { resolve: () => Promise.reject(new Error('no sources')) },
+    });
+    proxyAddr = await proxy.listen();
+  }, 30_000);
+
+  afterAll(async () => {
+    await proxy.close();
+    await upstream.close();
+    if (originalAuricaHome === undefined) delete process.env.AURICA_HOME;
+    else process.env.AURICA_HOME = originalAuricaHome;
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it('allows a host that no literal pattern matches', async () => {
+    // `localhost` resolves to the 127.0.0.1 upstream but is not the literal
+    // pattern `127.0.0.1`, so only `*` can let it through.
+    const target = `http://localhost:${upstream.port}/`;
+
+    proxy.register('literal', {
+      sourceIp: '127.0.0.1',
+      domains: ['127.0.0.1'],
+      configDomains: ['127.0.0.1'],
+      policies: [],
+    });
+    const blocked = await fetchViaProxy(
+      proxyAddr.host,
+      proxyAddr.port,
+      target,
+      {},
+    );
+    expect(blocked.status).toBe(403);
+
+    proxy.register('literal', {
+      sourceIp: '127.0.0.1',
+      domains: ['*'],
+      configDomains: ['*'],
+      policies: [],
+    });
+    const allowed = await fetchViaProxy(
+      proxyAddr.host,
+      proxyAddr.port,
+      target,
+      {},
+    );
+    expect(allowed.status).toBe(200);
+    expect(allowed.body).toBe('ok');
+  });
+});
+
 describe('HostProxy response cache', () => {
   let dir: string;
   let originalAuricaHome: string | undefined;

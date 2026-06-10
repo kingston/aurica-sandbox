@@ -226,13 +226,15 @@ export type PolicyAction = z.infer<typeof policyActionSchema>;
  * not allowlisted at all.
  *
  * `id` is a stable identifier surfaced in audit logs and the body of any
- * 403 a `block` action emits. `description` is free-form prose.
+ * 403 a `block` action emits. It is optional; when omitted a deterministic
+ * synthetic id (`<domain>:<action>`) is backfilled at derivation time so
+ * audit output stays meaningful. `description` is free-form prose.
  *
  * `domain` supports the same wildcard syntax as the host allowlist
  * (e.g. `*.foo.com`).
  */
 export const proxyPolicySchema = z.object({
-  id: z.string().min(1),
+  id: z.string().min(1).optional(),
   description: z.string().min(1).optional(),
   domain: z.string().min(1),
   matchers: z.array(matcherEntrySchema).optional(),

@@ -181,7 +181,7 @@ describe('githubPlugin', () => {
     expect(blockPolicies(expanded.policies)).toHaveLength(0);
     const allowIds = allowPolicies(expanded.policies)
       .map((p) => p.id)
-      .sort();
+      .sort((a, b) => (a ?? '').localeCompare(b ?? ''));
     expect(allowIds).toEqual([
       'github:a/b:codeload.github.com',
       'github:a/b:github.com',

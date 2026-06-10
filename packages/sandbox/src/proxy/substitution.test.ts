@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { ProxyPolicy } from '#src/config/index.js';
 
-import { applyPolicies, matchDomain } from './substitution.js';
+import { applyPolicies, matchDomain, policyId } from './substitution.js';
 
 const resolver = {
   resolve(rawSource: string): Promise<string> {
@@ -41,6 +41,26 @@ describe('matchDomain', () => {
 
   it('is case-insensitive', () => {
     expect(matchDomain('*.GitHub.com', 'API.GITHUB.COM')).toBe(true);
+  });
+
+  it('bare * matches every host', () => {
+    expect(matchDomain('*', 'anything.example.com')).toBe(true);
+    expect(matchDomain('*', 'localhost')).toBe(true);
+    expect(matchDomain('*', '10.0.0.1')).toBe(true);
+  });
+});
+
+describe('policyId', () => {
+  it('returns the explicit id when present', () => {
+    expect(policyId(githubPolicy)).toBe('gh-test');
+  });
+
+  it('synthesizes <domain>:<action> when id is omitted', () => {
+    const policy: ProxyPolicy = {
+      domain: 'pypi.org',
+      action: { type: 'block' },
+    };
+    expect(policyId(policy)).toBe('pypi.org:block');
   });
 });
 

@@ -98,6 +98,10 @@ Project config (`.aurica/sandbox.json`) declares the sandbox name, VM resources,
 }
 ```
 
+`proxy.domains` entries are literal domains/wildcards (`*.github.com`) plus two special tokens: `preset:common` expands to a built-in bucket of baseline egress (OS package mirrors, language registries, git hosts) so you don't have to list them, and `*` bypasses the allowlist entirely (allows any host — use deliberately, since it turns off the egress guarantee).
+
+`proxy.policies[].id` is optional; when omitted a `<domain>:<action>` id is synthesized for audit logs and 403 bodies.
+
 User-level defaults live in `~/.aurica/sandbox/config.json` (VM provider, distro, credential providers, credential-cache TTL, and per-plugin user defaults). See [packages/sandbox/src/config/user.ts](packages/sandbox/src/config/user.ts).
 
 ## How it works & security
