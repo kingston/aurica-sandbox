@@ -1,5 +1,6 @@
 import { readState } from '#src/state/index.js';
 import { defaultProvider } from '#src/vm/index.js';
+import { assertPlatformSupported } from '#src/vm/platform.js';
 
 import { resolveTarget } from './find-primary.js';
 import { ensureProxyRunning } from './proxy.js';
@@ -18,6 +19,7 @@ export async function runRun(
 ): Promise<number> {
   if (argv.length === 0) throw new Error('run requires a command after `--`');
 
+  assertPlatformSupported();
   await ensureProxyRunning();
   const state = await readState();
   const entry = resolveTarget(state, projectDir, nameArg);

@@ -488,8 +488,8 @@ export class HostProxy {
           });
         }
         if (result.outcome === 'rewrite') {
-          // Strip the guest's Host header so mockttp derives a fresh
-          // one from the rewritten URL. Per its docs, passing a
+          // Strip the guest's Host/:authority headers so mockttp derives
+          // fresh ones from the rewritten URL. Per its docs, passing a
           // headers object with `host` set wins over the URL — which
           // would route us to the synthetic guest hostname instead of
           // the loopback target and produce ENOTFOUND. Also inject
@@ -497,7 +497,7 @@ export class HostProxy {
           // originating sandbox by IP (the loopback hop erases
           // `req.remoteIpAddress`), stripping any guest-supplied
           // case-variant first so it isn't guest-controllable.
-          let headers = stripHeader(result.headers, 'host');
+          let headers = stripHostHeaders(result.headers);
           headers = stripHeader(headers, 'x-forwarded-for');
           headers['X-Forwarded-For'] = remoteIp;
           return {
@@ -505,8 +505,12 @@ export class HostProxy {
             headers,
           };
         }
+        // Strip the host-linked headers so mockttp re-derives them from the
+        // URL. The guest's HTTP/2 `:authority` carries the default port (e.g.
+        // `host:443`) while the URL normalizes it away; forwarding it verbatim
+        // makes mockttp warn about the mismatch.
         return {
-          headers: result.headers,
+          headers: stripHostHeaders(result.headers),
         };
       },
       beforeResponse: async (res) => {
@@ -673,6 +677,19 @@ function stripHeader(
     out[k] = v;
   }
   return out;
+}
+
+/**
+ * Return a shallow clone of `headers` with the host-linked headers (`host` and
+ * the HTTP/2 `:authority` pseudo-header) removed, so mockttp re-derives them
+ * from the request URL on passthrough. Forwarding either verbatim makes mockttp
+ * warn when its value disagrees with the URL (e.g. an `:authority` that carries
+ * the default `:443` the normalized URL drops).
+ */
+function stripHostHeaders(
+  headers: Record<string, string | string[] | undefined>,
+): Record<string, string | string[] | undefined> {
+  return stripHeader(stripHeader(headers, 'host'), ':authority');
 }
 
 /**

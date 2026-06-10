@@ -15,6 +15,7 @@ import { createInitShell } from '#src/vm/init/create-init-shell.js';
 import { resolveFileCopies } from '#src/vm/init/resolve-file-copies.js';
 import { formatMountArg, resolveMounts } from '#src/vm/init/resolve-mounts.js';
 import { runInitPipeline } from '#src/vm/init/run-init.js';
+import { assertPlatformSupported } from '#src/vm/platform.js';
 import { waitForIp } from '#src/vm/wait-for-ip.js';
 
 import { ensureProxyRunning } from './proxy.js';
@@ -81,11 +82,14 @@ export async function destroyIfExists(name: string): Promise<void> {
  *      then user-level hooks from `~/.aurica/sandbox/init/`, then
  *      project-level hooks from `<projectDir>/.aurica/init/`. Output
  *      streams live to the terminal.
- *   5. Stop the VM so it can be cloned cleanly via `fork`. Register it in
- *      state with `kind: 'primary'` and `status: 'stopped'`.
+ *   5. Leave the VM running and register it in state with `kind: 'primary'`
+ *      and `status: 'running'` so the user can `shell` straight in.
  *
- * Pass `start: true` to skip the stop step and leave the VM running
- * immediately after init (equivalent to the old default behavior).
+ * Pass `stopped: true` to stop the VM after init instead — the "build a base
+ * image to fork from" workflow, where the primary is a template rather than a
+ * working sandbox. `orbctl clone` snapshots a running source and restores it,
+ * so `fork` works against a running primary too; `stopped` is purely an
+ * optimization for repeated forking.
  *
  * On init failure: record `status: 'failed-init'` and rethrow. The VM is
  * left in place for inspection; the caller can run `aurica-sandbox
@@ -94,8 +98,9 @@ export async function destroyIfExists(name: string): Promise<void> {
 export async function runCreate(
   projectDir: string,
   nameArg: string | undefined,
-  { start = false }: { start?: boolean } = {},
+  { stopped = false }: { stopped?: boolean } = {},
 ): Promise<void> {
+  assertPlatformSupported();
   // Ensure the proxy is up (autostarting the daemon if needed).
   const proxy = await ensureProxyRunning();
 
@@ -222,19 +227,9 @@ export async function runCreate(
     throw err;
   }
 
-  if (start) {
-    // Leave VM running — caller wants to work in it directly.
-    await withState((state) => {
-      const entry = state.sandboxes[name];
-      if (entry) entry.status = 'running';
-    });
-    await signalProxyReload();
-    logger.log(
-      JSON.stringify({ name, status: 'running', ip, projectDir }, null, 2),
-    );
-  } else {
-    // Stop the VM so it can be cleanly cloned by `fork`. The primary is a
-    // base image, not a working sandbox; forks are the working sandboxes.
+  if (stopped) {
+    // Stop the VM so it can be cleanly cloned by `fork`. Use this when the
+    // primary is a base image to fork from rather than a working sandbox.
     const stopSpinner = ora(`stopping primary VM ${name}`).start();
     try {
       await defaultProvider.stopVM(name);
@@ -258,5 +253,20 @@ export async function runCreate(
         2,
       ),
     );
+  } else {
+    // Leave the VM running so the user can `shell` straight in.
+    await withState((state) => {
+      const entry = state.sandboxes[name];
+      if (entry) entry.status = 'running';
+    });
+    await signalProxyReload();
+    logger.log(
+      JSON.stringify(
+        { name, status: 'running', kind: 'primary', projectDir, ip },
+        null,
+        2,
+      ),
+    );
+    logger.info(`sandbox ${name} is running — enter it with: asbox shell`);
   }
 }

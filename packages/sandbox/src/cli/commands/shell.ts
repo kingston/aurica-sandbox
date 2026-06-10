@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 
 import { readState } from '#src/state/index.js';
+import { assertPlatformSupported } from '#src/vm/platform.js';
 
 import { resolveTarget } from './find-primary.js';
 
@@ -13,6 +14,7 @@ export async function runShell(
   projectDir: string,
   nameArg?: string,
 ): Promise<number> {
+  assertPlatformSupported();
   const state = await readState();
   const entry = resolveTarget(state, projectDir, nameArg);
   const name = entry.name;

@@ -86,6 +86,20 @@ export class ProxyPortInUseError extends Error {
   }
 }
 
+/**
+ * Thrown when the daemon dies because the OS denied binding the port
+ * (`EACCES`) — typically a privileged port (< 1024) the user can't claim.
+ */
+export class ProxyPortPermissionError extends Error {
+  constructor(public readonly port: number) {
+    super(
+      `permission denied binding port ${port}.\n` +
+        `Ports below 1024 require elevated privileges — set AURICA_PROXY_PORT to a port >= 1024.`,
+    );
+    this.name = 'ProxyPortPermissionError';
+  }
+}
+
 /** A spawn recipe for the detached daemon, separated out so it can be tested. */
 export interface DaemonSpawn {
   command: string;
@@ -163,6 +177,28 @@ async function tailLogText(lines: number): Promise<string> {
 }
 
 /**
+ * Translate a dead daemon's log tail into the most actionable error available.
+ * Common bind failures (`EADDRINUSE`, `EACCES`) have specific recovery stories,
+ * so they're mapped to dedicated errors; anything else falls back to a log dump
+ * pointing at `logPath`. The tail is this boot's log (`rotateLog` ran first) and
+ * consola logs bind failures as `listen EADDRINUSE …` / `listen EACCES …`, so a
+ * substring match is the available signal. Pure (no I/O) so it's unit-testable.
+ */
+export function classifyDaemonCrash(
+  tail: string,
+  port: number,
+  childPid: number,
+  logPath: string,
+): Error {
+  if (tail.includes('EADDRINUSE')) return new ProxyPortInUseError(port);
+  if (tail.includes('EACCES')) return new ProxyPortPermissionError(port);
+  const detail = tail ? `\n--- ${logPath} ---\n${tail}` : '';
+  return new Error(
+    `proxy daemon did not come up (pid ${childPid}); see ${logPath}${detail}`,
+  );
+}
+
+/**
  * Start the proxy as a detached background daemon. Refuses if a live proxy
  * already holds `state.proxy` (the proxy is a host-wide singleton). Output is
  * redirected to {@link proxyLogPath}, rotated aside on each start.
@@ -219,17 +255,7 @@ export async function runProxyStart(
   }
   if (!ready || !isPidAlive(childPid)) {
     const tail = await tailLogText(CRASH_LOG_LINES);
-    // A port collision is the one boot failure with a specific recovery story,
-    // so translate it into actionable guidance rather than a raw log dump. The
-    // tail is this boot's log (`rotateLog` ran first); consola logs the bind
-    // error as `listen EADDRINUSE …`, so a string match is the available signal.
-    if (tail.includes('EADDRINUSE')) {
-      throw new ProxyPortInUseError(resolvedProxyPort());
-    }
-    const detail = tail ? `\n--- ${logPath} ---\n${tail}` : '';
-    throw new Error(
-      `proxy daemon did not come up (pid ${childPid}); see ${logPath}${detail}`,
-    );
+    throw classifyDaemonCrash(tail, resolvedProxyPort(), childPid, logPath);
   }
 
   if (options.quiet !== true) {

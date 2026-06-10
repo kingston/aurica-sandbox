@@ -3,6 +3,7 @@ import ora from 'ora';
 import { logger } from '#src/logger.js';
 import { readState, signalProxyReload, withState } from '#src/state/index.js';
 import { defaultProvider } from '#src/vm/index.js';
+import { assertPlatformSupported } from '#src/vm/platform.js';
 
 import { resolveTarget } from './find-primary.js';
 
@@ -21,6 +22,7 @@ export async function runStop(
   projectDir: string,
   nameArg?: string,
 ): Promise<void> {
+  assertPlatformSupported();
   const state = await readState();
   const entry = resolveTarget(state, projectDir, nameArg);
   const name = entry.name;
