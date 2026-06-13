@@ -177,10 +177,9 @@ export interface SandboxPlugin<
    * with no default) must implement this; plugins whose schema accepts `{}`
    * may omit it and be enabled bare.
    *
-   * Implementations dynamic-import `@inquirer/prompts` in the body so the
-   * prompt library stays off the hot path of non-init commands. The
-   * framework re-validates the assembled config against `sandboxConfigSchema`
-   * before writing, so a hook returning an invalid block fails fast.
+   * The framework re-validates the assembled config against
+   * `sandboxConfigSchema` before writing, so a hook returning an invalid
+   * block fails fast.
    */
   promptProjectConfig?(
     ctx: PromptProjectConfigContext,

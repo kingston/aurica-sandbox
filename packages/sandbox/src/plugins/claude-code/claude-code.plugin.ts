@@ -1,3 +1,5 @@
+import { input, select } from '@inquirer/prompts';
+
 import type { ProxyPolicy } from '#src/config/proxy-policy.js';
 import { defaultCredentialStore } from '#src/credentials/credential-store.js';
 import { assertSafeShellIdent } from '#src/utils/shell-safety.js';
@@ -131,7 +133,6 @@ export const claudeCodePlugin: SandboxPlugin<
   projectConfigSchema: claudeCodeProjectConfigSchema,
   userConfigSchema: undefined,
   async promptProjectConfig(): Promise<ClaudeCodeProjectConfig> {
-    const { input, select } = await import('@inquirer/prompts');
     const authMode = await select<ClaudeCodeProjectConfig['authMode']>({
       message: 'Claude Code authentication mode',
       choices: [

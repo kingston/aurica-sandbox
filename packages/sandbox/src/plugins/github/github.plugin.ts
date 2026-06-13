@@ -1,3 +1,5 @@
+import { confirm, input, select } from '@inquirer/prompts';
+
 import type {
   MatcherEntry,
   Mutation,
@@ -141,7 +143,6 @@ export const githubPlugin: SandboxPlugin<
     projectDir,
     loadUserConfig,
   }): Promise<GithubProjectConfig> {
-    const { confirm, input, select } = await import('@inquirer/prompts');
     const { detectGithubRepo } = await import('./host-identity.js');
 
     const userConfig = await loadUserConfig();
