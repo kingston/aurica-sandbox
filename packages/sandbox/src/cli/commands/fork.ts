@@ -83,6 +83,11 @@ export async function runFork(
       kind: 'fork',
       parentName: primary.name,
       concurrencyIndex,
+      // A fork is a CoW clone of the primary, so its in-VM checkout lives at
+      // the same path; carry the primary's value rather than recomputing.
+      ...(primary.vmProjectDir !== undefined
+        ? { vmProjectDir: primary.vmProjectDir }
+        : {}),
     };
 
     return { primaryName: primary.name, forkName, concurrencyIndex };

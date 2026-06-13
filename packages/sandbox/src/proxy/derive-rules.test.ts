@@ -18,7 +18,6 @@ function configWith(
 ): SandboxConfig {
   return {
     name: 'sb-test',
-    resources: { cpu: 4, memoryMb: 8192, diskGb: 50 },
     proxy,
     files: [],
     mounts: [],

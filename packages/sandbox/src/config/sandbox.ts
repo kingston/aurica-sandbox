@@ -84,13 +84,6 @@ export type MountEntry = z.infer<typeof mountEntrySchema>;
  */
 export const sandboxConfigSchema = z.object({
   name: z.string().min(1),
-  resources: z
-    .object({
-      cpu: z.number().int().positive().default(4),
-      memoryMb: z.number().int().positive().default(8192),
-      diskGb: z.number().int().positive().default(50),
-    })
-    .default({ cpu: 4, memoryMb: 8192, diskGb: 50 }),
   proxy: z
     .object({
       domains: z.array(z.string().min(1)).default([]),
@@ -140,7 +133,6 @@ export function defaultSandboxConfig(
 ): Omit<SandboxConfig, 'userPlugins'> {
   return {
     name,
-    resources: { cpu: 4, memoryMb: 8192, diskGb: 50 },
     proxy: { domains: [], policies: [] },
     files: [],
     mounts: [],

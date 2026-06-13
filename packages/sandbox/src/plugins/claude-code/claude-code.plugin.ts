@@ -1,3 +1,5 @@
+import { input, select } from '@inquirer/prompts';
+
 import type { ProxyPolicy } from '#src/config/proxy-policy.js';
 import { defaultCredentialStore } from '#src/credentials/credential-store.js';
 import { assertSafeShellIdent } from '#src/utils/shell-safety.js';
@@ -127,8 +129,30 @@ export const claudeCodePlugin: SandboxPlugin<
   typeof claudeCodeProjectConfigSchema
 > = {
   name: 'claude-code',
+  description: 'Run Claude Code with host-injected credentials',
   projectConfigSchema: claudeCodeProjectConfigSchema,
   userConfigSchema: undefined,
+  async promptProjectConfig(): Promise<ClaudeCodeProjectConfig> {
+    const authMode = await select<ClaudeCodeProjectConfig['authMode']>({
+      message: 'Claude Code authentication mode',
+      choices: [
+        {
+          name: 'subscription (Pro/Max/Team — login via `claude /login`)',
+          value: 'subscription',
+        },
+        {
+          name: 'oauth-token (long-lived token from `claude setup-token`)',
+          value: 'oauth-token',
+        },
+        { name: 'api-key (ANTHROPIC_API_KEY)', value: 'api-key' },
+      ],
+    });
+    const tokenAnswer = await input({
+      message: 'Custom token source (leave blank for the mode default)',
+    });
+    const tokenSource = tokenAnswer.trim();
+    return { authMode, ...(tokenSource ? { tokenSource } : {}) };
+  },
   cliCommands(program): void {
     registerClaudeCommands(program);
   },

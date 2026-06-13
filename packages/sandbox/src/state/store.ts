@@ -44,6 +44,15 @@ const sandboxEntrySchema = z.object({
    * created by destroyed forks are reused by the next fork created.
    */
   concurrencyIndex: z.number().int().positive().optional(),
+  /**
+   * The project's checkout directory *inside* the VM (e.g.
+   * `/workspaces/<repo>`), captured at create time from the plugins'
+   * `projectInitCwdOverride`. Lets host-side commands (e.g. `cursor`)
+   * open the remote window on the repo without round-tripping into the
+   * VM. Absent when no plugin sets a project directory, or on entries
+   * created before this field existed — consumers fall back accordingly.
+   */
+  vmProjectDir: z.string().optional(),
 });
 
 export type SandboxEntry = z.infer<typeof sandboxEntrySchema>;

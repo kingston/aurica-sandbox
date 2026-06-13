@@ -26,6 +26,7 @@ import { projectEnvPath } from '#src/config/paths.js';
 import { loadUserConfig } from '#src/config/user.js';
 import { logger } from '#src/logger.js';
 import { PLUGINS } from '#src/plugins/index.js';
+import { defaultProvider } from '#src/vm/index.js';
 
 const envPath = projectEnvPath(process.cwd());
 if (existsSync(envPath)) {
@@ -116,7 +117,7 @@ program
 
 program
   .command('init')
-  .description('scaffold .aurica/sandbox.json')
+  .description('interactively scaffold .aurica/sandbox.json')
   .option('--force', 'overwrite an existing config', false)
   .action(async (opts: { force: boolean }) => {
     await runInit(process.cwd(), { force: opts.force });
@@ -255,7 +256,10 @@ program
 // dynamic-import it themselves — bin is outside the plugin-graph init
 // cycle, so it can value-import the loader directly.
 for (const plugin of PLUGINS) {
-  await plugin.cliCommands?.(program, { loadUserConfig });
+  await plugin.cliCommands?.(program, {
+    loadUserConfig,
+    provider: defaultProvider,
+  });
 }
 
 try {

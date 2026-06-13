@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { ProxyPolicy } from '#src/config/index.js';
 
@@ -7,6 +7,16 @@ import {
   type ProjectPlugins,
   type UserPlugins,
 } from '../index.js';
+
+// Stub the host `~/.gitconfig` read so create-time identity resolution is
+// deterministic — tests that exercise the host fallback override it per-case.
+vi.mock('./host-identity.js', () => ({
+  readHostGitIdentity: vi.fn<() => Promise<null>>(() => Promise.resolve(null)),
+}));
+
+import { readHostGitIdentity } from './host-identity.js';
+
+const readIdentityMock = vi.mocked(readHostGitIdentity);
 
 const PLACEHOLDER_RE = /^__AURICA_TOKEN_[0-9A-F]{16}__$/;
 
@@ -265,6 +275,23 @@ describe('githubPlugin', () => {
         (argv) => argv.includes('user.name') || argv.includes('user.email'),
       ),
     ).toBe(false);
+  });
+
+  it('falls back to the host ~/.gitconfig at create time when both layers omit user', async () => {
+    readIdentityMock.mockResolvedValueOnce({
+      name: 'Linus Torvalds',
+      email: 'linus@example.com',
+    });
+    const project: ProjectPlugins = {
+      github: {
+        username: 'x-access-token',
+        repositories: [{ name: 'foo/bar' }],
+        tokenSource: 'env:GITHUB_TOKEN',
+      },
+    };
+    const expanded = await expandPlugins(project, emptyUser, ctx);
+    const nameCmd = expanded.commands.find((c) => c.argv.includes('user.name'));
+    expect(nameCmd?.argv).toContain('Linus Torvalds');
   });
 
   it('emits no block policies — unmatched paths fall through to the host allowlist', async () => {

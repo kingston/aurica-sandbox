@@ -176,6 +176,9 @@ export async function runCreate(
       createdAt: new Date().toISOString(),
       authSecret,
       kind: 'primary',
+      ...(expanded.projectInitCwdOverride !== undefined
+        ? { vmProjectDir: expanded.projectInitCwdOverride }
+        : {}),
     };
   });
   await signalProxyReload();

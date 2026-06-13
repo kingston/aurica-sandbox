@@ -1,9 +1,12 @@
+import { confirm, input, select } from '@inquirer/prompts';
+
 import type {
   MatcherEntry,
   Mutation,
   ProxyPolicy,
   ProxyPolicyTransform,
 } from '#src/config/proxy-policy.js';
+import { logger } from '#src/logger.js';
 import { assertSafeShellIdent } from '#src/utils/shell-safety.js';
 
 import type { PluginCommand, SandboxPlugin } from '../types.js';
@@ -13,6 +16,9 @@ import {
   githubProjectConfigSchema,
   githubUserConfigSchema,
 } from './schema.js';
+
+/** Regex the github project schema uses to validate `<owner>/<repo>` names. */
+const REPO_NAME_PATTERN = /^[^/\s]+\/[^/\s]+$/;
 
 /**
  * Hosts that github traffic reaches without per-repo authentication.
@@ -130,9 +136,88 @@ export const githubPlugin: SandboxPlugin<
   typeof githubProjectConfigSchema
 > = {
   name: 'github',
+  description: 'Clone GitHub repos and inject scoped tokens from the host',
   projectConfigSchema: githubProjectConfigSchema,
   userConfigSchema: githubUserConfigSchema,
-  initialize({ project, user, generatePlaceholder, linuxUser }) {
+  async promptProjectConfig({
+    projectDir,
+    loadUserConfig,
+  }): Promise<GithubProjectConfig> {
+    const { detectGithubRepo } = await import('./host-identity.js');
+
+    const userConfig = await loadUserConfig();
+    const githubDefaults = githubUserConfigSchema.parse(
+      userConfig.plugins.github ?? {},
+    );
+
+    const detectedRepo = await detectGithubRepo(projectDir);
+
+    // Offer the detected repo as a yes/no so the obvious default is one
+    // keystroke; only fall back to asking which repo when there's none or the
+    // user declines.
+    let repoName: string;
+    const useDetected =
+      detectedRepo !== null &&
+      (await confirm({
+        message: `Clone ${detectedRepo}?`,
+        default: true,
+      }));
+    if (useDetected) {
+      repoName = detectedRepo;
+    } else {
+      const answer = await input({
+        message: 'GitHub repository to clone (owner/repo)',
+        validate: (value) =>
+          REPO_NAME_PATTERN.test(value.trim()) ||
+          'Expected "<owner>/<repo>" with no slashes inside owner or repo.',
+      });
+      repoName = answer.trim();
+    }
+    const repositories: GithubProjectConfig['repositories'] = [
+      { name: repoName },
+    ];
+
+    // API access (`api: true`) isn't prompted: it bypasses per-repo scoping
+    // and grants the token's full API surface, so it's left off by default and
+    // set manually in `sandbox.json` by anyone who needs it.
+    //
+    // Token source: when a user-level `defaultTokenSource` is configured, omit
+    // the project `tokenSource` so it inherits the default; only prompt when
+    // there's no default to fall back to.
+    let tokenSource: string | undefined;
+    if (githubDefaults.defaultTokenSource) {
+      logger.info(
+        `Using your user-level default token source (${githubDefaults.defaultTokenSource}).`,
+      );
+    } else {
+      const tokenChoice = await select<'gh-token' | 'env'>({
+        message: 'How should the GitHub token be provided?',
+        choices: [
+          { name: 'gh CLI token (gh-token)', value: 'gh-token' },
+          { name: 'Environment variable (env:VAR)', value: 'env' },
+        ],
+      });
+      if (tokenChoice === 'gh-token') {
+        tokenSource = 'gh-token';
+      } else {
+        const varAnswer = await input({
+          message: 'Environment variable name',
+          validate: (value) =>
+            value.trim() !== '' || 'An environment variable name is required.',
+        });
+        tokenSource = `env:${varAnswer.trim()}`;
+      }
+    }
+
+    // The git committer identity isn't asked for or written here: it's a
+    // per-user value, so `initialize` reads the host `~/.gitconfig` at create
+    // time instead (falling back to the user-level `defaultUser`).
+    return {
+      repositories,
+      ...(tokenSource ? { tokenSource } : {}),
+    };
+  },
+  async initialize({ project, user, generatePlaceholder, linuxUser }) {
     // The clone destination paths are interpolated as argv (not shell), so
     // they are not vulnerable to shell metacharacters, but we still validate
     // the linux user for consistency with the other plugins and to keep the
@@ -151,7 +236,15 @@ export const githubPlugin: SandboxPlugin<
         'github plugin: `tokenSource` must be set on the project config or as `defaultTokenSource` on the user-level config.',
       );
     }
-    const gitUser = project.user ?? user?.defaultUser;
+    // Resolve the git committer identity: explicit project config, then the
+    // user-level default, then the host `~/.gitconfig` read at create time.
+    // The host value is intentionally not baked into the committed config.
+    const { readHostGitIdentity } = await import('./host-identity.js');
+    const gitUser =
+      project.user ??
+      user?.defaultUser ??
+      (await readHostGitIdentity()) ??
+      undefined;
 
     // Single token covers both the git basic-auth password (over HTTPS to
     // github.com/codeload.github.com) and the `gh` CLI's `oauth_token` in

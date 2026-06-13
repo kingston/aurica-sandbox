@@ -69,8 +69,18 @@ export const mcpPlugin: SandboxPlugin<
   typeof mcpProjectConfigSchema
 > = {
   name: MCP_PLUGIN_NAME,
+  description: 'Route MCP traffic through the on-host gateway',
   projectConfigSchema: mcpProjectConfigSchema,
   userConfigSchema: mcpUserConfigSchema,
+  promptProjectConfig(): Promise<undefined> {
+    // The meaningful MCP config is the upstream catalog, which lives in
+    // user-level config and is cross-referenced by `servers`. Enabling the
+    // plugin bare keeps init simple; upstreams are added afterwards.
+    logger.info(
+      'mcp enabled with no servers. Add upstreams to your user config and authenticate with `aurica-sandbox mcp login <server>`, then list them under `plugins.mcp.servers`.',
+    );
+    return Promise.resolve(undefined);
+  },
   initialize(ctx): InitializedPlugin {
     return buildInitializedPlugin(ctx);
   },

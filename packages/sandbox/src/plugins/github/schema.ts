@@ -7,9 +7,10 @@ import { parseCredentialSource } from '#src/credentials/index.js';
  * user.name` / `user.email`. Optional at the plugin level; when present,
  * BOTH fields are required so commits never carry a half-identity.
  *
- * `aurica-sandbox init` pre-fills this from the host's `~/.gitconfig` when
- * possible, but the values become part of the committed sandbox config —
- * authoritative and reproducible across machines.
+ * Usually left unset: it's a per-user value, so the github plugin reads the
+ * host `~/.gitconfig` at create time when neither this field nor the
+ * user-level `defaultUser` is set. Set it explicitly only to pin a specific
+ * identity into the committed config.
  */
 export const githubUserIdentitySchema = z.object({
   name: z.string().min(1),
