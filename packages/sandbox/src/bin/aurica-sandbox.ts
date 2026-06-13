@@ -12,6 +12,7 @@ import { runInit } from '#src/cli/commands/init.js';
 import { runList } from '#src/cli/commands/list.js';
 import { runProxyLog, runProxyTail } from '#src/cli/commands/proxy-log.js';
 import {
+  runProxyRestart,
   runProxyRun,
   runProxyStart,
   runProxyStop,
@@ -81,6 +82,14 @@ proxy
   .description('stop the background proxy daemon')
   .action(async () => {
     await runProxyStop();
+  });
+
+proxy
+  .command('restart')
+  .description('restart the background proxy daemon')
+  .option('-v, --verbose', verboseFlag, false)
+  .action(async (opts: { verbose: boolean }) => {
+    await runProxyRestart({ verbose: opts.verbose });
   });
 
 proxy
