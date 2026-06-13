@@ -43,6 +43,32 @@ describe('state store', () => {
     expect(after.sandboxes.a).toEqual(sampleEntry);
   });
 
+  it('round-trips the optional vmProjectDir field', async () => {
+    const withDir: SandboxEntry = {
+      ...sampleEntry,
+      vmProjectDir: '/workspaces/repo',
+    };
+    await withState((s) => {
+      s.sandboxes.a = withDir;
+    }, file);
+    const after = await readState(file);
+    expect(after.sandboxes.a?.vmProjectDir).toBe('/workspaces/repo');
+  });
+
+  it('parses an entry that omits vmProjectDir (pre-field / no project dir)', async () => {
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(
+      file,
+      JSON.stringify({
+        version: 1,
+        proxy: null,
+        sandboxes: { a: sampleEntry },
+      }),
+    );
+    const after = await readState(file);
+    expect(after.sandboxes.a?.vmProjectDir).toBeUndefined();
+  });
+
   it('serializes parallel withState calls so neither write is lost', async () => {
     await Promise.all([
       withState((s) => {

@@ -1,6 +1,7 @@
 import type { ProxyPolicy } from '#src/config/index.js';
 
 import type { SandboxPlugin } from '../types.js';
+import { registerCursorCommands } from './cli/cursor-commands.js';
 import { cursorProjectConfigSchema } from './schema.js';
 
 /**
@@ -51,14 +52,21 @@ const CURSOR_DOMAINS = [
  * populates the host-global cache and every later one serves the ~80 MB
  * download from disk. The user's first remote-SSH connect fetches the REH
  * server on demand through the proxy (cached after the first download).
+ *
+ * Also contributes the `cursor [name]` CLI command, which opens a Cursor
+ * remote-SSH window onto the sandbox VM.
  */
 export const cursorPlugin: SandboxPlugin<
   undefined,
   typeof cursorProjectConfigSchema
 > = {
   name: 'cursor',
+  description: 'Run the Cursor CLI agent',
   projectConfigSchema: cursorProjectConfigSchema,
   userConfigSchema: undefined,
+  cliCommands(program, ctx): void {
+    registerCursorCommands(program, ctx);
+  },
   initialize() {
     return {
       domains: [...CURSOR_DOMAINS],

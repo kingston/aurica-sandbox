@@ -218,4 +218,14 @@ export const orbProvider: SandboxVMProvider = {
     );
     return result.exitCode ?? 1;
   },
+
+  /**
+   * OrbStack registers every machine as an SSH host reachable at
+   * `<name>@orb` — the machine name lands in SSH's *user* slot, with `orb`
+   * as the host. A remote-dev client addresses it as
+   * `ssh-remote+<name>@orb`.
+   */
+  remoteSshHost(name: string): string {
+    return `${name}@orb`;
+  },
 };

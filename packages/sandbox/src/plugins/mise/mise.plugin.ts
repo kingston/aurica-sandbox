@@ -116,6 +116,7 @@ export const misePlugin: SandboxPlugin<
   typeof miseProjectConfigSchema
 > = {
   name: 'mise',
+  description: 'Install the mise runtime/version manager',
   projectConfigSchema: miseProjectConfigSchema,
   userConfigSchema: undefined,
   initialize({ linuxUser }) {

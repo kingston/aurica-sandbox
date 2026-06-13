@@ -30,7 +30,7 @@ Installs both `aurica-sandbox` and the shorter alias `asbox` on your `PATH`. Use
 # Check prerequisites (OrbStack, proxy, config)
 asbox doctor
 
-# Scaffold a config into your project, then edit it
+# Interactively scaffold a config: pick plugins and answer their prompts
 asbox init
 
 # Create the sandbox and shell in. The egress proxy autostarts in the
@@ -53,22 +53,22 @@ copy-on-write clones with `asbox fork`. For a single sandbox you don't need
 
 All commands default to the project's primary sandbox when `[name]` is omitted.
 
-| Command                        | Purpose                                                              |
-| ------------------------------ | -------------------------------------------------------------------- |
-| `doctor`                       | Check prerequisites (OrbStack, proxy, CA, config).                   |
-| `init`                         | Scaffold `.aurica/sandbox.json`. `--force` to overwrite.             |
-| `create [name]`                | Create a VM and run init; left running. `--stopped` for a fork base. |
-| `fork [name]`                  | Clone the primary into a new running fork (parallel sandboxes).      |
-| `update [name]`                | Re-run `update.sh` hooks to refresh without rebuilding.              |
-| `rebuild [name]`               | Destroy and recreate (use after editing `sandbox.json`).             |
-| `start [name]` / `stop [name]` | Resume / pause a VM (disk preserved).                                |
-| `destroy [name]`               | Tear down a sandbox. `-f` to force; `--cascade` to remove forks.     |
-| `list`                         | List registered sandboxes.                                           |
-| `shell [name]`                 | SSH into the VM.                                                     |
-| `run [name] -- <cmd...>`       | Run a one-shot command inside the VM.                                |
-| `proxy start` / `stop`         | Start / stop the background egress-proxy daemon.                     |
-| `proxy run`                    | Run the proxy in the foreground (long-running).                      |
-| `proxy log` / `tail`           | Print or follow the proxy log.                                       |
+| Command                        | Purpose                                                                                                    |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| `doctor`                       | Check prerequisites (OrbStack, proxy, CA, config).                                                         |
+| `init`                         | Interactively scaffold `.aurica/sandbox.json` — choose plugins and configure each. `--force` to overwrite. |
+| `create [name]`                | Create a VM and run init; left running. `--stopped` for a fork base.                                       |
+| `fork [name]`                  | Clone the primary into a new running fork (parallel sandboxes).                                            |
+| `update [name]`                | Re-run `update.sh` hooks to refresh without rebuilding.                                                    |
+| `rebuild [name]`               | Destroy and recreate (use after editing `sandbox.json`).                                                   |
+| `start [name]` / `stop [name]` | Resume / pause a VM (disk preserved).                                                                      |
+| `destroy [name]`               | Tear down a sandbox. `-f` to force; `--cascade` to remove forks.                                           |
+| `list`                         | List registered sandboxes.                                                                                 |
+| `shell [name]`                 | SSH into the VM.                                                                                           |
+| `run [name] -- <cmd...>`       | Run a one-shot command inside the VM.                                                                      |
+| `proxy start` / `stop`         | Start / stop the background egress-proxy daemon.                                                           |
+| `proxy run`                    | Run the proxy in the foreground (long-running).                                                            |
+| `proxy log` / `tail`           | Print or follow the proxy log.                                                                             |
 
 Some plugins add their own subcommands once installed — e.g. `claude login` /
 `claude status` / `claude logout` (claude-code) and `mcp login` / `mcp status` /
@@ -76,7 +76,7 @@ Some plugins add their own subcommands once installed — e.g. `claude login` /
 
 ## Config
 
-Project config (`.aurica/sandbox.json`) declares the sandbox name, VM resources, allowed proxy domains, and which plugins are enabled. Plugin blocks are opt-in by inclusion and strict-validated against each plugin's schema.
+Project config (`.aurica/sandbox.json`) declares the sandbox name, allowed proxy domains, and which plugins are enabled. Plugin blocks are opt-in by inclusion and strict-validated against each plugin's schema.
 
 ```jsonc
 {

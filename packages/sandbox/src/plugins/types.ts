@@ -5,6 +5,7 @@ import type { ProxyPolicy } from '#src/config/proxy-policy.js';
 import type { SandboxConfig } from '#src/config/sandbox.js';
 import type { UserConfig } from '#src/config/user.js';
 import type { SandboxEntry } from '#src/state/index.js';
+import type { SandboxVMProvider } from '#src/vm/types.js';
 
 /**
  * One command a plugin wants the orchestrator to run inside the VM after the
@@ -100,6 +101,19 @@ export interface PluginInitContext<U, P extends z.ZodType> {
 }
 
 /**
+ * Context passed to `plugin.promptProjectConfig` during `aurica-sandbox
+ * init`. `projectDir` is the directory being initialized, so a plugin can
+ * inspect host state there (e.g. the github plugin reads the git remote to
+ * pre-fill the repository to clone). `loadUserConfig` lazily loads the
+ * user-level config so a plugin can skip prompting for values the user has
+ * already set as defaults (e.g. github's `defaultTokenSource`).
+ */
+export interface PromptProjectConfigContext {
+  projectDir: string;
+  loadUserConfig: () => Promise<UserConfig>;
+}
+
+/**
  * Contract every plugin implements. The plugin registry collects these into
  * a single source of truth used to build the project/user config schemas,
  * iterate plugins at expansion time, and validate placeholder uniqueness.
@@ -127,6 +141,12 @@ export interface SandboxPlugin<
   P extends z.ZodType = z.ZodType,
 > {
   name: string;
+  /**
+   * One-line, human-readable summary shown beside the plugin name in the
+   * `aurica-sandbox init` selection prompt. Plugins omit it to fall back to
+   * the bare name.
+   */
+  description?: string;
   projectConfigSchema: P;
   /**
    * Always present in the type — set to `undefined` when the plugin needs
@@ -145,6 +165,26 @@ export interface SandboxPlugin<
   initialize(
     ctx: PluginInitContext<U, P>,
   ): InitializedPlugin | Promise<InitializedPlugin>;
+
+  /**
+   * Interactively gather this plugin's project-config block during
+   * `aurica-sandbox init`. Called only when the user selects the plugin in
+   * the init prompt, in registry order. Returns the block written under
+   * `plugins.<name>`, or `undefined` to enable the plugin with an empty
+   * block.
+   *
+   * Plugins whose `projectConfigSchema` rejects `{}` (e.g. a required field
+   * with no default) must implement this; plugins whose schema accepts `{}`
+   * may omit it and be enabled bare.
+   *
+   * Implementations dynamic-import `@inquirer/prompts` in the body so the
+   * prompt library stays off the hot path of non-init commands. The
+   * framework re-validates the assembled config against `sandboxConfigSchema`
+   * before writing, so a hook returning an invalid block fails fast.
+   */
+  promptProjectConfig?(
+    ctx: PromptProjectConfigContext,
+  ): Promise<z.infer<P> | undefined>;
 
   /**
    * Register CLI subcommands. Called once at CLI startup, regardless of
@@ -190,6 +230,12 @@ export interface SandboxPlugin<
  */
 export interface CliCommandContext {
   loadUserConfig: () => Promise<UserConfig>;
+  /**
+   * The active VM provider. Injected so plugin commands can address the
+   * sandbox VM (e.g. its remote-SSH host, capturing command output)
+   * without importing or shelling out to a provider-specific binary.
+   */
+  provider: SandboxVMProvider;
 }
 
 /**

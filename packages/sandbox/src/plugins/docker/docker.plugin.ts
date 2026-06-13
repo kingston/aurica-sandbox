@@ -129,6 +129,7 @@ export const dockerPlugin: SandboxPlugin<
   typeof dockerProjectConfigSchema
 > = {
   name: 'docker',
+  description: 'Install rootless Docker inside the sandbox',
   projectConfigSchema: dockerProjectConfigSchema,
   userConfigSchema: undefined,
   initialize({ linuxUser }) {

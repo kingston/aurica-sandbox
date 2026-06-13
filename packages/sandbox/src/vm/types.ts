@@ -146,4 +146,11 @@ export interface SandboxVMProvider {
     argv: string[];
     env?: Record<string, string>;
   }) => Promise<number>;
+  /**
+   * The SSH host authority a remote-development client (VS Code / Cursor
+   * `--remote ssh-remote+<host>`) uses to reach `name`. Encodes the
+   * provider's SSH addressing — e.g. OrbStack exposes every machine at
+   * `<name>@orb`. Pure string construction; does not touch the VM.
+   */
+  remoteSshHost: (name: string) => string;
 }
