@@ -9,6 +9,7 @@ import { logger } from '#src/logger.js';
 import { resolvedProxyPort, runProxyProcess } from '#src/proxy/index.js';
 import {
   isPidAlive,
+  ProxyNotRunningError,
   readState,
   requireRunningProxy,
   signalProxyStop,
@@ -144,9 +145,9 @@ export function buildDaemonSpawn(options: ProxyRunOptions = {}): DaemonSpawn {
 }
 
 /**
- * Run the proxy in the foreground (today's `aurica-sandbox proxy` behavior):
- * boot it, then block forever so the process stays alive. SIGINT/SIGTERM are
- * handled inside `runProxyProcess` for a clean shutdown.
+ * Run the proxy in the foreground (`aurica-sandbox proxy run`): boot it, then
+ * block forever so the process stays alive. SIGINT/SIGTERM are handled inside
+ * `runProxyProcess` for a clean shutdown.
  */
 export async function runProxyRun(
   options: ProxyRunOptions = {},
@@ -379,4 +380,26 @@ export async function runProxyStop(
     if (state.proxy?.pid === pid) state.proxy = null;
   });
   logger.warn(`proxy did not stop cleanly; killed pid ${pid}`);
+}
+
+/** Options for {@link runProxyRestart}. */
+export interface ProxyRestartOptions
+  extends ProxyRunOptions, ProxyStopOptions {}
+
+/**
+ * Restart the proxy daemon: stop the running one (tolerating the case where
+ * none is up), then start a fresh background daemon. `verbose` carries into the
+ * new daemon. Use to pick up changes that a live-reload doesn't cover (e.g. a
+ * new CLI version after `update`).
+ */
+export async function runProxyRestart(
+  options: ProxyRestartOptions = {},
+): Promise<ProxyEndpoint> {
+  try {
+    await runProxyStop(options);
+  } catch (err) {
+    if (!(err instanceof ProxyNotRunningError)) throw err;
+    logger.info('proxy was not running; starting it');
+  }
+  return runProxyStart(options);
 }

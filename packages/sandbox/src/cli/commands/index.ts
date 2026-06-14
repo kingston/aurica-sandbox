@@ -7,6 +7,7 @@ export { runProxyLog, runProxyTail } from './proxy-log.js';
 export {
   buildDaemonSpawn,
   ensureProxyRunning,
+  runProxyRestart,
   runProxyRun,
   runProxyStart,
   runProxyStop,

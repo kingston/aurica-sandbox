@@ -12,6 +12,7 @@ import { runInit } from '#src/cli/commands/init.js';
 import { runList } from '#src/cli/commands/list.js';
 import { runProxyLog, runProxyTail } from '#src/cli/commands/proxy-log.js';
 import {
+  runProxyRestart,
   runProxyRun,
   runProxyStart,
   runProxyStop,
@@ -84,6 +85,14 @@ proxy
   });
 
 proxy
+  .command('restart')
+  .description('restart the background proxy daemon')
+  .option('-v, --verbose', verboseFlag, false)
+  .action(async (opts: { verbose: boolean }) => {
+    await runProxyRestart({ verbose: opts.verbose });
+  });
+
+proxy
   .command('log')
   .description('print the tail of the proxy log and exit')
   .option('-n, --lines <n>', 'number of trailing lines to show', '100')
@@ -97,13 +106,6 @@ proxy
   .option('-n, --lines <n>', 'number of trailing lines to show first', '100')
   .action(async (opts: { lines: string }) => {
     await runProxyTail({ lines: Number(opts.lines) });
-  });
-
-// Bare `aurica-sandbox proxy` keeps running in the foreground for back-compat.
-proxy
-  .option('-v, --verbose', verboseFlag, false)
-  .action(async (opts: { verbose: boolean }) => {
-    await runProxyRun({ verbose: opts.verbose });
   });
 
 program

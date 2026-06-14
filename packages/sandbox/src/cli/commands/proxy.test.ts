@@ -5,6 +5,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 
+import { Command } from 'commander';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
@@ -101,6 +102,36 @@ describe('buildDaemonSpawn', () => {
     expect(recipe.options.detached).toBe(true);
     expect(recipe.options.cwd).toBe(process.cwd());
     expect(recipe.options.env).toBe(process.env);
+  });
+});
+
+// Mirrors the proxy command tree in `bin/aurica-sandbox.ts`. Guards the
+// regression where a `--verbose` option on the parent `proxy` command shadowed
+// the identically-named option on `proxy start`, so `proxy start --verbose`
+// parsed to `verbose: false` and the daemon never ran in verbose mode. The
+// parent must NOT declare `--verbose`.
+function parseProxy(argv: string[]): { verbose: boolean } {
+  let captured = { verbose: false };
+  const program = new Command();
+  const proxy = program.command('proxy');
+  proxy
+    .command('start')
+    .option('-v, --verbose', '', false)
+    .action((opts: { verbose: boolean }) => {
+      captured = opts;
+    });
+  program.parse(['node', 'aurica-sandbox', ...argv]);
+  return captured;
+}
+
+describe('proxy CLI verbose parsing', () => {
+  it('binds --verbose to the start subcommand', () => {
+    expect(parseProxy(['proxy', 'start', '--verbose']).verbose).toBe(true);
+    expect(parseProxy(['proxy', 'start', '-v']).verbose).toBe(true);
+  });
+
+  it('defaults verbose to false without the flag', () => {
+    expect(parseProxy(['proxy', 'start']).verbose).toBe(false);
   });
 });
 
