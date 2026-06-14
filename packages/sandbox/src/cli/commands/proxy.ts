@@ -145,9 +145,9 @@ export function buildDaemonSpawn(options: ProxyRunOptions = {}): DaemonSpawn {
 }
 
 /**
- * Run the proxy in the foreground (today's `aurica-sandbox proxy` behavior):
- * boot it, then block forever so the process stays alive. SIGINT/SIGTERM are
- * handled inside `runProxyProcess` for a clean shutdown.
+ * Run the proxy in the foreground (`aurica-sandbox proxy run`): boot it, then
+ * block forever so the process stays alive. SIGINT/SIGTERM are handled inside
+ * `runProxyProcess` for a clean shutdown.
  */
 export async function runProxyRun(
   options: ProxyRunOptions = {},

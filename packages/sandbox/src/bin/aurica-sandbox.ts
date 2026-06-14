@@ -108,13 +108,6 @@ proxy
     await runProxyTail({ lines: Number(opts.lines) });
   });
 
-// Bare `aurica-sandbox proxy` keeps running in the foreground for back-compat.
-proxy
-  .option('-v, --verbose', verboseFlag, false)
-  .action(async (opts: { verbose: boolean }) => {
-    await runProxyRun({ verbose: opts.verbose });
-  });
-
 program
   .command('doctor')
   .description(
