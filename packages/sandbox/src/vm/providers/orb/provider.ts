@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type {
   CreateVMOptions,
   HostBridgeIp,
+  ProviderHealth,
   SandboxVM,
   SandboxVMProvider,
   VMExec,
@@ -77,6 +78,31 @@ export function recordToSandboxVM(
  * synchronously to the binary and surface its non-zero exits as `ExecaError`s.
  */
 export const orbProvider: SandboxVMProvider = {
+  displayName: 'OrbStack',
+
+  /**
+   * Probe OrbStack by running `orbctl list`. `ENOENT` means the binary isn't
+   * on `PATH` (not installed); any other failure means it's installed but the
+   * daemon isn't reachable (not running).
+   */
+  async checkHealth(): Promise<ProviderHealth> {
+    try {
+      await orbctlText('list', '--format', 'json');
+      return { status: 'ok', detail: 'installed, running' };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        return {
+          status: 'not-installed',
+          hint: 'Install OrbStack from https://orbstack.dev.',
+        };
+      }
+      return {
+        status: 'not-running',
+        hint: 'Start OrbStack (open the app or run `orb start`).',
+      };
+    }
+  },
+
   /**
    * Create a new isolated OrbStack machine. Lifecycle only — provisioning
    * is run separately by the orchestrator in `vm/init/run-init.ts` after

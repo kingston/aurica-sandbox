@@ -18,8 +18,8 @@ import { ensureProxyRunning } from './proxy.js';
  *
  * When `nameArg` is omitted, targets the project's primary sandbox.
  *
- * Calls `orbctl start`, polls for an IPv4, then updates state to
- * `'running'` with the fresh IP and signals the proxy to reload its
+ * Starts the VM via the active provider, polls for an IPv4, then updates
+ * state to `'running'` with the fresh IP and signals the proxy to reload its
  * allowlist.
  */
 export async function runStart(

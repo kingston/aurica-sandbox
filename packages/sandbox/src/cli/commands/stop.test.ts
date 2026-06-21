@@ -42,7 +42,7 @@ describe('runStop', () => {
     await fs.rm(dir, { recursive: true, force: true });
   });
 
-  it('flips status to stopped, clears IP, and calls orbctl stop', async () => {
+  it("flips status to stopped, clears IP, and calls the provider's stopVM", async () => {
     await withState((s) => {
       s.sandboxes.a = { ...sampleSandbox };
     });

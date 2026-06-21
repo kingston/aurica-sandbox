@@ -81,7 +81,37 @@ export interface HostBridgeIp {
   source: string;
 }
 
+/**
+ * Outcome of {@link SandboxVMProvider.checkHealth}: whether the provider's
+ * backend is usable, plus optional remediation. Deliberately neutral — it
+ * carries no CLI-layer types so the provider stays free of `cli/` imports.
+ */
+export interface ProviderHealth {
+  /**
+   * `ok` — the backend is installed and reachable. `not-installed` — the
+   * provider's binary/runtime is absent. `not-running` — it's installed but
+   * the daemon/service isn't reachable.
+   */
+  status: 'ok' | 'not-installed' | 'not-running';
+  /** One-line resolved fact (e.g. `"installed, running"`). */
+  detail?: string;
+  /** Remediation shown to the user on a non-`ok` status. */
+  hint?: string;
+}
+
 export interface SandboxVMProvider {
+  /**
+   * Human-facing name of the backend this provider drives (e.g. `"OrbStack"`).
+   * Used by host-only commands like `doctor` to label provider checks without
+   * hard-coding the backend, keeping those commands provider-agnostic.
+   */
+  displayName: string;
+  /**
+   * Probe whether the provider's backend is installed and reachable. Must not
+   * throw — failures are reported as a non-`ok` {@link ProviderHealth}. Used
+   * by `doctor` to render a provider check.
+   */
+  checkHealth: () => Promise<ProviderHealth>;
   createVM: (options: CreateVMOptions) => Promise<SandboxVM>;
   /**
    * Clone an existing stopped VM into a new VM with the given name. The
