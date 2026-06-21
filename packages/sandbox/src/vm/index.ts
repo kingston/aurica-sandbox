@@ -14,6 +14,7 @@ export const defaultProvider: SandboxVMProvider = orbProvider;
 export type {
   CreateVMOptions,
   HostBridgeIp,
+  ProviderHealth,
   SandboxVM,
   SandboxVMProvider,
   VMExec,

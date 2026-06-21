@@ -21,9 +21,9 @@ import { waitForIp } from '#src/vm/wait-for-ip.js';
 import { ensureProxyRunning } from './proxy.js';
 
 /**
- * Recognise orbctl's "machine already exists" error so we can surface a
- * clear adoption message instead of a generic failure. orbctl's exact
- * wording isn't part of any contract, so we match loosely on key tokens.
+ * Recognise the provider's "machine already exists" error so we can surface a
+ * clear adoption message instead of a generic failure. The exact wording isn't
+ * part of any provider contract, so we match loosely on key tokens.
  */
 function isAlreadyExistsError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
@@ -31,10 +31,10 @@ function isAlreadyExistsError(err: unknown): boolean {
 }
 
 /**
- * Best-effort check for whether an OrbStack VM with this name already
- * exists. Treats any error from `infoVM` as "doesn't exist" — orbctl's
- * not-found error messages aren't a stable contract, and treating an
- * unrelated failure as "exists" would block a legitimate create.
+ * Best-effort check for whether a VM with this name already exists. Treats
+ * any error from `infoVM` as "doesn't exist" — providers' not-found error
+ * messages aren't a stable contract, and treating an unrelated failure as
+ * "exists" would block a legitimate create.
  */
 export async function vmExists(name: string): Promise<boolean> {
   try {
@@ -46,9 +46,9 @@ export async function vmExists(name: string): Promise<boolean> {
 }
 
 /**
- * Destroy any existing OrbStack VM with this name and clear its state
- * entry. Used by `rebuild` (and other callers that want to ensure a
- * clean slate before `createVM`). No-ops if no VM exists.
+ * Destroy any existing VM with this name and clear its state entry. Used by
+ * `rebuild` (and other callers that want to ensure a clean slate before
+ * `createVM`). No-ops if no VM exists.
  */
 export async function destroyIfExists(name: string): Promise<void> {
   if (!(await vmExists(name))) return;
@@ -87,9 +87,9 @@ export async function destroyIfExists(name: string): Promise<void> {
  *
  * Pass `stopped: true` to stop the VM after init instead — the "build a base
  * image to fork from" workflow, where the primary is a template rather than a
- * working sandbox. `orbctl clone` snapshots a running source and restores it,
- * so `fork` works against a running primary too; `stopped` is purely an
- * optimization for repeated forking.
+ * working sandbox. The provider's clone snapshots a running source and
+ * restores it, so `fork` works against a running primary too; `stopped` is
+ * purely an optimization for repeated forking.
  *
  * On init failure: record `status: 'failed-init'` and rethrow. The VM is
  * left in place for inspection; the caller can run `aurica-sandbox
@@ -112,7 +112,7 @@ export async function runCreate(
   // standing up a machine we're about to throw away.
   const fileCopies = await resolveFileCopies(projectDir, config.files);
 
-  // Same fail-fast treatment for `mounts[]` — orbctl only honors `--mount`
+  // Same fail-fast treatment for `mounts[]` — providers only honor mounts
   // at create time, so a bad path must be caught before `createVM`.
   const mounts = await resolveMounts(projectDir, config.mounts);
 

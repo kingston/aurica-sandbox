@@ -10,6 +10,7 @@ import { resolvedProxyPort } from '#src/proxy/index.js';
 import { isPidAlive, readState } from '#src/state/index.js';
 import { errorMessage } from '#src/utils/error-message.js';
 import { pathExists } from '#src/utils/path-exists.js';
+import { defaultProvider, type ProviderHealth } from '#src/vm/index.js';
 import { isPlatformSupported } from '#src/vm/platform.js';
 
 /** Outcome of a single {@link Check}: ok, non-blocking warning, or blocker. */
@@ -17,7 +18,7 @@ export type CheckStatus = 'pass' | 'warn' | 'fail';
 
 /** Result of one prerequisite check rendered by {@link runDoctor}. */
 export interface Check {
-  /** Short label, e.g. `"OrbStack running"`. */
+  /** Short label, e.g. `"Proxy"` or the provider's display name. */
   name: string;
   /** Whether the check passed, warned, or failed. */
   status: CheckStatus;
@@ -40,25 +41,28 @@ export function summaryExitCode(checks: Check[]): number {
 }
 
 /**
- * Classify an error from the `orbctl list` probe into the OrbStack check.
- * `ENOENT` means the binary isn't on PATH (not installed); any other failure
- * means it's installed but the daemon isn't reachable (not running).
+ * Map a provider's neutral {@link ProviderHealth} onto a {@link Check}. The
+ * label and remediation come from the provider, so this stays free of any
+ * backend-specific naming.
  */
-export function orbctlErrorToCheck(err: unknown): Check {
-  if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+export function providerHealthToCheck(
+  displayName: string,
+  health: ProviderHealth,
+): Check {
+  if (health.status === 'ok') {
     return {
-      name: 'OrbStack',
-      status: 'fail',
-      detail: 'not installed',
-      hint: 'Install OrbStack from https://orbstack.dev.',
+      name: displayName,
+      status: 'pass',
+      detail: health.detail ?? 'installed, running',
     };
   }
-  return {
-    name: 'OrbStack',
+  const check: Check = {
+    name: displayName,
     status: 'fail',
-    detail: 'not running',
-    hint: 'Start OrbStack (open the app or run `orb start`).',
+    detail: health.detail ?? health.status.replace('-', ' '),
   };
+  if (health.hint) check.hint = health.hint;
+  return check;
 }
 
 /** True if `port` on loopback already has something listening. */
@@ -76,7 +80,7 @@ async function portInUse(port: number): Promise<boolean> {
   });
 }
 
-/** Platform must be macOS — OrbStack runs there only. */
+/** The host platform must be one the active provider supports. */
 function checkPlatform(): Check {
   if (isPlatformSupported()) {
     return { name: 'Platform', status: 'pass', detail: process.platform };
@@ -85,18 +89,14 @@ function checkPlatform(): Check {
     name: 'Platform',
     status: 'fail',
     detail: process.platform,
-    hint: 'OrbStack and @aurica/sandbox require macOS.',
+    hint: `${defaultProvider.displayName} and @aurica/sandbox require macOS.`,
   };
 }
 
-/** OrbStack must be installed and its daemon running. */
-async function checkOrbStack(): Promise<Check> {
-  try {
-    await execa('orbctl', ['list', '--format', 'json']);
-    return { name: 'OrbStack', status: 'pass', detail: 'installed, running' };
-  } catch (err) {
-    return orbctlErrorToCheck(err);
-  }
+/** The active provider's backend must be installed and reachable. */
+async function checkProvider(): Promise<Check> {
+  const health = await defaultProvider.checkHealth();
+  return providerHealthToCheck(defaultProvider.displayName, health);
 }
 
 /** Whether a tracked proxy daemon is live. */
@@ -206,7 +206,7 @@ async function checkGhCli(): Promise<Check> {
 export async function runDoctor(projectDir: string): Promise<number> {
   const checks: Check[] = [
     checkPlatform(),
-    await checkOrbStack(),
+    await checkProvider(),
     await checkProxy(),
     await checkProxyPort(),
     await checkCA(),

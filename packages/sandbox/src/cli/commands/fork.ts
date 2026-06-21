@@ -36,8 +36,8 @@ export function nextConcurrencyIndex(
 
 /**
  * Clone the project's primary VM into a new running fork. The primary may be
- * running or stopped — `orbctl clone` snapshots the source and restores it to
- * its prior state, so forking never disturbs a running primary's session.
+ * running or stopped — the provider's clone snapshots the source and restores
+ * it to its prior state, so forking never disturbs a running primary's session.
  *
  * Fast path — skips the full init pipeline. The fork inherits the primary's
  * entire disk state (OS, tools, proxy config, baked credentials) and its
