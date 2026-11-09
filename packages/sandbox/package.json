@@ -34,25 +34,25 @@
   },
   "dependencies": {
     "@inquirer/prompts": "8.5.2",
-    "@modelcontextprotocol/sdk": "1.29.0",
+    "@modelcontextprotocol/sdk": "1.32.2",
     "chokidar": "5.0.0",
     "commander": "14.0.3",
     "consola": "3.4.2",
     "execa": "9.6.1",
-    "js-yaml": "4.1.1",
-    "mockttp": "4.3.1",
+    "js-yaml": "4.3.2",
+    "mockttp": "4.6.5",
     "open": "11.0.0",
     "ora": "9.4.0",
     "proper-lockfile": "4.1.2",
-    "zod": "4.3.6"
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@types/js-yaml": "4.0.9",
     "@types/proper-lockfile": "4.1.4",
-    "@vitest/coverage-v8": "4.1.5",
+    "@vitest/coverage-v8": "4.1.12",
     "memfs": "4.57.3",
     "typescript": "^6.0.3",
-    "vitest": "4.1.5"
+    "vitest": "4.1.12"
   },
   "engines": {
     "node": ">=22",
