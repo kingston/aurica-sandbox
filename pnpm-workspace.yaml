@@ -27,4 +27,5 @@ onlyBuiltDependencies:
   - esbuild
 
 allowBuilds:
+  tls-impersonate: false
   esbuild: false

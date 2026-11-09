@@ -293,7 +293,7 @@ Inside the sandbox:
 - `search_pull_requests({ owner: "acme", q: "..." })` → succeeds.
 - `search_pull_requests({ owner: "other-org", q: "..." })` →
   returns a structured error: `tool search_pull_requests call
-denied: argument "owner" must equal "acme" (got "other-org")`.
+  denied: argument "owner" must equal "acme" (got "other-org")`.
 - `create_issue(...)` → blocked (not in any policy, default is
   block): `tool create_issue is not allowed for this sandbox`.
 
@@ -401,8 +401,8 @@ host.
 **`mcp login` fails with `static bearer auth … \`mcp login\` only
 applies to oauth upstreams`.**
 You're trying to run the OAuth dance against a `bearer`-auth
-upstream. Either change the upstream to `auth: { type: "oauth" }` or
-skip `mcp login` — bearer upstreams don't need it.
+upstream. Either change the upstream to `auth: { type: "oauth" }`or
+skip`mcp login` — bearer upstreams don't need it.
 
 **Project upstream silently isn't taking effect.**
 Look in the proxy log for a warning like `upstream "github" defined
